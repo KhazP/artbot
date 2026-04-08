@@ -6,6 +6,7 @@ import { logger } from "@artbot/observability";
 import { dedupeRecords, FxRateProvider, normalizeRecordCurrencies, scoreRecord } from "@artbot/normalization";
 import { renderMarkdownReport, writeJsonFile } from "@artbot/report-generation";
 import { planSources, SourceRegistry } from "@artbot/source-registry";
+import type { SourceCandidate } from "@artbot/source-adapters";
 import { ArtbotStorage } from "@artbot/storage";
 import type { PriceRecord, RunEntity, RunSummary, SourceAccessStatus, SourceAttempt } from "@artbot/shared-types";
 import { buildValuation, rankComparables } from "@artbot/valuation";
@@ -24,6 +25,7 @@ export class ResearchOrchestrator {
   private readonly minValuationComps: number;
   private readonly modelCheapDefault: string;
   private readonly modelCheapFallback: string;
+  private readonly maxDiscoveredCandidatesPerSource: number;
 
   constructor(private readonly storage: ArtbotStorage, options: OrchestratorOptions = {}) {
     this.registry = new SourceRegistry();
@@ -33,6 +35,8 @@ export class ResearchOrchestrator {
     this.minValuationComps = options.minValuationComps ?? 5;
     this.modelCheapDefault = options.modelCheapDefault ?? process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite";
     this.modelCheapFallback = options.modelCheapFallback ?? process.env.MODEL_CHEAP_FALLBACK ?? "gemini-2.5-flash-lite";
+    const maxDiscovered = Number(process.env.DISCOVERY_MAX_CANDIDATES_PER_SOURCE ?? 24);
+    this.maxDiscoveredCandidatesPerSource = Number.isFinite(maxDiscovered) ? Math.max(1, maxDiscovered) : 24;
   }
 
   public async processRun(run: RunEntity): Promise<void> {
@@ -53,9 +57,20 @@ export class ResearchOrchestrator {
     const attempts: SourceAttempt[] = [];
     const candidateRecords: PriceRecord[] = [];
     const gaps: string[] = [];
+    const sourceCandidateBreakdown: Record<string, number> = {};
+    let discoveredCandidates = 0;
+    let acceptedFromDiscovery = 0;
 
     for (const planned of plannedSources) {
-      for (const candidate of planned.candidates) {
+      const sourceName = planned.adapter.sourceName;
+      const queue: SourceCandidate[] = [...planned.candidates];
+      const seen = new Set(queue.map((candidate) => candidate.url));
+      sourceCandidateBreakdown[sourceName] = queue.length;
+      discoveredCandidates += queue.filter((candidate) => candidate.provenance !== "seed").length;
+
+      while (queue.length > 0) {
+        const candidate = queue.shift() as SourceCandidate;
+
         try {
           const result = await planned.adapter.extract(candidate, {
             runId: run.id,
@@ -65,7 +80,24 @@ export class ResearchOrchestrator {
             evidenceDir
           });
 
-          if (result.needsBrowserVerification) {
+          if (result.discoveredCandidates && result.discoveredCandidates.length > 0) {
+            for (const discoveredCandidate of result.discoveredCandidates) {
+              if (seen.has(discoveredCandidate.url)) {
+                continue;
+              }
+              if (sourceCandidateBreakdown[sourceName] >= this.maxDiscoveredCandidatesPerSource) {
+                break;
+              }
+
+              seen.add(discoveredCandidate.url);
+              queue.push(discoveredCandidate);
+              sourceCandidateBreakdown[sourceName] += 1;
+              discoveredCandidates += 1;
+            }
+          }
+
+          const mustCaptureAcceptedEvidence = Boolean(result.record && result.attempt.accepted);
+          if (result.needsBrowserVerification || mustCaptureAcceptedEvidence) {
             const browserCapture = await this.browserClient.withRetries(
               () =>
                 this.browserClient.capture({
@@ -74,7 +106,8 @@ export class ResearchOrchestrator {
                   url: candidate.url,
                   runId: run.id,
                   evidenceDir,
-                  accessContext: planned.accessContext
+                  accessContext: planned.accessContext,
+                  captureHeavyEvidence: this.shouldCaptureHeavyEvidence(result)
                 }),
               3,
               1_000,
@@ -85,6 +118,8 @@ export class ResearchOrchestrator {
             result.attempt.pre_auth_screenshot_path = browserCapture.preAuthScreenshotPath;
             result.attempt.post_auth_screenshot_path = browserCapture.postAuthScreenshotPath;
             result.attempt.raw_snapshot_path = browserCapture.rawSnapshotPath;
+            result.attempt.trace_path = browserCapture.tracePath;
+            result.attempt.har_path = browserCapture.harPath;
             result.attempt.canonical_url = browserCapture.finalUrl;
             result.attempt.model_used = browserCapture.modelUsed;
 
@@ -122,6 +157,9 @@ export class ResearchOrchestrator {
           if (result.record && result.attempt.accepted) {
             const normalized = this.normalizeRecord(result.record);
             candidateRecords.push(normalized);
+            if (candidate.provenance !== "seed") {
+              acceptedFromDiscovery += 1;
+            }
           }
         } catch (error) {
           const failureReason = error instanceof Error ? error.message : String(error);
@@ -137,10 +175,15 @@ export class ResearchOrchestrator {
             access_reason: planned.accessContext.accessReason ?? "Unexpected adapter failure.",
             blocker_reason: failureReason,
             extracted_fields: {},
+            discovery_provenance: candidate.provenance,
+            discovery_score: candidate.score,
+            discovered_from_url: candidate.discoveredFromUrl ?? null,
             screenshot_path: null,
             pre_auth_screenshot_path: null,
             post_auth_screenshot_path: null,
             raw_snapshot_path: null,
+            trace_path: null,
+            har_path: null,
             fetched_at: new Date().toISOString(),
             parser_used: "adapter-error",
             model_used: null,
@@ -166,7 +209,15 @@ export class ResearchOrchestrator {
     }
 
     const valuation = buildValuation(rankedRecords, this.minValuationComps);
-    const summary = this.buildSummary(run.id, rankedRecords.length, attempts, valuation.generated);
+    const summary = this.buildSummary(
+      run.id,
+      rankedRecords.length,
+      attempts,
+      valuation.generated,
+      discoveredCandidates,
+      acceptedFromDiscovery,
+      sourceCandidateBreakdown
+    );
 
     const resultsPath = path.join(runRoot, "results.json");
     const reportPath = path.join(runRoot, "report.md");
@@ -209,11 +260,32 @@ export class ResearchOrchestrator {
     };
   }
 
+  private shouldCaptureHeavyEvidence(result: { attempt: SourceAttempt; record: PriceRecord | null }): boolean {
+    const mode = (process.env.EVIDENCE_TRACE_MODE ?? "selective").toLowerCase();
+    if (mode === "always") {
+      return true;
+    }
+    if (mode === "off" || mode === "none") {
+      return false;
+    }
+
+    if (!result.attempt.accepted) {
+      return true;
+    }
+    if (!result.record) {
+      return true;
+    }
+    return result.record.overall_confidence < 0.6;
+  }
+
   private buildSummary(
     runId: string,
     acceptedRecords: number,
     attempts: SourceAttempt[],
-    valuationGenerated: boolean
+    valuationGenerated: boolean,
+    discoveredCandidates: number,
+    acceptedFromDiscovery: number,
+    sourceCandidateBreakdown: Record<string, number>
   ): RunSummary {
     const sourceStatusBreakdown: Record<SourceAccessStatus, number> = {
       public_access: 0,
@@ -239,6 +311,9 @@ export class ResearchOrchestrator {
       total_records: attempts.length,
       accepted_records: acceptedRecords,
       rejected_candidates: attempts.filter((attempt) => !attempt.accepted).length,
+      discovered_candidates: discoveredCandidates,
+      accepted_from_discovery: acceptedFromDiscovery,
+      source_candidate_breakdown: sourceCandidateBreakdown,
       source_status_breakdown: sourceStatusBreakdown,
       auth_mode_breakdown: authModeBreakdown,
       valuation_generated: valuationGenerated,
