@@ -19,6 +19,12 @@
     "total_records": 3,
     "accepted_records": 2,
     "rejected_candidates": 1,
+    "discovered_candidates": 4,
+    "accepted_from_discovery": 1,
+    "source_candidate_breakdown": {
+      "Artam Auction Records": 2,
+      "Muzayede App Platform": 3
+    },
     "source_status_breakdown": {
       "public_access": 2,
       "auth_required": 0,

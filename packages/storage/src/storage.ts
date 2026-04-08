@@ -118,6 +118,31 @@ export class ArtbotStorage {
     return rows.map((row) => this.mapRun(row));
   }
 
+  public listRuns(limit = 20, status?: RunStatus): RunEntity[] {
+    const cappedLimit = Math.max(1, Math.min(limit, 200));
+
+    const rows = status
+      ? (this.db
+          .prepare(
+            `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+             FROM runs
+             WHERE status = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`
+          )
+          .all(status, cappedLimit) as unknown as RunRow[])
+      : (this.db
+          .prepare(
+            `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+             FROM runs
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`
+          )
+          .all(cappedLimit) as unknown as RunRow[]);
+
+    return rows.map((row) => this.mapRun(row));
+  }
+
   public reserveRun(runId: string): boolean {
     const now = new Date().toISOString();
     const result = this.db

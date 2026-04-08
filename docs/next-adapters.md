@@ -1,17 +1,17 @@
 # Next-Priority Adapter Roadmap
 
 ## Priority 1 (Turkey Auction Depth)
-1. `antikasa-lot-adapter`
-- Goal: lot-level extraction of realized/estimate fields from Antik A.Ş.
-- Acceptance: parse at least lot number, sale date, and realized/estimate for stable public pages.
+1. `muzayedeapp-venue-expansion`
+- Goal: add venue-specific route templates for known Müzayede-powered houses discovered in production logs.
+- Acceptance: improved lot discovery yield with stable bounded candidate expansion.
 
-2. `lefevre-auction-adapter` (if public lot pages remain stable)
+2. `bayrak-and-turel-hardening`
+- Goal: improve Bayrak/Turel parser stability on additional listing and lot templates.
+- Acceptance: lower unknown-rate and no semantic regressions in inquiry-only classification.
+
+3. `lefevre-auction-adapter` (if public lot pages remain stable)
 - Goal: capture modern/contemporary Turkish lots and estimate/result fields.
 - Acceptance: successful status + evidence capture on fixture pages.
-
-3. `istanbul-muzayede-generic-adapter`
-- Goal: expand Turkish regional venue coverage using reusable lot/list templates.
-- Acceptance: no false merges; status classification remains correct.
 
 ## Priority 2 (International Comp Reliability)
 4. `invaluable-lot-detail-adapter`
@@ -23,11 +23,15 @@
 - Acceptance: robust blocked/auth handling + no fabricated fields.
 
 ## Priority 3 (Licensed and Authenticated Depth)
-6. `artsy-licensed-connector`
+6. `sanatfiyat-licensed-hardening`
+- Goal: source-specific parsing improvements with stronger lot normalization and provenance notes.
+- Acceptance: reduced unknown/low-confidence rate on licensed fixtures and real runs.
+
+7. `artsy-licensed-connector`
 - Goal: authenticated query path when operator credentials are lawful and available.
 - Acceptance: proper `auth_required`/`licensed_access` state transitions and session reuse.
 
-7. `askart-licensed-connector`
+8. `askart-licensed-connector`
 - Goal: licensed lookup path with clear provenance/evidence logs.
 - Acceptance: no numeric extraction when page is hidden/inquiry-only.
 

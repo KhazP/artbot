@@ -8,6 +8,7 @@ import {
   sourceStatusList
 } from "@artbot/shared-types";
 import { ArtbotStorage } from "@artbot/storage";
+import { z } from "zod";
 
 const port = Number(process.env.PORT ?? 4000);
 const apiKey = process.env.ARTBOT_API_KEY;
@@ -18,6 +19,11 @@ const storage = new ArtbotStorage(dbPath, runsRoot);
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
+
+const runsQuerySchema = z.object({
+  status: z.enum(["pending", "running", "completed", "failed"]).optional(),
+  limit: z.coerce.number().int().positive().max(200).optional()
+});
 
 app.addHook("preHandler", async (request, reply) => {
   if (!apiKey) return;
@@ -54,6 +60,18 @@ app.post("/research/work", async (request, reply) => {
   return reply.status(202).send({ runId: run.id, status: run.status });
 });
 
+app.get("/runs", async (request, reply) => {
+  const parsed = runsQuerySchema.safeParse(request.query);
+  if (!parsed.success) {
+    return reply.status(400).send({ error: parsed.error.flatten() });
+  }
+
+  const runs = storage.listRuns(parsed.data.limit ?? 20, parsed.data.status);
+  return {
+    runs
+  };
+});
+
 app.get("/runs/:id", async (request, reply) => {
   const id = (request.params as { id: string }).id;
   const details = storage.getRunDetails(id);
@@ -67,6 +85,14 @@ app.get("/runs/:id", async (request, reply) => {
     total_records: details.attempts.length,
     accepted_records: details.records.length,
     rejected_candidates: details.attempts.filter((attempt) => !attempt.accepted).length,
+    discovered_candidates: details.attempts.filter((attempt) => attempt.discovery_provenance && attempt.discovery_provenance !== "seed").length,
+    accepted_from_discovery: details.attempts.filter(
+      (attempt) => attempt.accepted && attempt.discovery_provenance && attempt.discovery_provenance !== "seed"
+    ).length,
+    source_candidate_breakdown: details.attempts.reduce<Record<string, number>>((acc, attempt) => {
+      acc[attempt.source_name] = (acc[attempt.source_name] ?? 0) + 1;
+      return acc;
+    }, {}),
     source_status_breakdown: Object.fromEntries(
       sourceStatusList.map((status) => [status, details.sourceStatusBreakdown[status]])
     ) as RunSummary["source_status_breakdown"],

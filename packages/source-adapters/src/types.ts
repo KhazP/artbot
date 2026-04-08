@@ -9,9 +9,19 @@ import type {
   VenueType
 } from "@artbot/shared-types";
 
+export type DiscoveryProvenance =
+  | "seed"
+  | "query_variant"
+  | "listing_expansion"
+  | "signature_expansion"
+  | "direct_lot";
+
 export interface SourceCandidate {
   url: string;
   sourcePageType: SourcePageType;
+  provenance: DiscoveryProvenance;
+  score: number;
+  discoveredFromUrl?: string | null;
 }
 
 export interface AdapterExtractionContext {
@@ -26,6 +36,7 @@ export interface AdapterExtractionResult {
   attempt: SourceAttempt;
   record: PriceRecord | null;
   needsBrowserVerification: boolean;
+  discoveredCandidates?: SourceCandidate[];
 }
 
 export interface SourceAdapter {

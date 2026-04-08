@@ -25,7 +25,9 @@ function adapter(overrides: Partial<SourceAdapter> = {}): SourceAdapter {
     requiresAuth: false,
     requiresLicense: false,
     supportedAccessModes: ["anonymous", "authorized", "licensed"],
-    discoverCandidates: async () => [{ url: "https://example.com", sourcePageType: "price_db" }],
+    discoverCandidates: async () => [
+      { url: "https://example.com/search?q=artist", sourcePageType: "price_db", provenance: "seed", score: 0.9 }
+    ],
     extract: async () => {
       throw new Error("not used");
     },
@@ -37,6 +39,7 @@ describe("planSources", () => {
   it("keeps anonymous sources as public_access", async () => {
     const plans = await planSources(baseQuery, [adapter()], new AuthManager([]));
     expect(plans[0].accessContext.sourceAccessStatus).toBe("public_access");
+    expect(plans[0].candidates.length).toBeGreaterThan(0);
   });
 
   it("marks auth-required sources when credentials are absent", async () => {

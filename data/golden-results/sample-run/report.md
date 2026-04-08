@@ -4,8 +4,11 @@
 - Run ID: sample-run-001
 - Total accepted records: 2
 - Total rejected candidates: 1
+- Discovered candidates: 4
+- Accepted from discovery: 1
 - Source status breakdown: {"public_access":2,"auth_required":0,"licensed_access":0,"blocked":1,"price_hidden":0}
 - Auth mode breakdown: {"anonymous":2,"authorized":0,"licensed":0}
+- Source candidate breakdown: {"Artam Auction Records":2,"Muzayede App Platform":3}
 
 ## Valuation
 - Generated: false

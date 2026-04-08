@@ -19,6 +19,9 @@ export const runSummarySchema = z.object({
   total_records: z.number().int().nonnegative(),
   accepted_records: z.number().int().nonnegative(),
   rejected_candidates: z.number().int().nonnegative(),
+  discovered_candidates: z.number().int().nonnegative(),
+  accepted_from_discovery: z.number().int().nonnegative(),
+  source_candidate_breakdown: z.record(z.string(), z.number().int().nonnegative()),
   source_status_breakdown: z.record(
     z.enum(["public_access", "auth_required", "licensed_access", "blocked", "price_hidden"]),
     z.number().int().nonnegative()

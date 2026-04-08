@@ -5,12 +5,13 @@ Deliver a session-aware, evidence-first art price research system with determini
 
 ## Pipeline
 1. Search and source selection (`@artbot/source-registry`).
-2. Candidate extraction with cheap path (`@artbot/extraction` via Firecrawl if configured, else HTTP parser).
-3. Session-aware verification (`@artbot/browser-core` with cookie injection and persistent context).
-4. Access/status classification (`public_access`, `auth_required`, `licensed_access`, `blocked`, `price_hidden`).
-5. Normalization and dedupe (`@artbot/normalization`).
-6. Comparable ranking and valuation gate (`@artbot/valuation`).
-7. Output generation (`report.md`, `results.json`, evidence bundle).
+2. Light discovery expansion (query variants + bounded candidate queue + listing-to-lot expansion).
+3. Candidate extraction with cheap path (`@artbot/extraction` via Firecrawl if configured, else HTTP parser).
+4. Session-aware verification (`@artbot/browser-core` with cookie injection and persistent context).
+5. Access/status classification (`public_access`, `auth_required`, `licensed_access`, `blocked`, `price_hidden`).
+6. Normalization and dedupe (`@artbot/normalization`).
+7. Comparable ranking and valuation gate (`@artbot/valuation`).
+8. Output generation (`report.md`, `results.json`, evidence bundle).
 
 ## Runtime Components
 - `apps/api`: enqueue research jobs, expose run status.
@@ -34,6 +35,8 @@ Deliver a session-aware, evidence-first art price research system with determini
 ## Reliability Controls
 - Deterministic adapters first.
 - Browser retries with linear backoff.
+- Selective heavy evidence mode (`EVIDENCE_TRACE_MODE=selective`) captures Playwright trace/HAR for failed or low-confidence attempts.
+- Gemini schema-bound fallback is used only when deterministic parsing is insufficient.
 - Per-candidate evidence capture.
 - Structured status and blocker reasons for each source attempt.
 - No bypass/brute-force logic.

@@ -1,7 +1,9 @@
 import { GenericSourceAdapter } from "./generic-adapter.js";
+import { buildSpecializedAdapters } from "./specialized-adapters.js";
 
 export function buildSeedAdapters() {
   return [
+    ...buildSpecializedAdapters(),
     new GenericSourceAdapter({
       id: "artam-auction-records",
       sourceName: "Artam Auction Records",

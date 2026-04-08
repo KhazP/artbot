@@ -1,6 +1,7 @@
 import { AuthManager } from "@artbot/auth-manager";
 import type { AccessContext, ResearchQuery } from "@artbot/shared-types";
 import type { SourceAdapter, SourceCandidate } from "@artbot/source-adapters";
+import { buildDiscoveryConfigFromEnv, expandCandidatesLight } from "./discovery.js";
 
 export interface PlannedSource {
   adapter: SourceAdapter;
@@ -33,6 +34,7 @@ export async function planSources(
   adapters: SourceAdapter[],
   authManager: AuthManager
 ): Promise<PlannedSource[]> {
+  const discoveryConfig = buildDiscoveryConfigFromEnv();
   const sorted = sortSources(query, adapters);
   const planned: PlannedSource[] = [];
 
@@ -55,7 +57,15 @@ export async function planSources(
       accessContext.blockerReason = `Access mode ${accessContext.mode} is unsupported for adapter ${adapter.id}.`;
     }
 
-    const candidates = await adapter.discoverCandidates(query);
+    const rawCandidates = await adapter.discoverCandidates(query);
+    const normalizedSeeds: SourceCandidate[] = rawCandidates.map((candidate) => ({
+      ...candidate,
+      provenance: candidate.provenance ?? "seed",
+      score: candidate.score ?? 0.8,
+      discoveredFromUrl: candidate.discoveredFromUrl ?? null
+    }));
+
+    const candidates = expandCandidatesLight(normalizedSeeds, query, discoveryConfig);
     planned.push({ adapter, accessContext, candidates });
   }
 

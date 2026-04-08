@@ -10,6 +10,7 @@ export interface GenericParsedFields {
   currency: string | null;
   saleDate: string | null;
   priceHidden: boolean;
+  buyersPremiumIncluded: boolean | null;
 }
 
 function normalizeNumber(input: string): number | null {
@@ -63,10 +64,19 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
   const text = content.replace(/\s+/g, " ").trim();
   const currency = inferCurrency(text);
 
-  const lotMatch = text.match(/lot\s*[:#]?\s*([a-z0-9-]+)/i);
-  const estMatch = text.match(/estimate\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)\s*(?:-|to)\s*([\d.,\s₺$€A-Za-z]+)/i);
-  const realizedMatch = text.match(/(realized|sold for|satış fiyatı|hammer)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)/i);
-  const askMatch = text.match(/(price|fiyat)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)/i);
+  const lotMatch = text.match(/(?:lot|lot no|lot nr|lot#)\s*[:#]?\s*([a-z0-9-]+)/i);
+  const estMatch = text.match(
+    /(?:estimate|estimated|estimate range|tahmini|ekspertiz)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)\s*(?:-|to|–|—)\s*([\d.,\s₺$€A-Za-z]+)/i
+  );
+  const realizedMatch = text.match(
+    /(?:realized|sold for|satış fiyatı|satildi|satıldı|çekiç|cekic|hammer)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)/i
+  );
+  const premiumMatch = text.match(
+    /(?:buyers?\s*premium|buyer's premium|alıcı primi|alici primi)\s*(?:included|dahil|hariç|haric)?/i
+  );
+  const askMatch = text.match(
+    /(?:asking price|buy now|hemen al|price|fiyat)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)/i
+  );
 
   const inquiryOnly = /price on request|inquire|iletişime geçiniz|fiyat sorunuz/i.test(text);
 
@@ -74,6 +84,7 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
   let priceAmount: number | null = null;
   let estimateLow: number | null = null;
   let estimateHigh: number | null = null;
+  let buyersPremiumIncluded: boolean | null = null;
 
   if (estMatch) {
     priceType = "estimate";
@@ -82,11 +93,31 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
   }
 
   if (realizedMatch) {
-    priceType = /hammer/i.test(realizedMatch[1]) ? "hammer_price" : "realized_price";
-    priceAmount = normalizeNumber(realizedMatch[2]);
+    priceAmount = normalizeNumber(realizedMatch[1]);
+    const lowerText = text.toLowerCase();
+    if (/hammer|çekiç|cekic/.test(lowerText)) {
+      priceType = "hammer_price";
+    } else if (
+      /buyers?\s*premium|buyer's premium|alıcı primi|alici primi/.test(lowerText) &&
+      /(included|dahil)/.test(lowerText)
+    ) {
+      priceType = "realized_with_buyers_premium";
+      buyersPremiumIncluded = true;
+    } else {
+      priceType = "realized_price";
+    }
   } else if (askMatch && !inquiryOnly) {
     priceType = "asking_price";
-    priceAmount = normalizeNumber(askMatch[2]);
+    priceAmount = normalizeNumber(askMatch[1]);
+  }
+
+  if (premiumMatch && buyersPremiumIncluded === null) {
+    const premiumText = premiumMatch[0].toLowerCase();
+    if (premiumText.includes("hariç") || premiumText.includes("haric")) {
+      buyersPremiumIncluded = false;
+    } else if (premiumText.includes("included") || premiumText.includes("dahil")) {
+      buyersPremiumIncluded = true;
+    }
   }
 
   if (inquiryOnly) {
@@ -105,6 +136,7 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
     priceType,
     currency,
     saleDate: saleDateMatch ? saleDateMatch[1] : null,
-    priceHidden: inquiryOnly
+    priceHidden: inquiryOnly,
+    buyersPremiumIncluded
   };
 }

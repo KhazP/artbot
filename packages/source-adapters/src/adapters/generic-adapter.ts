@@ -107,7 +107,10 @@ export class GenericSourceAdapter implements SourceAdapter {
     return [
       {
         url,
-        sourcePageType: this.sourcePageType
+        sourcePageType: this.sourcePageType,
+        provenance: "seed",
+        score: 0.9,
+        discoveredFromUrl: null
       }
     ];
   }
@@ -144,10 +147,15 @@ export class GenericSourceAdapter implements SourceAdapter {
         access_reason: decision.accessReason,
         blocker_reason: decision.blockerReason,
         extracted_fields: {},
+        discovery_provenance: candidate.provenance,
+        discovery_score: candidate.score,
+        discovered_from_url: candidate.discoveredFromUrl ?? null,
         screenshot_path: null,
         pre_auth_screenshot_path: null,
         post_auth_screenshot_path: null,
         raw_snapshot_path: rawSnapshotPath,
+        trace_path: null,
+        har_path: null,
         fetched_at: fetchedAt,
         parser_used: "none",
         model_used: null,
@@ -207,7 +215,7 @@ export class GenericSourceAdapter implements SourceAdapter {
       currency: parsed.currency,
       normalized_price_try: null,
       normalized_price_usd: null,
-      buyers_premium_included: null,
+      buyers_premium_included: parsed.buyersPremiumIncluded,
       image_url: null,
       screenshot_path: null,
       raw_snapshot_path: rawSnapshotPath,
@@ -235,12 +243,18 @@ export class GenericSourceAdapter implements SourceAdapter {
         estimate_high: parsed.estimateHigh,
         price_type: parsed.priceType,
         price_amount: parsed.priceAmount,
-        currency: parsed.currency
+        currency: parsed.currency,
+        buyers_premium_included: parsed.buyersPremiumIncluded
       },
+      discovery_provenance: candidate.provenance,
+      discovery_score: candidate.score,
+      discovered_from_url: candidate.discoveredFromUrl ?? null,
       screenshot_path: null,
       pre_auth_screenshot_path: null,
       post_auth_screenshot_path: null,
       raw_snapshot_path: rawSnapshotPath,
+      trace_path: null,
+      har_path: null,
       fetched_at: fetchedAt,
       parser_used: extracted.parserUsed,
       model_used: null,

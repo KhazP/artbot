@@ -24,7 +24,8 @@ vi.mock("@artbot/extraction", () => {
       priceType: "realized_price",
       currency: "TRY",
       saleDate: "2026-01-01",
-      priceHidden: false
+      priceHidden: false,
+      buyersPremiumIncluded: null
     }))
   };
 });
@@ -69,7 +70,7 @@ describe("GenericSourceAdapter access handling", () => {
     });
 
     const result = await adapter.extract(
-      { url: "https://example.com/public", sourcePageType: "lot" },
+      { url: "https://example.com/public", sourcePageType: "lot", provenance: "seed", score: 0.9 },
       context("anonymous", "public_access")
     );
 
@@ -94,7 +95,7 @@ describe("GenericSourceAdapter access handling", () => {
     });
 
     const result = await adapter.extract(
-      { url: "https://example.com/auth", sourcePageType: "price_db" },
+      { url: "https://example.com/auth", sourcePageType: "price_db", provenance: "seed", score: 0.9 },
       context("anonymous", "auth_required")
     );
 
@@ -120,7 +121,7 @@ describe("GenericSourceAdapter access handling", () => {
     });
 
     const result = await adapter.extract(
-      { url: "https://example.com/auth", sourcePageType: "price_db" },
+      { url: "https://example.com/auth", sourcePageType: "price_db", provenance: "seed", score: 0.9 },
       context("authorized", "auth_required")
     );
 
@@ -147,7 +148,7 @@ describe("GenericSourceAdapter access handling", () => {
     });
 
     const result = await adapter.extract(
-      { url: "https://example.com/licensed", sourcePageType: "price_db" },
+      { url: "https://example.com/licensed", sourcePageType: "price_db", provenance: "seed", score: 0.9 },
       context("licensed", "licensed_access")
     );
 
@@ -173,7 +174,7 @@ describe("GenericSourceAdapter access handling", () => {
     });
 
     const result = await adapter.extract(
-      { url: "https://example.com/blocked", sourcePageType: "price_db" },
+      { url: "https://example.com/blocked", sourcePageType: "price_db", provenance: "seed", score: 0.9 },
       context("anonymous", "blocked")
     );
 

@@ -17,10 +17,17 @@ export const sourceAttemptSchema = z.object({
   access_reason: z.string().nullable(),
   blocker_reason: z.string().nullable(),
   extracted_fields: z.record(z.unknown()).default({}),
+  discovery_provenance: z
+    .enum(["seed", "query_variant", "listing_expansion", "signature_expansion", "direct_lot"])
+    .optional(),
+  discovery_score: z.number().min(0).max(1).nullable().optional(),
+  discovered_from_url: z.string().url().nullable().optional(),
   screenshot_path: z.string().nullable(),
   pre_auth_screenshot_path: z.string().nullable().optional(),
   post_auth_screenshot_path: z.string().nullable().optional(),
   raw_snapshot_path: z.string().nullable(),
+  trace_path: z.string().nullable().optional(),
+  har_path: z.string().nullable().optional(),
   fetched_at: z.string(),
   parser_used: z.string(),
   model_used: z.string().nullable(),

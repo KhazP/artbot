@@ -13,6 +13,7 @@ export interface BrowserCaptureInput {
   evidenceDir: string;
   accessContext: AccessContext;
   timeoutMs?: number;
+  captureHeavyEvidence?: boolean;
 }
 
 export interface BrowserCaptureResult {
@@ -21,6 +22,8 @@ export interface BrowserCaptureResult {
   preAuthScreenshotPath: string | null;
   postAuthScreenshotPath: string | null;
   rawSnapshotPath: string | null;
+  tracePath: string | null;
+  harPath: string | null;
   requiresAuthDetected: boolean;
   blockedDetected: boolean;
   modelUsed: string | null;
@@ -60,14 +63,20 @@ export class BrowserClient {
     const timeoutMs = input.timeoutMs ?? 45_000;
     const screenshotsDir = path.join(input.evidenceDir, "screenshots");
     const rawDir = path.join(input.evidenceDir, "raw");
+    const traceDir = path.join(input.evidenceDir, "traces");
+    const harDir = path.join(input.evidenceDir, "har");
     fs.mkdirSync(screenshotsDir, { recursive: true });
     fs.mkdirSync(rawDir, { recursive: true });
+    fs.mkdirSync(traceDir, { recursive: true });
+    fs.mkdirSync(harDir, { recursive: true });
 
     const stamp = Date.now();
     const screenshotPath = path.join(screenshotsDir, `${input.sourceName}-${stamp}.png`);
     const preAuthScreenshotPath = path.join(screenshotsDir, `${input.sourceName}-${stamp}-pre-auth.png`);
     const postAuthScreenshotPath = path.join(screenshotsDir, `${input.sourceName}-${stamp}-post-auth.png`);
     const rawSnapshotPath = path.join(rawDir, `${input.sourceName}-${stamp}.html`);
+    const tracePath = path.join(traceDir, `${input.sourceName}-${stamp}.zip`);
+    const harPath = path.join(harDir, `${input.sourceName}-${stamp}.har`);
 
     const sessionPath = this.authManager.ensureSessionDir(input.accessContext.profileId);
     const refreshDecision = this.authManager.shouldRefreshSession({
@@ -81,10 +90,24 @@ export class BrowserClient {
 
     const browser = await chromium.launch({ headless: true });
     let context: BrowserContext | null = null;
+    let traceStarted = false;
 
     try {
-      context = await this.newContext(browser, sessionPath);
+      context = await this.newContext(
+        browser,
+        sessionPath,
+        input.captureHeavyEvidence ? harPath : undefined
+      );
       await this.injectCookies(context, input.accessContext.cookieFile);
+
+      if (input.captureHeavyEvidence) {
+        await context.tracing.start({
+          screenshots: true,
+          snapshots: true,
+          sources: true
+        });
+        traceStarted = true;
+      }
 
       const page = await context.newPage();
       page.setDefaultTimeout(timeoutMs);
@@ -124,6 +147,11 @@ export class BrowserClient {
         await context.storageState({ path: sessionPath });
       }
 
+      if (input.captureHeavyEvidence) {
+        await context.tracing.stop({ path: tracePath });
+        traceStarted = false;
+      }
+
       const finalUrl = page.url();
       const requiresAuthDetected = containsAuthIndicators(html);
       const blockedDetected = containsBlockedIndicators(html);
@@ -134,12 +162,28 @@ export class BrowserClient {
         preAuthScreenshotPath: captureAuthCheckpoints ? preAuthScreenshotPath : null,
         postAuthScreenshotPath: captureAuthCheckpoints ? postAuthScreenshotPath : null,
         rawSnapshotPath,
+        tracePath: input.captureHeavyEvidence ? tracePath : null,
+        harPath: input.captureHeavyEvidence ? harPath : null,
         requiresAuthDetected,
         blockedDetected,
         modelUsed: null
       };
     } finally {
       if (context) {
+        if (input.captureHeavyEvidence && traceStarted) {
+          try {
+            await context.tracing.stop({ path: tracePath });
+          } catch (error) {
+            logger.warn("Failed to stop trace capture", {
+              traceId: input.traceId,
+              runId: input.runId,
+              source: input.sourceName,
+              stage: "browser_trace_stop",
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
+
         try {
           await context.close();
         } catch (error) {
@@ -197,12 +241,25 @@ export class BrowserClient {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  private async newContext(browser: Awaited<ReturnType<typeof chromium.launch>>, sessionPath?: string): Promise<BrowserContext> {
+  private async newContext(
+    browser: Awaited<ReturnType<typeof chromium.launch>>,
+    sessionPath?: string,
+    harPath?: string
+  ): Promise<BrowserContext> {
+    const contextOptions = harPath
+      ? {
+          recordHar: {
+            path: harPath,
+            mode: "minimal" as const
+          }
+        }
+      : {};
+
     if (sessionPath && fs.existsSync(sessionPath)) {
-      return browser.newContext({ storageState: sessionPath });
+      return browser.newContext({ storageState: sessionPath, ...contextOptions });
     }
 
-    return browser.newContext();
+    return browser.newContext(contextOptions);
   }
 
   private async injectCookies(context: BrowserContext, cookieFile?: string): Promise<void> {
@@ -303,6 +360,8 @@ export class BrowserClient {
         preAuthScreenshotPath: null,
         postAuthScreenshotPath: null,
         rawSnapshotPath,
+        tracePath: null,
+        harPath: null,
         requiresAuthDetected,
         blockedDetected,
         modelUsed: process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite"

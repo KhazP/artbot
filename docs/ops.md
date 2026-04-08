@@ -14,6 +14,11 @@ Copy `.env.example` to `.env` and set:
 - `RUNS_ROOT`
 - `FIRECRAWL_API_KEY` (optional)
 - `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` (optional)
+- `GEMINI_API_KEY` (optional; schema-bound fallback extraction only)
+- `DISCOVERY_MAX_CANDIDATES_PER_SOURCE`
+- `DISCOVERY_MAX_VARIANTS`
+- `DISCOVERY_DOMAIN_THROTTLE_PER_SOURCE`
+- `EVIDENCE_TRACE_MODE` (`selective` recommended)
 
 ## Auth Profiles
 Provide `AUTH_PROFILES_JSON` as JSON array:
@@ -27,10 +32,12 @@ Provide `AUTH_PROFILES_JSON` as JSON array:
     "cookieFile": "/secure/path/artsy-cookies.json"
   },
   {
-    "id": "askart-license",
+    "id": "sanatfiyat-license",
     "mode": "licensed",
-    "sourcePatterns": ["askart"],
-    "storageStatePath": "/secure/path/askart-state.json"
+    "sourcePatterns": ["sanatfiyat"],
+    "storageStatePath": "/secure/path/sanatfiyat-state.json",
+    "usernameEnv": "SANATFIYAT_USERNAME",
+    "passwordEnv": "SANATFIYAT_PASSWORD"
   }
 ]
 ```
@@ -41,8 +48,18 @@ Provide `AUTH_PROFILES_JSON` as JSON array:
 3. Worker: `pnpm --filter @artbot/worker start`
 
 ## CLI Usage
-- `pnpm --filter @artbot/cli dev -- research-artist --artist "Burhan Dogancay" --turkey-first`
-- `pnpm --filter @artbot/cli dev -- research-work --artist "Erol Akyavas" --title "Kusatma" --medium "oil on canvas" --height-cm 100 --width-cm 80`
+- `pnpm --filter @artbot/cli dev -- research artist --artist "Burhan Dogancay" --wait`
+- `pnpm --filter @artbot/cli dev -- research work --artist "Erol Akyavas" --title "Kusatma" --medium "oil on canvas" --height-cm 100 --width-cm 80`
+- `pnpm --filter @artbot/cli dev -- runs list --status completed --limit 20`
+- `pnpm --filter @artbot/cli dev -- runs show --run-id <id>`
+- `pnpm --filter @artbot/cli dev -- runs watch --run-id <id> --interval 2`
+
+CLI global options:
+- `--json`
+- `--api-base-url`
+- `--api-key`
+- `--verbose`
+- `--quiet`
 
 Session-aware flags:
 - `--auth-profile <id>`
@@ -67,6 +84,7 @@ Session-aware flags:
 ## Evidence Requirements
 - For each source attempt, capture canonical URL, structured extracted fields, timestamp, parser/model, confidence, acceptance reason.
 - For browser-auth flows, persist `pre_auth_screenshot_path` and `post_auth_screenshot_path` in attempt evidence.
+- In selective-heavy mode, capture trace/HAR for failed or low-confidence attempts.
 
 ## Cost Controls
 - Cheap extraction first (`Firecrawl` if configured; otherwise direct fetch parser).

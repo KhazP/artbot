@@ -17,6 +17,7 @@
     "@artbot/observability": "workspace:*",
     "@artbot/report-generation": "workspace:*",
     "@artbot/shared-types": "workspace:*",
+    "@artbot/source-adapters": "workspace:*",
     "@artbot/source-registry": "workspace:*",
     "@artbot/storage": "workspace:*",
     "@artbot/valuation": "workspace:*"
