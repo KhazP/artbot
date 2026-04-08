@@ -1,0 +1,14 @@
+node_modules
+.env
+.env.local
+*.log
+dist
+coverage
+.DS_Store
+.turbo
+**/.turbo
+runs/
+!runs/.gitkeep
+runs-smoke/
+data/*.db
+playwright/.auth

@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    command: pnpm --filter @artbot/api start
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    depends_on:
+      - worker
+
+  worker:
+    build: .
+    command: pnpm --filter @artbot/worker start
+    env_file:
+      - .env

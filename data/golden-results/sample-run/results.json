@@ -1,0 +1,81 @@
+{
+  "run": {
+    "id": "sample-run-001",
+    "runType": "artist",
+    "query": {
+      "artist": "Burhan Dogancay",
+      "scope": "turkey_plus_international",
+      "turkeyFirst": true,
+      "manualLoginCheckpoint": false,
+      "allowLicensed": false,
+      "licensedIntegrations": []
+    },
+    "status": "completed",
+    "createdAt": "2026-04-08T12:00:00.000Z",
+    "updatedAt": "2026-04-08T12:05:00.000Z"
+  },
+  "summary": {
+    "run_id": "sample-run-001",
+    "total_records": 3,
+    "accepted_records": 2,
+    "rejected_candidates": 1,
+    "source_status_breakdown": {
+      "public_access": 2,
+      "auth_required": 0,
+      "licensed_access": 0,
+      "blocked": 1,
+      "price_hidden": 0
+    },
+    "auth_mode_breakdown": {
+      "anonymous": 2,
+      "authorized": 0,
+      "licensed": 0
+    },
+    "valuation_generated": false,
+    "valuation_reason": "Comparable threshold not met."
+  },
+  "records": [
+    {
+      "artist_name": "Burhan Dogancay",
+      "work_title": "Mavi Senfoni",
+      "alternate_title": null,
+      "year": null,
+      "medium": "oil on canvas",
+      "support": null,
+      "dimensions_text": null,
+      "height_cm": null,
+      "width_cm": null,
+      "depth_cm": null,
+      "signed": null,
+      "dated": null,
+      "edition_info": null,
+      "is_unique_work": true,
+      "venue_name": "Artam Antik A.S.",
+      "venue_type": "auction_house",
+      "city": "Istanbul",
+      "country": "Turkey",
+      "source_name": "Artam Auction Records",
+      "source_url": "https://artam.com/en/about-us/auction-records",
+      "source_page_type": "price_db",
+      "sale_or_listing_date": null,
+      "lot_number": "137",
+      "price_type": "realized_price",
+      "estimate_low": null,
+      "estimate_high": null,
+      "price_amount": 2700000,
+      "currency": "TRY",
+      "normalized_price_try": 2700000,
+      "normalized_price_usd": 60647,
+      "buyers_premium_included": null,
+      "image_url": null,
+      "screenshot_path": "runs/sample-run-001/evidence/screenshots/artam-auction-records-1.png",
+      "raw_snapshot_path": "runs/sample-run-001/evidence/raw/artam-auction-records-1.html",
+      "visual_match_score": null,
+      "metadata_match_score": 0.88,
+      "overall_confidence": 0.86,
+      "price_hidden": false,
+      "source_access_status": "public_access",
+      "notes": []
+    }
+  ]
+}

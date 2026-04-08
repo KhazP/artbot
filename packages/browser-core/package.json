@@ -1,0 +1,22 @@
+{
+  "name": "@artbot/browser-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@artbot/auth-manager": "workspace:*",
+    "@artbot/observability": "workspace:*",
+    "@artbot/shared-types": "workspace:*",
+    "playwright": "^1.52.0"
+  },
+  "optionalDependencies": {
+    "@browserbasehq/stagehand": "^2.0.0"
+  }
+}
