@@ -23,6 +23,22 @@ export type PriceType =
   | "inquiry_only"
   | "unknown";
 
+export type PriceSemanticLane = "realized" | "estimate" | "asking" | "inquiry" | "unknown";
+
+export type ValuationLane = "realized" | "estimate" | "asking" | "none";
+
+export type AcceptanceReason =
+  | "valuation_ready"
+  | "estimate_range_ready"
+  | "asking_price_ready"
+  | "inquiry_only_evidence"
+  | "price_hidden_evidence"
+  | "missing_numeric_price"
+  | "missing_currency"
+  | "missing_estimate_range"
+  | "unknown_price_type"
+  | "blocked_access";
+
 export type SourceAccessStatus =
   | "public_access"
   | "auth_required"

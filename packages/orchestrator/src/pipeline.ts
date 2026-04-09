@@ -3,13 +3,21 @@ import path from "node:path";
 import { AuthManager } from "@artbot/auth-manager";
 import { BrowserClient } from "@artbot/browser-core";
 import { logger } from "@artbot/observability";
-import { dedupeRecords, FxRateProvider, normalizeRecordCurrencies, scoreRecord } from "@artbot/normalization";
+import { applyConfidenceModel, dedupeRecords, FxRateProvider, normalizeRecordCurrencies } from "@artbot/normalization";
 import { renderMarkdownReport, writeJsonFile } from "@artbot/report-generation";
 import { planSources, SourceRegistry } from "@artbot/source-registry";
 import type { SourceCandidate } from "@artbot/source-adapters";
 import { ArtbotStorage } from "@artbot/storage";
-import type { PriceRecord, RunEntity, RunSummary, SourceAccessStatus, SourceAttempt } from "@artbot/shared-types";
-import { buildValuation, rankComparables } from "@artbot/valuation";
+import {
+  acceptanceReasonList,
+  type AcceptanceReason,
+  type PriceRecord,
+  type RunEntity,
+  type RunSummary,
+  type SourceAccessStatus,
+  type SourceAttempt
+} from "@artbot/shared-types";
+import { buildValuation, rankComparablesWithScores } from "@artbot/valuation";
 
 export interface OrchestratorOptions {
   minValuationComps?: number;
@@ -96,8 +104,9 @@ export class ResearchOrchestrator {
             }
           }
 
-          const mustCaptureAcceptedEvidence = Boolean(result.record && result.attempt.accepted);
-          if (result.needsBrowserVerification || mustCaptureAcceptedEvidence) {
+          const captureAcceptedValuation = process.env.CAPTURE_BROWSER_FOR_ACCEPTED_VALUATION === "true";
+          const acceptedForValuation = Boolean(result.attempt.accepted_for_valuation ?? result.record?.accepted_for_valuation);
+          if (result.needsBrowserVerification || (captureAcceptedValuation && acceptedForValuation)) {
             const browserCapture = await this.browserClient.withRetries(
               () =>
                 this.browserClient.capture({
@@ -126,10 +135,22 @@ export class ResearchOrchestrator {
             if (browserCapture.requiresAuthDetected && planned.accessContext.mode === "anonymous") {
               result.attempt.source_access_status = "auth_required";
               result.attempt.accepted = false;
-              result.attempt.acceptance_reason = "Login gate detected without authorized session.";
+              result.attempt.accepted_for_evidence = false;
+              result.attempt.accepted_for_valuation = false;
+              result.attempt.valuation_lane = "none";
+              result.attempt.acceptance_reason = "blocked_access";
+              result.attempt.rejection_reason = "Login gate detected without authorized session.";
+              result.attempt.valuation_eligibility_reason = "Authentication required.";
               result.attempt.blocker_reason = "Authentication required.";
               if (result.record) {
                 result.record.source_access_status = "auth_required";
+                result.record.accepted_for_evidence = false;
+                result.record.accepted_for_valuation = false;
+                result.record.valuation_lane = "none";
+                result.record.acceptance_reason = "blocked_access";
+                result.record.rejection_reason = "Login gate detected without authorized session.";
+                result.record.valuation_eligibility_reason = "Authentication required.";
+                result.record.valuation_confidence = 0;
                 result.record.overall_confidence = Math.min(result.record.overall_confidence, 0.35);
               }
             }
@@ -137,10 +158,22 @@ export class ResearchOrchestrator {
             if (browserCapture.blockedDetected) {
               result.attempt.source_access_status = "blocked";
               result.attempt.accepted = false;
-              result.attempt.acceptance_reason = "Access blocked or anti-bot page detected.";
+              result.attempt.accepted_for_evidence = false;
+              result.attempt.accepted_for_valuation = false;
+              result.attempt.valuation_lane = "none";
+              result.attempt.acceptance_reason = "blocked_access";
+              result.attempt.rejection_reason = "Access blocked or anti-bot page detected.";
+              result.attempt.valuation_eligibility_reason = "Technical blocking detected.";
               result.attempt.blocker_reason = "Technical blocking detected.";
               if (result.record) {
                 result.record.source_access_status = "blocked";
+                result.record.accepted_for_evidence = false;
+                result.record.accepted_for_valuation = false;
+                result.record.valuation_lane = "none";
+                result.record.acceptance_reason = "blocked_access";
+                result.record.rejection_reason = "Access blocked or anti-bot page detected.";
+                result.record.valuation_eligibility_reason = "Technical blocking detected.";
+                result.record.valuation_confidence = 0;
                 result.record.overall_confidence = Math.min(result.record.overall_confidence, 0.2);
               }
             }
@@ -154,7 +187,8 @@ export class ResearchOrchestrator {
           attempts.push(result.attempt);
           this.storage.saveAttempt(run.id, result.attempt);
 
-          if (result.record && result.attempt.accepted) {
+          const acceptedForEvidence = Boolean(result.attempt.accepted_for_evidence ?? result.attempt.accepted);
+          if (result.record && acceptedForEvidence) {
             const normalized = this.normalizeRecord(result.record);
             candidateRecords.push(normalized);
             if (candidate.provenance !== "seed") {
@@ -187,9 +221,17 @@ export class ResearchOrchestrator {
             fetched_at: new Date().toISOString(),
             parser_used: "adapter-error",
             model_used: null,
+            extraction_confidence: 0,
+            entity_match_confidence: 0,
+            source_reliability_confidence: 0,
             confidence_score: 0,
             accepted: false,
-            acceptance_reason: "Adapter execution failed."
+            accepted_for_evidence: false,
+            accepted_for_valuation: false,
+            valuation_lane: "none",
+            acceptance_reason: "blocked_access",
+            rejection_reason: "Adapter execution failed.",
+            valuation_eligibility_reason: "Adapter execution failed."
           };
 
           attempts.push(failedAttempt);
@@ -203,17 +245,21 @@ export class ResearchOrchestrator {
       gaps.push(`${duplicates.length} candidate records were excluded as duplicates.`);
     }
 
-    const rankedRecords = rankComparables(uniqueRecords);
+    const scoredComparables = rankComparablesWithScores(uniqueRecords);
+    const rankedRecords = scoredComparables.map((entry) => entry.record);
     for (const record of rankedRecords) {
       this.storage.saveRecord(run.id, record);
     }
 
-    const valuation = buildValuation(rankedRecords, this.minValuationComps);
+    const valuation = buildValuation(rankedRecords, this.minValuationComps, scoredComparables);
+    const valuationEligibleRecords = rankedRecords.filter((record) => record.accepted_for_valuation).length;
     const summary = this.buildSummary(
       run.id,
       rankedRecords.length,
+      valuationEligibleRecords,
       attempts,
       valuation.generated,
+      valuation.reason,
       discoveredCandidates,
       acceptedFromDiscovery,
       sourceCandidateBreakdown
@@ -221,9 +267,17 @@ export class ResearchOrchestrator {
 
     const resultsPath = path.join(runRoot, "results.json");
     const reportPath = path.join(runRoot, "report.md");
+    const completedRun = {
+      ...run,
+      status: "completed" as const,
+      error: null,
+      reportPath,
+      resultsPath,
+      updatedAt: new Date().toISOString()
+    };
 
     const payload = {
-      run,
+      run: completedRun,
       model_policy: {
         preferred: this.modelCheapDefault,
         fallback: this.modelCheapFallback,
@@ -254,10 +308,7 @@ export class ResearchOrchestrator {
 
   private normalizeRecord(record: PriceRecord): PriceRecord {
     const currencyNormalized = normalizeRecordCurrencies(record, this.fxRates);
-    return {
-      ...currencyNormalized,
-      overall_confidence: scoreRecord(currencyNormalized)
-    };
+    return applyConfidenceModel(currencyNormalized, record.overall_confidence);
   }
 
   private shouldCaptureHeavyEvidence(result: { attempt: SourceAttempt; record: PriceRecord | null }): boolean {
@@ -269,7 +320,7 @@ export class ResearchOrchestrator {
       return false;
     }
 
-    if (!result.attempt.accepted) {
+    if (!(result.attempt.accepted_for_evidence ?? result.attempt.accepted)) {
       return true;
     }
     if (!result.record) {
@@ -280,9 +331,11 @@ export class ResearchOrchestrator {
 
   private buildSummary(
     runId: string,
-    acceptedRecords: number,
+    acceptedEvidenceRecords: number,
+    valuationEligibleRecords: number,
     attempts: SourceAttempt[],
     valuationGenerated: boolean,
+    valuationReason: string,
     discoveredCandidates: number,
     acceptedFromDiscovery: number,
     sourceCandidateBreakdown: Record<string, number>
@@ -300,24 +353,43 @@ export class ResearchOrchestrator {
       authorized: 0,
       licensed: 0
     };
+    const acceptanceReasonBreakdown: Record<AcceptanceReason, number> = {
+      valuation_ready: 0,
+      estimate_range_ready: 0,
+      asking_price_ready: 0,
+      inquiry_only_evidence: 0,
+      price_hidden_evidence: 0,
+      missing_numeric_price: 0,
+      missing_currency: 0,
+      missing_estimate_range: 0,
+      unknown_price_type: 0,
+      blocked_access: 0
+    };
 
     for (const attempt of attempts) {
       sourceStatusBreakdown[attempt.source_access_status] += 1;
       authModeBreakdown[attempt.access_mode] += 1;
+      if (attempt.acceptance_reason && acceptanceReasonList.includes(attempt.acceptance_reason)) {
+        acceptanceReasonBreakdown[attempt.acceptance_reason] += 1;
+      }
     }
 
     return {
       run_id: runId,
       total_records: attempts.length,
-      accepted_records: acceptedRecords,
-      rejected_candidates: attempts.filter((attempt) => !attempt.accepted).length,
+      total_attempts: attempts.length,
+      evidence_records: acceptedEvidenceRecords,
+      valuation_eligible_records: valuationEligibleRecords,
+      accepted_records: acceptedEvidenceRecords,
+      rejected_candidates: attempts.filter((attempt) => !(attempt.accepted_for_evidence ?? attempt.accepted)).length,
       discovered_candidates: discoveredCandidates,
       accepted_from_discovery: acceptedFromDiscovery,
       source_candidate_breakdown: sourceCandidateBreakdown,
       source_status_breakdown: sourceStatusBreakdown,
       auth_mode_breakdown: authModeBreakdown,
+      acceptance_reason_breakdown: acceptanceReasonBreakdown,
       valuation_generated: valuationGenerated,
-      valuation_reason: valuationGenerated ? "Comparable threshold met." : "Comparable threshold not met."
+      valuation_reason: valuationReason
     };
   }
 }

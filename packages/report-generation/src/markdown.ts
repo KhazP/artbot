@@ -7,7 +7,7 @@ function fmt(value: number | null | undefined): string {
 }
 
 function recordLine(record: PriceRecord): string {
-  return `| ${record.artist_name} | ${record.work_title ?? "-"} | ${record.source_name} | ${record.country ?? "-"} | ${record.price_type} | ${fmt(record.price_amount)} ${record.currency ?? ""} | ${fmt(record.normalized_price_try)} TRY | ${record.source_url} |`;
+  return `| ${record.artist_name} | ${record.work_title ?? "-"} | ${record.source_name} | ${record.country ?? "-"} | ${record.price_type} | ${record.valuation_lane} | ${record.accepted_for_valuation ? "yes" : "no"} | ${record.acceptance_reason} | ${fmt(record.price_amount)} ${record.currency ?? ""} | ${fmt(record.normalized_price_try)} TRY | ${record.source_url} |`;
 }
 
 export function renderMarkdownReport(
@@ -25,6 +25,7 @@ export function renderMarkdownReport(
     "## Run Summary",
     `- Run ID: ${summary.run_id}`,
     `- Total accepted records: ${summary.accepted_records}`,
+    `- Valuation-eligible records: ${summary.valuation_eligible_records ?? 0}`,
     `- Total rejected candidates: ${summary.rejected_candidates}`,
     `- Discovered candidates: ${summary.discovered_candidates}`,
     `- Accepted from discovery: ${summary.accepted_from_discovery}`,
@@ -39,9 +40,17 @@ export function renderMarkdownReport(
     `- International Range (TRY): ${valuation.internationalRange ? `${fmt(valuation.internationalRange.low)} - ${fmt(valuation.internationalRange.high)}` : "N/A"}`,
     `- Blended Range (TRY): ${valuation.blendedRange ? `${fmt(valuation.blendedRange.low)} - ${fmt(valuation.blendedRange.high)}` : "N/A"}`,
     "",
+    "## Top Comparable Drivers",
+    ...(valuation.topComparables.length > 0
+      ? valuation.topComparables.map(
+          (comp, index) =>
+            `${index + 1}. ${comp.sourceName} | ${comp.workTitle ?? "-"} | lane=${comp.valuationLane} | score=${comp.score.toFixed(3)} | valuation_eligible=${comp.acceptedForValuation ? "yes" : "no"} | reasons=${comp.reasons.join(", ")} | TRY=${fmt(comp.normalizedPriceTry)} | native=${fmt(comp.nativePrice)} ${comp.currency ?? ""} | ${comp.sourceUrl}`
+        )
+      : ["- No comparable drivers available."]),
+    "",
     "## Comparable Sales",
-    "| Artist | Work | Source | Country | Price Type | Native Price | Normalized TRY | URL |",
-    "|---|---|---|---|---|---|---|---|",
+    "| Artist | Work | Source | Country | Price Type | Lane | Valuation Eligible | Acceptance Reason | Native Price | Normalized TRY | URL |",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
     ...records.map(recordLine),
     "",
     "## Turkey-First Notes",
@@ -50,8 +59,8 @@ export function renderMarkdownReport(
       : "- No Turkey comps found; expanded internationally.",
     "",
     "## Comp Selection Notes",
-    "- Ranked by overall confidence with Turkey-first uplift.",
-    "- Numeric valuation excludes low-confidence records and applies outlier filtering when threshold is met.",
+    "- Ranked by confidence components + semantic lane weighting + Turkey-first uplift.",
+    "- Valuation excludes evidence-only records and applies outlier filtering on valuation-eligible comps.",
     "",
     "## Outlier Exclusions",
     ...(valuation.outlierValuesTry.length > 0

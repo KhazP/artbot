@@ -1,4 +1,5 @@
 import type { PriceRecord } from "@artbot/shared-types";
+import type { ScoredComparable } from "./ranking.js";
 import { removeOutliers } from "./outliers.js";
 
 export interface PriceRange {
@@ -12,6 +13,24 @@ export interface ValuationOutcome {
   turkeyRange: PriceRange | null;
   internationalRange: PriceRange | null;
   blendedRange: PriceRange | null;
+  laneRanges: {
+    realized: PriceRange | null;
+    estimate: PriceRange | null;
+    asking: PriceRange | null;
+  };
+  topComparables: Array<{
+    sourceName: string;
+    workTitle: string | null;
+    valuationLane: "realized" | "estimate" | "asking" | "none";
+    acceptedForValuation: boolean;
+    score: number;
+    reasons: string[];
+    normalizedPriceTry: number | null;
+    nativePrice: number | null;
+    currency: string | null;
+    sourceUrl: string;
+  }>;
+  valuationCandidateCount: number;
   outlierValuesTry: number[];
 }
 
@@ -39,19 +58,48 @@ function pickPriceTry(record: PriceRecord): number | null {
     return record.price_amount;
   }
 
+  if (record.currency === "TRY") {
+    const low = record.estimate_low;
+    const high = record.estimate_high;
+    if (low !== null && high !== null) {
+      return (low + high) / 2;
+    }
+    return low ?? high ?? null;
+  }
+
   return null;
 }
 
-export function buildValuation(records: PriceRecord[], minComps = 5): ValuationOutcome {
-  const highConfidence = records.filter((record) => record.overall_confidence >= 0.65);
+export function buildValuation(records: PriceRecord[], minComps = 5, scoredRecords?: ScoredComparable[]): ValuationOutcome {
+  const topComparables = buildTopComparables(records, scoredRecords);
+  const highConfidence = records.filter((record) => record.accepted_for_valuation && record.overall_confidence >= 0.6);
+  const realizedValues = highConfidence
+    .filter((record) => record.valuation_lane === "realized")
+    .map(pickPriceTry)
+    .filter((value): value is number => value !== null);
+  const estimateValues = highConfidence
+    .filter((record) => record.valuation_lane === "estimate")
+    .map(pickPriceTry)
+    .filter((value): value is number => value !== null);
+  const askingValues = highConfidence
+    .filter((record) => record.valuation_lane === "asking")
+    .map(pickPriceTry)
+    .filter((value): value is number => value !== null);
 
   if (highConfidence.length < minComps) {
     return {
       generated: false,
-      reason: `Insufficient high-confidence comparables (${highConfidence.length}/${minComps}).`,
+      reason: `Insufficient valuation-eligible comparables (${highConfidence.length}/${minComps}).`,
       turkeyRange: null,
       internationalRange: null,
       blendedRange: null,
+      laneRanges: {
+        realized: toRange(realizedValues),
+        estimate: toRange(estimateValues),
+        asking: toRange(askingValues)
+      },
+      topComparables,
+      valuationCandidateCount: highConfidence.length,
       outlierValuesTry: []
     };
   }
@@ -76,16 +124,78 @@ export function buildValuation(records: PriceRecord[], minComps = 5): ValuationO
       turkeyRange: toRange(turkeyValues),
       internationalRange: toRange(internationalValues),
       blendedRange: null,
+      laneRanges: {
+        realized: toRange(realizedValues),
+        estimate: toRange(estimateValues),
+        asking: toRange(askingValues)
+      },
+      topComparables,
+      valuationCandidateCount: highConfidence.length,
       outlierValuesTry: removed
     };
   }
 
   return {
     generated: true,
-    reason: "Generated from high-confidence comparables with Turkey-first weighting.",
+    reason: "Generated from valuation-eligible comparables with semantic lanes and Turkey-first ranking.",
     turkeyRange: toRange(turkeyValues),
     internationalRange: toRange(internationalValues),
     blendedRange: toRange(kept),
+    laneRanges: {
+      realized: toRange(realizedValues),
+      estimate: toRange(estimateValues),
+      asking: toRange(askingValues)
+    },
+    topComparables,
+    valuationCandidateCount: highConfidence.length,
     outlierValuesTry: removed
   };
+}
+
+export function buildTopComparables(
+  records: PriceRecord[],
+  scoredRecords?: ScoredComparable[],
+  limit = 5
+): ValuationOutcome["topComparables"] {
+  if (scoredRecords && scoredRecords.length > 0) {
+    const prioritized = [
+      ...scoredRecords.filter((entry) => entry.record.accepted_for_valuation),
+      ...scoredRecords.filter((entry) => !entry.record.accepted_for_valuation)
+    ];
+    const deduped = new Map<string, ScoredComparable>();
+    for (const entry of prioritized) {
+      const key = `${entry.record.source_name}:${entry.record.source_url}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, entry);
+      }
+    }
+
+    return Array.from(deduped.values())
+      .slice(0, limit)
+      .map((entry) => ({
+        sourceName: entry.record.source_name,
+        workTitle: entry.record.work_title,
+        valuationLane: entry.record.valuation_lane,
+        acceptedForValuation: entry.record.accepted_for_valuation,
+        score: Number(entry.breakdown.score.toFixed(4)),
+        reasons: entry.breakdown.reasons,
+        normalizedPriceTry: entry.record.normalized_price_try,
+        nativePrice: entry.record.price_amount,
+        currency: entry.record.currency,
+        sourceUrl: entry.record.source_url
+      }));
+  }
+
+  return records.slice(0, limit).map((record) => ({
+    sourceName: record.source_name,
+    workTitle: record.work_title,
+    valuationLane: record.valuation_lane,
+    acceptedForValuation: record.accepted_for_valuation,
+    score: Number(record.overall_confidence.toFixed(4)),
+    reasons: ["fallback confidence ranking"],
+    normalizedPriceTry: record.normalized_price_try,
+    nativePrice: record.price_amount,
+    currency: record.currency,
+    sourceUrl: record.source_url
+  }));
 }

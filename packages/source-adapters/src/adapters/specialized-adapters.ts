@@ -1,10 +1,11 @@
 import { extractWithGeminiSchema, fetchCheapestFirst, parseGenericLotFields } from "@artbot/extraction";
-import type { PriceRecord, SourceAttempt } from "@artbot/shared-types";
+import type { SourceAttempt } from "@artbot/shared-types";
 import type { AdapterExtractionContext, AdapterExtractionResult, SourceAdapter, SourceCandidate } from "../types.js";
 import {
   buildBlockedResult,
   buildRecordFromParsed,
   ensureRawPath,
+  evaluateAcceptance,
   evaluateAccessDecision,
   extractHrefCandidates,
   toCandidate,
@@ -116,15 +117,6 @@ function buildVenueRouteCandidates(
   }
 
   return candidates;
-}
-
-function confidenceFor(record: PriceRecord): number {
-  if (record.price_hidden) return 0.78;
-  if (record.price_type === "realized_with_buyers_premium") return 0.86;
-  if (record.price_type === "realized_price" || record.price_type === "hammer_price") return 0.82;
-  if (record.price_type === "estimate") return 0.74;
-  if (record.price_type === "asking_price") return 0.68;
-  return 0.3;
 }
 
 export function detectMuzayedeSignature(content: string, sourceUrl: string): boolean {
@@ -246,11 +238,11 @@ export class DeterministicVenueAdapter implements SourceAdapter {
       return isAllowedVenueUrl(candidate.url, allowedHosts) && array.findIndex((entry) => entry.url === candidate.url) === index;
     });
 
-    const record = buildRecordFromParsed(this, candidate, context, parsed, rawSnapshotPath, 0.65);
-    record.overall_confidence = confidenceFor(record);
+    const acceptance = evaluateAcceptance(parsed, parsed.priceHidden ? "price_hidden" : decision.sourceAccessStatus);
+    const record = buildRecordFromParsed(this, candidate, context, parsed, rawSnapshotPath, acceptance);
     record.source_access_status = parsed.priceHidden ? "price_hidden" : decision.sourceAccessStatus;
 
-    const accepted = parsed.priceType !== "unknown" || parsed.priceHidden;
+    const accepted = acceptance.acceptedForEvidence;
     const attempt: SourceAttempt = {
       run_id: context.runId,
       source_name: this.sourceName,
@@ -281,20 +273,30 @@ export class DeterministicVenueAdapter implements SourceAdapter {
       fetched_at: fetchedAt,
       parser_used: extracted.parserUsed,
       model_used: modelUsed,
+      extraction_confidence: record.extraction_confidence,
+      entity_match_confidence: record.entity_match_confidence,
+      source_reliability_confidence: record.source_reliability_confidence,
       confidence_score: record.overall_confidence,
       accepted,
-      acceptance_reason: accepted
-        ? "Deterministic extraction produced structured price data."
-        : discoveredCandidates.length > 0
-          ? `No direct price yet; discovered ${discoveredCandidates.length} lot candidates.`
-          : "No reliable price fields found."
+      accepted_for_evidence: acceptance.acceptedForEvidence,
+      accepted_for_valuation: acceptance.acceptedForValuation,
+      valuation_lane: acceptance.valuationLane,
+      acceptance_reason: acceptance.acceptanceReason,
+      rejection_reason: acceptance.rejectionReason,
+      valuation_eligibility_reason: acceptance.valuationEligibilityReason
     };
+
+    const shouldEscalateForMissingPrice =
+      acceptance.acceptedForEvidence &&
+      !acceptance.acceptedForValuation &&
+      parsed.priceType !== "inquiry_only" &&
+      !parsed.priceHidden;
 
     return {
       attempt,
       record: accepted ? record : null,
       discoveredCandidates,
-      needsBrowserVerification: !accepted || context.accessContext.mode !== "anonymous"
+      needsBrowserVerification: shouldEscalateForMissingPrice || !accepted || context.accessContext.mode !== "anonymous"
     };
   }
 }
@@ -318,9 +320,10 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       turkeyVenueHostPatterns: [
         /\.tr$/i,
         /bayrakmuzayede/i,
-        /clarauction/i,
+        /clarmuzayede/i,
         /turelart/i,
         /antikasa/i,
+        /rportakal/i,
         /muzayede/i
       ]
     }),
@@ -385,7 +388,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       tier: 1,
       country: "Turkey",
       city: "Istanbul",
-      baseUrl: "https://www.portakal.com",
+      baseUrl: "https://www.rportakal.com",
       searchPaths: ["/search?q=", "/en/search?q="],
       lotUrlMatchers: [/\/lot\//i, /\/auction\//i, /\/catalog\//i]
     }),
@@ -398,7 +401,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       tier: 1,
       country: "Turkey",
       city: "Istanbul",
-      baseUrl: "https://clarauction.com",
+      baseUrl: "https://www.clarmuzayede.com",
       searchPaths: ["/buy-now?q=", "/hemen-al?q="],
       lotUrlMatchers: [/\/lot\//i, /\/urun\//i, /\/buy-now\//i]
     }),
@@ -411,7 +414,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       tier: 1,
       country: "Turkey",
       city: "Istanbul",
-      baseUrl: "https://clarauction.com",
+      baseUrl: "https://www.clarmuzayede.com",
       searchPaths: ["/auction-archive?q=", "/arsiv?q="],
       lotUrlMatchers: [/\/lot\//i, /\/archive\//i, /\/auction\//i]
     }),

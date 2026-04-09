@@ -54,3 +54,26 @@ describe("ArtbotStorage listRuns", () => {
   });
 });
 
+describe("ArtbotStorage lease lifecycle", () => {
+  it("supports reserve, heartbeat and stale recovery", async () => {
+    const { dbPath, runsRoot } = mkTempPaths();
+    const storage = new ArtbotStorage(dbPath, runsRoot);
+
+    const run = storage.createRun("artist", query("Lease Artist"));
+    const reserved = storage.reserveRun(run.id, "worker-a", 1);
+    expect(reserved).toBe(true);
+
+    const heartbeat = storage.heartbeatRun(run.id, "worker-a", 1);
+    expect(heartbeat).toBe(true);
+
+    const wrongWorkerHeartbeat = storage.heartbeatRun(run.id, "worker-b", 1);
+    expect(wrongWorkerHeartbeat).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const recovered = storage.recoverStaleRunningRuns(0, "forced stale recovery");
+    expect(recovered).toContain(run.id);
+
+    const updated = storage.getRun(run.id);
+    expect(updated?.status).toBe("failed");
+  });
+});

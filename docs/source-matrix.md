@@ -1,32 +1,36 @@
-# Source Matrix (v1)
+# Source Matrix (Current)
 
-| Adapter ID | Source | Tier | Region Priority | Requires Auth | Requires License | Supported Modes | Expected Statuses |
-|---|---|---|---|---|---|---|---|
-| muzayedeapp-platform | Müzayede App Platform | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| portakal-catalog | Portakal Online Catalog | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| clar-buy-now | Clar Buy Now | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| clar-archive | Clar Auction Archive | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| bayrak-muzayede-listing | Bayrak Muzayede Listing | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| bayrak-muzayede-lot | Bayrak Muzayede Lot | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| turel-art-listing | Turel Art Listing | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| antikasa-lot-adapter | Antik A.S. Lot | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| sanatfiyat-licensed-extractor | Sanatfiyat | 2 | Turkey DB | Yes | Yes | licensed | licensed_access, blocked |
-| artam-auction-records | Artam Auction Records | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| artam-lot | Artam Lots | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| alifart-lot | Alif Art | 1 | Turkey | No | No | anonymous/authorized/licensed | public_access, price_hidden, blocked |
-| turkish-auction-generic | Turkish Auction Generic | 2 | Turkey | No | No | anonymous/authorized/licensed | public_access, blocked |
-| sothebys-lot | Sothebys | 1 | International | No | No | anonymous/authorized/licensed | public_access, blocked, price_hidden |
-| christies-lot | Christies | 1 | International | No | No | anonymous/authorized/licensed | public_access, blocked, price_hidden |
-| bonhams-lot | Bonhams | 1 | International | No | No | anonymous/authorized/licensed | public_access, blocked, price_hidden |
-| phillips-lot | Phillips | 1 | International | No | No | anonymous/authorized/licensed | public_access, blocked, price_hidden |
-| artsy-probe | Artsy | 2 | International DB | Yes | No | anonymous/authorized/licensed | auth_required, public_access, blocked |
-| mutualart-probe | MutualArt | 2 | International DB | Yes | No | anonymous/authorized/licensed | auth_required, public_access, blocked |
-| askart-probe | askART | 2 | International DB | Yes | Yes | licensed | licensed_access, blocked |
-| invaluable-listing | Invaluable | 2 | International | No | No | anonymous/authorized/licensed | public_access, blocked, price_hidden |
+## Production Baseline (Enabled by Default)
+| Adapter ID | Source | Type | Depth | Region | Auth/Licensing |
+|---|---|---|---|---|---|
+| muzayedeapp-platform | Müzayede App Platform | deterministic venue adapter | partial-deep (listing->lot expansion + extraction) | Turkey | public/auth/licensed modes |
+| bayrak-muzayede-listing | Bayrak Listing | deterministic venue adapter | partial-deep | Turkey | public/auth/licensed modes |
+| bayrak-muzayede-lot | Bayrak Lot | deterministic venue adapter | partial-deep | Turkey | public/auth/licensed modes |
+| turel-art-listing | Türel Listing | deterministic venue adapter | partial | Turkey | public/auth/licensed modes |
+| antikasa-lot-adapter | Antik A.S. Lot | deterministic venue adapter | partial | Turkey | public/auth/licensed modes |
+| portakal-catalog | Portakal Catalog (`rportakal`) | deterministic venue adapter | partial | Turkey | public/auth/licensed modes |
+| clar-buy-now | Clar Buy Now (`clarmuzayede`) | deterministic venue adapter | partial | Turkey | public/auth/licensed modes |
+| clar-archive | Clar Archive (`clarmuzayede`) | deterministic venue adapter | partial | Turkey | public/auth/licensed modes |
+| sanatfiyat-licensed-extractor | Sanatfiyat | deterministic licensed adapter | partial | Turkey | licensed only |
+| artam-auction-records | Artam Records | generic adapter | probe/partial | Turkey | public/auth/licensed modes |
+| artam-lot | Artam Lot | generic adapter | probe/partial | Turkey | public/auth/licensed modes |
+| alifart-lot | Alif Art Lot | generic adapter | probe/partial | Turkey | public/auth/licensed modes |
+| sothebys-lot | Sotheby’s | generic adapter | probe | International | public/auth/licensed modes |
+| christies-lot | Christie’s | generic adapter | probe | International | public/auth/licensed modes |
+| bonhams-lot | Bonhams | generic adapter | probe | International | public/auth/licensed modes |
+| phillips-lot | Phillips | generic adapter | probe | International | public/auth/licensed modes |
+
+## Optional Probe Adapters (Disabled by Default)
+Enabled only when `ENABLE_OPTIONAL_PROBE_ADAPTERS=true`.
+
+| Adapter ID | Source | Status |
+|---|---|---|
+| artsy-probe | Artsy | auth-sensitive probe |
+| mutualart-probe | MutualArt | auth-sensitive probe |
+| askart-probe | askART | licensed/auth-sensitive probe |
+| invaluable-listing | Invaluable | probe |
 
 ## Notes
-- Müzayede App detection is signature-aware (`muzayede.app`, `muzayedeapp.com`, “Powered by Müzayede App”).
-- Müzayede route templates are used to expand discovered Turkish venue hosts deterministically (`/arama`, `/search`, `/muzayede`, `/arsiv`).
-- Light discovery expands query variants and listing pages into lot-level candidates with bounded per-source caps.
-- `price_hidden` is emitted when listing pages are inquiry-only or price-on-request.
-- `blocked` is used when legal/contractual access is unavailable or technical blocking is detected.
+- `turkish-auction-generic` was removed to avoid Google-search seeding and misleading coverage.
+- Coverage labels are now explicit: `partial-deep`, `partial`, `probe`.
+- Valuation trust does **not** depend on adapter count; it depends on valuation-eligible extraction quality.

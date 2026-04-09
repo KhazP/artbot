@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { PriceRecord, SourceAttempt } from "@artbot/shared-types";
+import type {
+  AcceptanceReason,
+  AttemptAcceptanceDetails,
+  PriceRecord,
+  SourceAccessStatus,
+  SourceAttempt,
+  ValuationLane
+} from "@artbot/shared-types";
 import type { GenericParsedFields } from "@artbot/extraction";
 import type {
   AdapterExtractionContext,
@@ -10,6 +17,201 @@ import type {
   SourceAdapter,
   SourceCandidate
 } from "../types.js";
+
+function clamp(value: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function isFiniteNumber(value: number | null): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function normalizeTitle(value: string | null | undefined): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9çğıöşü\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferValuationLane(priceType: GenericParsedFields["priceType"]): ValuationLane {
+  if (priceType === "asking_price") return "asking";
+  if (priceType === "estimate") return "estimate";
+  if (priceType === "hammer_price" || priceType === "realized_price" || priceType === "realized_with_buyers_premium") {
+    return "realized";
+  }
+  return "none";
+}
+
+function defaultAcceptanceReason(priceType: GenericParsedFields["priceType"]): AcceptanceReason {
+  if (priceType === "asking_price") return "asking_price_ready";
+  if (priceType === "estimate") return "estimate_range_ready";
+  return "valuation_ready";
+}
+
+function sourceReliabilityBase(status: SourceAccessStatus): number {
+  if (status === "licensed_access") return 0.82;
+  if (status === "public_access") return 0.72;
+  if (status === "price_hidden") return 0.6;
+  if (status === "auth_required") return 0.32;
+  return 0.06;
+}
+
+function tierAdjustment(tier: 1 | 2 | 3 | 4): number {
+  if (tier === 1) return 0.12;
+  if (tier === 2) return 0.04;
+  if (tier === 3) return -0.04;
+  return -0.08;
+}
+
+export function estimateEntityMatchConfidence(parsedTitle: string | null, queryTitle?: string): number {
+  const parsed = normalizeTitle(parsedTitle);
+  const query = normalizeTitle(queryTitle);
+
+  if (parsed && !query) {
+    return 0.72;
+  }
+
+  if (!parsed && !query) {
+    return 0.45;
+  }
+
+  if (!parsed && query) {
+    return 0.38;
+  }
+
+  if (parsed === query) {
+    return 0.88;
+  }
+
+  if (parsed.includes(query) || query.includes(parsed)) {
+    return 0.72;
+  }
+
+  return 0.46;
+}
+
+export function evaluateAcceptance(parsed: GenericParsedFields, sourceStatus: SourceAccessStatus): AttemptAcceptanceDetails {
+  if (sourceStatus === "blocked") {
+    return {
+      acceptedForEvidence: false,
+      acceptedForValuation: false,
+      valuationLane: "none",
+      acceptanceReason: "blocked_access",
+      rejectionReason: "Source access blocked.",
+      valuationEligibilityReason: "Source access blocked."
+    };
+  }
+
+  if (parsed.priceType === "unknown") {
+    return {
+      acceptedForEvidence: false,
+      acceptedForValuation: false,
+      valuationLane: "none",
+      acceptanceReason: "unknown_price_type",
+      rejectionReason: "No reliable price semantics found.",
+      valuationEligibilityReason: "Price semantics unknown."
+    };
+  }
+
+  if (parsed.priceType === "inquiry_only" || parsed.priceHidden) {
+    return {
+      acceptedForEvidence: true,
+      acceptedForValuation: false,
+      valuationLane: "none",
+      acceptanceReason: parsed.priceType === "inquiry_only" ? "inquiry_only_evidence" : "price_hidden_evidence",
+      rejectionReason: "Price hidden or inquiry-only record retained only as evidence.",
+      valuationEligibilityReason: "Price hidden / inquiry-only records are excluded from valuation."
+    };
+  }
+
+  if (!parsed.currency) {
+    return {
+      acceptedForEvidence: true,
+      acceptedForValuation: false,
+      valuationLane: inferValuationLane(parsed.priceType),
+      acceptanceReason: "missing_currency",
+      rejectionReason: "Currency missing for priced record.",
+      valuationEligibilityReason: "Currency is required for valuation eligibility."
+    };
+  }
+
+  if (parsed.priceType === "estimate") {
+    const hasEstimateRange = isFiniteNumber(parsed.estimateLow) || isFiniteNumber(parsed.estimateHigh);
+    return {
+      acceptedForEvidence: true,
+      acceptedForValuation: hasEstimateRange,
+      valuationLane: "estimate",
+      acceptanceReason: hasEstimateRange ? "estimate_range_ready" : "missing_estimate_range",
+      rejectionReason: hasEstimateRange ? null : "Estimate record has no numeric estimate values.",
+      valuationEligibilityReason: hasEstimateRange
+        ? null
+        : "Estimate valuation requires numeric estimate low/high and currency."
+    };
+  }
+
+  if (!isFiniteNumber(parsed.priceAmount)) {
+    return {
+      acceptedForEvidence: true,
+      acceptedForValuation: false,
+      valuationLane: inferValuationLane(parsed.priceType),
+      acceptanceReason: "missing_numeric_price",
+      rejectionReason: "Numeric price amount missing for priced record.",
+      valuationEligibilityReason: "Priced valuation lanes require numeric price amount + currency."
+    };
+  }
+
+  return {
+    acceptedForEvidence: true,
+    acceptedForValuation: true,
+    valuationLane: inferValuationLane(parsed.priceType),
+    acceptanceReason: defaultAcceptanceReason(parsed.priceType),
+    rejectionReason: null,
+    valuationEligibilityReason: null
+  };
+}
+
+export function buildConfidenceComponents(params: {
+  parsed: GenericParsedFields;
+  queryTitle?: string;
+  sourceStatus: SourceAccessStatus;
+  tier: 1 | 2 | 3 | 4;
+  acceptance: AttemptAcceptanceDetails;
+}): {
+  extractionConfidence: number;
+  entityMatchConfidence: number;
+  sourceReliabilityConfidence: number;
+  overallConfidence: number;
+} {
+  const { parsed, sourceStatus, queryTitle, tier, acceptance } = params;
+
+  let extraction = 0.35;
+  if (parsed.priceType === "realized_with_buyers_premium") extraction = 0.78;
+  else if (parsed.priceType === "realized_price" || parsed.priceType === "hammer_price") extraction = 0.74;
+  else if (parsed.priceType === "estimate") extraction = 0.68;
+  else if (parsed.priceType === "asking_price") extraction = 0.62;
+  else if (parsed.priceType === "inquiry_only") extraction = 0.56;
+
+  if (parsed.lotNumber) extraction += 0.05;
+  if (parsed.saleDate) extraction += 0.04;
+  if (parsed.currency) extraction += 0.03;
+  if (isFiniteNumber(parsed.priceAmount) || isFiniteNumber(parsed.estimateLow) || isFiniteNumber(parsed.estimateHigh)) {
+    extraction += 0.05;
+  }
+
+  const sourceReliability = clamp(sourceReliabilityBase(sourceStatus) + tierAdjustment(tier));
+  const entityMatch = estimateEntityMatchConfidence(parsed.title, queryTitle);
+  const valuationPenalty = acceptance.acceptedForValuation ? 0 : -0.12;
+
+  const overall = clamp(extraction * 0.46 + entityMatch * 0.22 + sourceReliability * 0.32 + valuationPenalty);
+
+  return {
+    extractionConfidence: clamp(extraction),
+    entityMatchConfidence: entityMatch,
+    sourceReliabilityConfidence: sourceReliability,
+    overallConfidence: acceptance.acceptedForValuation ? overall : Math.min(overall, 0.59)
+  };
+}
 
 export function evaluateAccessDecision(
   context: AdapterExtractionContext,
@@ -114,9 +316,17 @@ export function buildBlockedResult(
     fetched_at: fetchedAt,
     parser_used: "none",
     model_used: null,
+    extraction_confidence: 0,
+    entity_match_confidence: 0,
+    source_reliability_confidence: 0,
     confidence_score: 0,
     accepted: false,
-    acceptance_reason: decision.blockerReason ?? decision.accessReason
+    accepted_for_evidence: false,
+    accepted_for_valuation: false,
+    valuation_lane: "none",
+    acceptance_reason: "blocked_access",
+    rejection_reason: decision.blockerReason ?? decision.accessReason,
+    valuation_eligibility_reason: "Source blocked."
   };
 
   return {
@@ -183,24 +393,32 @@ export function extractHrefCandidates(
 }
 
 export function buildRecordFromParsed(
-  adapter: Pick<SourceAdapter, "venueName" | "venueType" | "sourceName" | "city" | "country">,
+  adapter: Pick<SourceAdapter, "venueName" | "venueType" | "sourceName" | "city" | "country" | "tier">,
   candidate: SourceCandidate,
   context: AdapterExtractionContext,
   parsed: GenericParsedFields,
   rawSnapshotPath: string,
-  confidence: number
+  acceptance: AttemptAcceptanceDetails
 ): PriceRecord {
+  const confidence = buildConfidenceComponents({
+    parsed,
+    queryTitle: context.query.title,
+    sourceStatus: parsed.priceHidden ? "price_hidden" : context.accessContext.sourceAccessStatus,
+    tier: adapter.tier,
+    acceptance
+  });
+
   return {
-    artist_name: context.query.artist,
-    work_title: context.query.title ?? parsed.title,
+    artist_name: parsed.artistName ?? context.query.artist,
+    work_title: parsed.title,
     alternate_title: null,
-    year: context.query.year ?? null,
-    medium: context.query.medium ?? null,
+    year: parsed.year,
+    medium: parsed.medium,
     support: null,
-    dimensions_text: context.query.dimensions?.dimensionsText ?? null,
-    height_cm: context.query.dimensions?.heightCm ?? null,
-    width_cm: context.query.dimensions?.widthCm ?? null,
-    depth_cm: context.query.dimensions?.depthCm ?? null,
+    dimensions_text: parsed.dimensionsText,
+    height_cm: null,
+    width_cm: null,
+    depth_cm: null,
     signed: null,
     dated: null,
     edition_info: null,
@@ -227,10 +445,22 @@ export function buildRecordFromParsed(
     raw_snapshot_path: rawSnapshotPath,
     visual_match_score: null,
     metadata_match_score: null,
-    overall_confidence: confidence,
+    extraction_confidence: confidence.extractionConfidence,
+    entity_match_confidence: confidence.entityMatchConfidence,
+    source_reliability_confidence: confidence.sourceReliabilityConfidence,
+    valuation_confidence: acceptance.acceptedForValuation ? confidence.overallConfidence : 0,
+    overall_confidence: confidence.overallConfidence,
+    accepted_for_evidence: acceptance.acceptedForEvidence,
+    accepted_for_valuation: acceptance.acceptedForValuation,
+    valuation_lane: acceptance.valuationLane,
+    acceptance_reason: acceptance.acceptanceReason,
+    rejection_reason: acceptance.rejectionReason,
+    valuation_eligibility_reason: acceptance.valuationEligibilityReason,
     price_hidden: parsed.priceHidden,
     source_access_status: parsed.priceHidden ? "price_hidden" : context.accessContext.sourceAccessStatus,
-    notes: [`discovery:${candidate.provenance}`]
+    notes: [
+      `discovery:${candidate.provenance}`,
+      context.query.title ? `query_title_hint:${context.query.title}` : "query_title_hint:none"
+    ]
   };
 }
-

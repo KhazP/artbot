@@ -1,22 +1,28 @@
 # Eval Protocol
 
 ## Objective
-Validate Turkey-first coverage, status typing, evidence capture, and dedupe reliability.
+Measure extraction truthfulness and valuation eligibility quality for Turkey-first market research.
 
 ## Dataset
-`data/fixtures/eval-artists.json` (derived from Erol Sağmanlı collection report; OCR-cleaned subset for v1).
+- Primary: `data/fixtures/eval-artists.json`
+- Source fixtures: `data/fixtures/adapters/*`
+- Replay artifacts: run output snapshots under `runs/*` or `data/golden-results/*`
 
-## Checks
-1. At least one valid public or authorized record for a meaningful subset of artists.
-2. Accepted record count is at least 2x previous baseline on the same eval artist subset.
-3. Correct price semantics (`asking_price`, `estimate`, `realized_price`, `inquiry_only`, etc.).
-4. Accepted records include evidence paths (`screenshot_path`, `raw_snapshot_path`).
-5. Dedupe keeps medium/size mismatches separate.
-6. Source status distribution appears in run summary.
-7. Discovery summary fields are populated (`discovered_candidates`, `accepted_from_discovery`, `source_candidate_breakdown`).
+## Required Metrics (P0 Gates)
+1. Valuation-eligible null-price rate must be `0%`.
+2. Evidence-only records (`inquiry_only`, `price_hidden`, missing numeric/currency) must not enter valuation lane.
+3. Acceptance reason distribution must be populated and stable (`acceptance_reason_breakdown`).
+4. Top source fixtures must preserve semantic typing (`realized/estimate/asking/inquiry`).
+5. Contract tests for top Turkish adapters must pass.
+
+## Recommended Metrics (P1+)
+1. Accepted-for-valuation precision/recall on labeled fixture pages.
+2. Comparable ranking precision@k on manually reviewed cases.
+3. Source health trend: block/auth failure rate and extraction field completeness.
 
 ## Command Template
-Run API + worker, then execute:
-- `pnpm --filter @artbot/cli dev -- research artist --artist "<artist>" --wait`
-
-Collect artifacts under `runs/<run_id>/`.
+1. Start API + worker.
+2. Run CLI query:
+   - `pnpm --filter @artbot/cli dev -- research artist --artist "<artist>" --wait`
+3. Validate `runs/<run_id>/results.json`:
+   - `records[].accepted_for_valuation` contains no `price_amount: null` entries.

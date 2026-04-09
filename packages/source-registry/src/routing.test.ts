@@ -102,4 +102,50 @@ describe("planSources", () => {
 
     expect(plans[0].accessContext.sourceAccessStatus).toBe("blocked");
   });
+
+  it("blocks probe adapters unless optional probes are enabled", async () => {
+    const prior = process.env.ENABLE_OPTIONAL_PROBE_ADAPTERS;
+    try {
+      process.env.ENABLE_OPTIONAL_PROBE_ADAPTERS = "false";
+
+      const plans = await planSources(
+        baseQuery,
+        [
+          adapter({
+            id: "askart-probe",
+            sourceName: "askART"
+          })
+        ],
+        new AuthManager([])
+      );
+
+      expect(plans[0].accessContext.sourceAccessStatus).toBe("blocked");
+      expect(plans[0].accessContext.blockerReason).toContain("probe adapters are opt-in");
+    } finally {
+      process.env.ENABLE_OPTIONAL_PROBE_ADAPTERS = prior;
+    }
+  });
+
+  it("blocks licensed-only adapters without explicit licensed allowlist", async () => {
+    const plans = await planSources(
+      {
+        ...baseQuery,
+        allowLicensed: true,
+        licensedIntegrations: []
+      },
+      [
+        adapter({
+          id: "sanatfiyat-licensed-extractor",
+          sourceName: "Sanatfiyat",
+          requiresAuth: true,
+          requiresLicense: true,
+          supportedAccessModes: ["licensed"]
+        })
+      ],
+      new AuthManager([])
+    );
+
+    expect(plans[0].accessContext.sourceAccessStatus).toBe("blocked");
+    expect(plans[0].accessContext.blockerReason).toContain("not explicitly allowed");
+  });
 });

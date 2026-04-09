@@ -11,4 +11,7 @@ runs/
 !runs/.gitkeep
 runs-smoke/
 data/*.db
+apps/*/data/*.db
+apps/*/data/**/*.db
+data/**/*.db
 playwright/.auth

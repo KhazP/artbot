@@ -350,6 +350,8 @@ describe("specialized adapters", () => {
     );
     expect(turelResult.record?.price_type).toBe("inquiry_only");
     expect(turelResult.record?.price_hidden).toBe(true);
+    expect(turelResult.record?.accepted_for_valuation).toBe(false);
+    expect(turelResult.record?.acceptance_reason).toBe("inquiry_only_evidence");
     expect(turelResult.attempt.canonical_url).toContain("turelart.com");
 
     const antikasaResult = await antikasaLot.extract(

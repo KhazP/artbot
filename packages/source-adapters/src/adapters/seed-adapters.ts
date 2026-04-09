@@ -2,7 +2,9 @@ import { GenericSourceAdapter } from "./generic-adapter.js";
 import { buildSpecializedAdapters } from "./specialized-adapters.js";
 
 export function buildSeedAdapters() {
-  return [
+  const includeOptionalProbeAdapters = process.env.ENABLE_OPTIONAL_PROBE_ADAPTERS === "true";
+
+  const baselineAdapters = [
     ...buildSpecializedAdapters(),
     new GenericSourceAdapter({
       id: "artam-auction-records",
@@ -39,18 +41,6 @@ export function buildSeedAdapters() {
       city: "Istanbul",
       baseUrl: "https://alifart.com.tr",
       searchPath: "/?s="
-    }),
-    new GenericSourceAdapter({
-      id: "turkish-auction-generic",
-      sourceName: "Turkish Auction Generic",
-      venueName: "Turkey Market",
-      venueType: "auction_house",
-      sourcePageType: "listing",
-      tier: 2,
-      country: "Turkey",
-      city: null,
-      baseUrl: "https://www.google.com",
-      searchPath: "/search?q=site:tr+"
     }),
     new GenericSourceAdapter({
       id: "sothebys-lot",
@@ -99,7 +89,10 @@ export function buildSeedAdapters() {
       city: null,
       baseUrl: "https://www.phillips.com",
       searchPath: "/search/"
-    }),
+    })
+  ];
+
+  const optionalProbeAdapters = [
     new GenericSourceAdapter({
       id: "artsy-probe",
       sourceName: "Artsy",
@@ -154,4 +147,8 @@ export function buildSeedAdapters() {
       searchPath: "/search?query="
     })
   ];
+
+  return includeOptionalProbeAdapters
+    ? [...baselineAdapters, ...optionalProbeAdapters]
+    : baselineAdapters;
 }

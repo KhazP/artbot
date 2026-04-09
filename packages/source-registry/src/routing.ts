@@ -2,6 +2,7 @@ import { AuthManager } from "@artbot/auth-manager";
 import type { AccessContext, ResearchQuery } from "@artbot/shared-types";
 import type { SourceAdapter, SourceCandidate } from "@artbot/source-adapters";
 import { buildDiscoveryConfigFromEnv, expandCandidatesLight } from "./discovery.js";
+import { evaluateSourcePolicy } from "./source-policy.js";
 
 export interface PlannedSource {
   adapter: SourceAdapter;
@@ -39,6 +40,7 @@ export async function planSources(
   const planned: PlannedSource[] = [];
 
   for (const adapter of sorted) {
+    const sourcePolicyDecision = evaluateSourcePolicy(adapter, query);
     const accessContext = authManager.resolveAccess({
       sourceName: adapter.sourceName,
       sourceUrl: adapter.id,
@@ -51,7 +53,13 @@ export async function planSources(
       licensedIntegrations: query.licensedIntegrations
     });
 
-    if (!adapter.supportedAccessModes.includes(accessContext.mode)) {
+    if (!sourcePolicyDecision.allowed) {
+      accessContext.sourceAccessStatus = "blocked";
+      accessContext.accessReason = "Source policy blocked this adapter.";
+      accessContext.blockerReason = sourcePolicyDecision.reason;
+    }
+
+    if (!adapter.supportedAccessModes.includes(accessContext.mode) && accessContext.sourceAccessStatus !== "blocked") {
       accessContext.sourceAccessStatus = "blocked";
       accessContext.accessReason = "Source does not support selected access mode.";
       accessContext.blockerReason = `Access mode ${accessContext.mode} is unsupported for adapter ${adapter.id}.`;

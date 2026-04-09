@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AccessMode, SourceAccessStatus } from "./enums.js";
+import type { AccessMode, AcceptanceReason, SourceAccessStatus, ValuationLane } from "./enums.js";
 
 export const sourceAttemptSchema = z.object({
   run_id: z.string(),
@@ -31,9 +31,28 @@ export const sourceAttemptSchema = z.object({
   fetched_at: z.string(),
   parser_used: z.string(),
   model_used: z.string().nullable(),
+  extraction_confidence: z.number().min(0).max(1).nullable().optional(),
+  entity_match_confidence: z.number().min(0).max(1).nullable().optional(),
+  source_reliability_confidence: z.number().min(0).max(1).nullable().optional(),
   confidence_score: z.number().min(0).max(1),
   accepted: z.boolean(),
-  acceptance_reason: z.string()
+  accepted_for_evidence: z.boolean().optional(),
+  accepted_for_valuation: z.boolean().optional(),
+  valuation_lane: z.enum(["realized", "estimate", "asking", "none"]).optional(),
+  acceptance_reason: z.enum([
+    "valuation_ready",
+    "estimate_range_ready",
+    "asking_price_ready",
+    "inquiry_only_evidence",
+    "price_hidden_evidence",
+    "missing_numeric_price",
+    "missing_currency",
+    "missing_estimate_range",
+    "unknown_price_type",
+    "blocked_access"
+  ]),
+  rejection_reason: z.string().nullable().optional(),
+  valuation_eligibility_reason: z.string().nullable().optional()
 });
 
 export type SourceAttempt = z.infer<typeof sourceAttemptSchema>;
@@ -48,4 +67,13 @@ export interface AccessContext {
   sourceAccessStatus: SourceAccessStatus;
   accessReason?: string;
   blockerReason?: string;
+}
+
+export interface AttemptAcceptanceDetails {
+  acceptedForEvidence: boolean;
+  acceptedForValuation: boolean;
+  valuationLane: ValuationLane;
+  acceptanceReason: AcceptanceReason;
+  rejectionReason: string | null;
+  valuationEligibilityReason: string | null;
 }

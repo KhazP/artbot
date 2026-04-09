@@ -1,7 +1,11 @@
 import "dotenv/config";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import {
+  acceptanceReasonList,
   researchArtistRequestSchema,
   researchWorkRequestSchema,
   type RunSummary,
@@ -12,8 +16,15 @@ import { z } from "zod";
 
 const port = Number(process.env.PORT ?? 4000);
 const apiKey = process.env.ARTBOT_API_KEY;
-const dbPath = process.env.DATABASE_PATH ?? "./data/artbot.db";
-const runsRoot = process.env.RUNS_ROOT ?? "./runs";
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+function resolveWorkspaceDefault(relativePath: string): string {
+  const workspaceRoot = process.env.INIT_CWD ?? path.resolve(moduleDir, "../../..");
+  return path.resolve(workspaceRoot, relativePath);
+}
+
+const dbPath = process.env.DATABASE_PATH ?? resolveWorkspaceDefault("data/artbot.db");
+const runsRoot = process.env.RUNS_ROOT ?? resolveWorkspaceDefault("runs");
 
 const storage = new ArtbotStorage(dbPath, runsRoot);
 
@@ -23,6 +34,11 @@ await app.register(cors, { origin: true });
 const runsQuerySchema = z.object({
   status: z.enum(["pending", "running", "completed", "failed"]).optional(),
   limit: z.coerce.number().int().positive().max(200).optional()
+});
+
+const recoverStaleRunsSchema = z.object({
+  maxStaleMinutes: z.coerce.number().int().positive().max(24 * 60).optional(),
+  reason: z.string().trim().min(3).max(240).optional()
 });
 
 app.addHook("preHandler", async (request, reply) => {
@@ -80,14 +96,48 @@ app.get("/runs/:id", async (request, reply) => {
     return reply.status(404).send({ error: "Run not found" });
   }
 
+  let valuationGenerated = false;
+  let valuationReason = details.run.status === "completed" ? "Valuation output unavailable." : "Run still in progress.";
+  if (details.run.resultsPath && fs.existsSync(details.run.resultsPath)) {
+    try {
+      const payload = JSON.parse(fs.readFileSync(details.run.resultsPath, "utf-8")) as {
+        valuation?: { generated?: boolean; reason?: string };
+      };
+      if (payload.valuation) {
+        valuationGenerated = Boolean(payload.valuation.generated);
+        valuationReason = payload.valuation.reason ?? valuationReason;
+      }
+    } catch {
+      valuationReason = "Failed to parse valuation output.";
+    }
+  }
+
+  const acceptedForEvidenceCount = details.attempts.filter(
+    (attempt) => attempt.accepted_for_evidence ?? attempt.accepted
+  ).length;
+  const totalAttempts = details.attempts.length;
+  const valuationEligibleCount = details.records.filter((record) => record.accepted_for_valuation).length;
+  const acceptanceReasonBreakdown = Object.fromEntries(acceptanceReasonList.map((reason) => [reason, 0])) as Record<
+    (typeof acceptanceReasonList)[number],
+    number
+  >;
+  for (const attempt of details.attempts) {
+    if (attempt.acceptance_reason in acceptanceReasonBreakdown) {
+      acceptanceReasonBreakdown[attempt.acceptance_reason] += 1;
+    }
+  }
+
   const summary: RunSummary = {
     run_id: details.run.id,
-    total_records: details.attempts.length,
-    accepted_records: details.records.length,
-    rejected_candidates: details.attempts.filter((attempt) => !attempt.accepted).length,
+    total_records: totalAttempts,
+    total_attempts: totalAttempts,
+    evidence_records: acceptedForEvidenceCount,
+    valuation_eligible_records: valuationEligibleCount,
+    accepted_records: acceptedForEvidenceCount,
+    rejected_candidates: details.attempts.filter((attempt) => !(attempt.accepted_for_evidence ?? attempt.accepted)).length,
     discovered_candidates: details.attempts.filter((attempt) => attempt.discovery_provenance && attempt.discovery_provenance !== "seed").length,
     accepted_from_discovery: details.attempts.filter(
-      (attempt) => attempt.accepted && attempt.discovery_provenance && attempt.discovery_provenance !== "seed"
+      (attempt) => (attempt.accepted_for_evidence ?? attempt.accepted) && attempt.discovery_provenance && attempt.discovery_provenance !== "seed"
     ).length,
     source_candidate_breakdown: details.attempts.reduce<Record<string, number>>((acc, attempt) => {
       acc[attempt.source_name] = (acc[attempt.source_name] ?? 0) + 1;
@@ -97,8 +147,9 @@ app.get("/runs/:id", async (request, reply) => {
       sourceStatusList.map((status) => [status, details.sourceStatusBreakdown[status]])
     ) as RunSummary["source_status_breakdown"],
     auth_mode_breakdown: details.authModeBreakdown,
-    valuation_generated: false,
-    valuation_reason: details.run.status === "completed" ? "Refer to report output." : "Run still in progress."
+    acceptance_reason_breakdown: acceptanceReasonBreakdown,
+    valuation_generated: valuationGenerated,
+    valuation_reason: valuationReason
   };
 
   return {
@@ -106,6 +157,23 @@ app.get("/runs/:id", async (request, reply) => {
     summary,
     records: details.records,
     attempts: details.attempts
+  };
+});
+
+app.post("/runs/recover-stale", async (request, reply) => {
+  const parsed = recoverStaleRunsSchema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    return reply.status(400).send({ error: parsed.error.flatten() });
+  }
+
+  const maxStaleMinutes = parsed.data.maxStaleMinutes ?? 15;
+  const reason = parsed.data.reason ?? `Recovered stale runs via API at ${new Date().toISOString()}.`;
+  const recoveredRunIds = storage.recoverStaleRunningRuns(maxStaleMinutes * 60_000, reason);
+
+  return {
+    recovered_count: recoveredRunIds.length,
+    recovered_run_ids: recoveredRunIds,
+    max_stale_minutes: maxStaleMinutes
   };
 });
 

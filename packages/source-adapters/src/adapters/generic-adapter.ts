@@ -1,14 +1,19 @@
-import fs from "node:fs";
-import path from "node:path";
 import { fetchCheapestFirst, parseGenericLotFields } from "@artbot/extraction";
-import type { PriceRecord, SourceAttempt } from "@artbot/shared-types";
+import type { SourceAttempt } from "@artbot/shared-types";
 import type {
   AdapterExtractionContext,
   AdapterExtractionResult,
-  AdapterStatusDecision,
   SourceAdapter,
   SourceCandidate
 } from "../types.js";
+import {
+  buildBlockedResult,
+  buildRecordFromParsed,
+  ensureRawPath,
+  evaluateAcceptance,
+  evaluateAccessDecision,
+  writeRawSnapshot
+} from "./custom-adapter-utils.js";
 
 interface GenericAdapterOptions {
   id: string;
@@ -24,49 +29,6 @@ interface GenericAdapterOptions {
   requiresAuth?: boolean;
   requiresLicense?: boolean;
   supportedAccessModes?: SourceAdapter["supportedAccessModes"];
-}
-
-function decisionFromAccess(context: AdapterExtractionContext, adapter: GenericSourceAdapter): AdapterStatusDecision {
-  const sourceAccessStatus = context.accessContext.sourceAccessStatus;
-
-  if (sourceAccessStatus === "blocked") {
-    return {
-      sourceAccessStatus,
-      accessReason: context.accessContext.accessReason ?? "Source blocked by policy.",
-      blockerReason: context.accessContext.blockerReason ?? "Blocked access.",
-      canProceed: false
-    };
-  }
-
-  if (adapter.requiresLicense && context.accessContext.mode !== "licensed") {
-    return {
-      sourceAccessStatus: "blocked",
-      accessReason: "Licensed integration required.",
-      blockerReason: "Operator did not provide a licensed integration.",
-      canProceed: false
-    };
-  }
-
-  if (adapter.requiresAuth && context.accessContext.mode === "anonymous") {
-    return {
-      sourceAccessStatus: "auth_required",
-      accessReason: "Source requires authenticated session.",
-      blockerReason: "No authorized profile available.",
-      canProceed: false
-    };
-  }
-
-  return {
-    sourceAccessStatus,
-    accessReason: context.accessContext.accessReason ?? "Proceeding with source extraction.",
-    blockerReason: null,
-    canProceed: true
-  };
-}
-
-function writeRawSnapshot(filePath: string, content: string): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, "utf-8");
 }
 
 export class GenericSourceAdapter implements SourceAdapter {
@@ -116,118 +78,36 @@ export class GenericSourceAdapter implements SourceAdapter {
   }
 
   public async extract(candidate: SourceCandidate, context: AdapterExtractionContext): Promise<AdapterExtractionResult> {
-    const decision = decisionFromAccess(context, this);
-    const fetchedAt = new Date().toISOString();
-
+    const decision = evaluateAccessDecision(context, this.requiresAuth, this.requiresLicense);
     if (!decision.canProceed) {
-      const rawSnapshotPath = path.join(context.evidenceDir, "raw", `${this.id}-${Date.now()}-blocked.json`);
-      writeRawSnapshot(
-        rawSnapshotPath,
-        JSON.stringify(
-          {
-            source_name: this.sourceName,
-            source_url: candidate.url,
-            source_access_status: decision.sourceAccessStatus,
-            access_reason: decision.accessReason,
-            blocker_reason: decision.blockerReason,
-            fetched_at: fetchedAt
-          },
-          null,
-          2
-        )
-      );
-
-      const attempt: SourceAttempt = {
-        run_id: context.runId,
-        source_name: this.sourceName,
-        source_url: candidate.url,
-        canonical_url: candidate.url,
-        access_mode: context.accessContext.mode,
-        source_access_status: decision.sourceAccessStatus,
-        access_reason: decision.accessReason,
-        blocker_reason: decision.blockerReason,
-        extracted_fields: {},
-        discovery_provenance: candidate.provenance,
-        discovery_score: candidate.score,
-        discovered_from_url: candidate.discoveredFromUrl ?? null,
-        screenshot_path: null,
-        pre_auth_screenshot_path: null,
-        post_auth_screenshot_path: null,
-        raw_snapshot_path: rawSnapshotPath,
-        trace_path: null,
-        har_path: null,
-        fetched_at: fetchedAt,
-        parser_used: "none",
-        model_used: null,
-        confidence_score: 0,
-        accepted: false,
-        acceptance_reason: decision.blockerReason ?? decision.accessReason
-      };
-
-      return {
-        attempt,
-        record: null,
-        needsBrowserVerification: false
-      };
+      return buildBlockedResult(this, candidate, context, decision);
     }
 
+    const fetchedAt = new Date().toISOString();
     const extracted = await fetchCheapestFirst(candidate.url);
-    const parsed = parseGenericLotFields(`${extracted.markdown} ${extracted.html}`);
-    const rawSnapshotPath = path.join(context.evidenceDir, "raw", `${this.id}-${Date.now()}-cheap.html`);
+    const rawSnapshotPath = ensureRawPath(context.evidenceDir, `${this.id}-${Date.now()}-cheap.html`);
     writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown);
 
-    let sourceStatus = decision.sourceAccessStatus;
-    if (parsed.priceHidden) {
-      sourceStatus = "price_hidden";
-    }
+    const parsed = parseGenericLotFields(`${extracted.markdown} ${extracted.html}`);
+    const sourceStatus = parsed.priceHidden ? "price_hidden" : decision.sourceAccessStatus;
+    const acceptance = evaluateAcceptance(parsed, sourceStatus);
 
-    const confidenceBase = parsed.priceType === "unknown" ? 0.25 : 0.65;
-    const confidence = Math.min(0.95, confidenceBase + (parsed.priceHidden ? 0.1 : 0));
+    const record = buildRecordFromParsed(
+      {
+        venueName: this.venueName,
+        venueType: this.venueType,
+        sourceName: this.sourceName,
+        city: this.city,
+        country: this.country,
+        tier: this.tier
+      },
+      candidate,
+      context,
+      parsed,
+      rawSnapshotPath,
+      acceptance
+    );
 
-    const record: PriceRecord = {
-      artist_name: context.query.artist,
-      work_title: context.query.title ?? parsed.title,
-      alternate_title: null,
-      year: context.query.year ?? null,
-      medium: context.query.medium ?? null,
-      support: null,
-      dimensions_text: context.query.dimensions?.dimensionsText ?? null,
-      height_cm: context.query.dimensions?.heightCm ?? null,
-      width_cm: context.query.dimensions?.widthCm ?? null,
-      depth_cm: context.query.dimensions?.depthCm ?? null,
-      signed: null,
-      dated: null,
-      edition_info: null,
-      is_unique_work: null,
-      venue_name: this.venueName,
-      venue_type: this.venueType,
-      city: this.city,
-      country: this.country,
-      source_name: this.sourceName,
-      source_url: candidate.url,
-      source_page_type: candidate.sourcePageType,
-      sale_or_listing_date: parsed.saleDate,
-      lot_number: parsed.lotNumber,
-      price_type: parsed.priceType,
-      estimate_low: parsed.estimateLow,
-      estimate_high: parsed.estimateHigh,
-      price_amount: parsed.priceAmount,
-      currency: parsed.currency,
-      normalized_price_try: null,
-      normalized_price_usd: null,
-      buyers_premium_included: parsed.buyersPremiumIncluded,
-      image_url: null,
-      screenshot_path: null,
-      raw_snapshot_path: rawSnapshotPath,
-      visual_match_score: null,
-      metadata_match_score: null,
-      overall_confidence: confidence,
-      price_hidden: parsed.priceHidden,
-      source_access_status: sourceStatus,
-      notes: []
-    };
-
-    const accepted = parsed.priceType !== "unknown" || parsed.priceHidden;
     const attempt: SourceAttempt = {
       run_id: context.runId,
       source_name: this.sourceName,
@@ -244,7 +124,11 @@ export class GenericSourceAdapter implements SourceAdapter {
         price_type: parsed.priceType,
         price_amount: parsed.priceAmount,
         currency: parsed.currency,
-        buyers_premium_included: parsed.buyersPremiumIncluded
+        buyers_premium_included: parsed.buyersPremiumIncluded,
+        title: parsed.title,
+        medium: parsed.medium,
+        year: parsed.year,
+        dimensions_text: parsed.dimensionsText
       },
       discovery_provenance: candidate.provenance,
       discovery_score: candidate.score,
@@ -258,15 +142,30 @@ export class GenericSourceAdapter implements SourceAdapter {
       fetched_at: fetchedAt,
       parser_used: extracted.parserUsed,
       model_used: null,
-      confidence_score: confidence,
-      accepted,
-      acceptance_reason: accepted ? "Structured pricing fields found." : "No reliable price fields found."
+      extraction_confidence: record.extraction_confidence,
+      entity_match_confidence: record.entity_match_confidence,
+      source_reliability_confidence: record.source_reliability_confidence,
+      confidence_score: record.overall_confidence,
+      accepted: acceptance.acceptedForEvidence,
+      accepted_for_evidence: acceptance.acceptedForEvidence,
+      accepted_for_valuation: acceptance.acceptedForValuation,
+      valuation_lane: acceptance.valuationLane,
+      acceptance_reason: acceptance.acceptanceReason,
+      rejection_reason: acceptance.rejectionReason,
+      valuation_eligibility_reason: acceptance.valuationEligibilityReason
     };
+
+    const shouldEscalateForMissingPrice =
+      acceptance.acceptedForEvidence &&
+      !acceptance.acceptedForValuation &&
+      parsed.priceType !== "inquiry_only" &&
+      !parsed.priceHidden;
 
     return {
       attempt,
-      record: accepted ? record : null,
-      needsBrowserVerification: !accepted || context.accessContext.mode !== "anonymous"
+      record: acceptance.acceptedForEvidence ? record : null,
+      needsBrowserVerification:
+        shouldEscalateForMissingPrice || !acceptance.acceptedForEvidence || context.accessContext.mode !== "anonymous"
     };
   }
 }

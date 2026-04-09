@@ -14,6 +14,9 @@ interface RunRow {
   results_path: string | null;
   created_at: string;
   updated_at: string;
+  lease_owner?: string | null;
+  lease_expires_at?: string | null;
+  heartbeat_at?: string | null;
 }
 
 export interface RunDetails {
@@ -47,6 +50,9 @@ export class ArtbotStorage {
         error TEXT,
         report_path TEXT,
         results_path TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -74,6 +80,18 @@ export class ArtbotStorage {
         fetched_at TEXT NOT NULL
       );
     `);
+
+    this.ensureRunsColumn("lease_owner", "TEXT");
+    this.ensureRunsColumn("lease_expires_at", "TEXT");
+    this.ensureRunsColumn("heartbeat_at", "TEXT");
+  }
+
+  private ensureRunsColumn(columnName: "lease_owner" | "lease_expires_at" | "heartbeat_at", columnSqlType: "TEXT"): void {
+    const columns = this.db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === columnName)) {
+      return;
+    }
+    this.db.exec(`ALTER TABLE runs ADD COLUMN ${columnName} ${columnSqlType}`);
   }
 
   public createRun(runType: "artist" | "work", query: ResearchQuery): RunEntity {
@@ -118,6 +136,22 @@ export class ArtbotStorage {
     return rows.map((row) => this.mapRun(row));
   }
 
+  public getRunnableRuns(limit = 5): RunEntity[] {
+    const nowIso = new Date().toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+         FROM runs
+         WHERE status = 'pending'
+            OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+         ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at ASC
+         LIMIT ?`
+      )
+      .all(nowIso, limit) as unknown as RunRow[];
+
+    return rows.map((row) => this.mapRun(row));
+  }
+
   public listRuns(limit = 20, status?: RunStatus): RunEntity[] {
     const cappedLimit = Math.max(1, Math.min(limit, 200));
 
@@ -143,26 +177,125 @@ export class ArtbotStorage {
     return rows.map((row) => this.mapRun(row));
   }
 
-  public reserveRun(runId: string): boolean {
-    const now = new Date().toISOString();
+  public reserveRun(runId: string, workerId = "worker-default", leaseMs = 120_000): boolean {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const leaseExpiresAt = new Date(now.getTime() + Math.max(1, leaseMs)).toISOString();
     const result = this.db
-      .prepare(`UPDATE runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'`)
-      .run(now, runId);
+      .prepare(
+        `UPDATE runs
+         SET status = 'running',
+             updated_at = ?,
+             lease_owner = ?,
+             lease_expires_at = ?,
+             heartbeat_at = ?,
+             error = NULL
+         WHERE id = ?
+           AND (
+             status = 'pending'
+             OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+           )`
+      )
+      .run(nowIso, workerId, leaseExpiresAt, nowIso, runId, nowIso);
 
     return result.changes > 0;
+  }
+
+  public heartbeatRun(runId: string, workerId: string, leaseMs = 120_000): boolean {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const leaseExpiresAt = new Date(now.getTime() + Math.max(1, leaseMs)).toISOString();
+
+    const result = this.db
+      .prepare(
+        `UPDATE runs
+         SET updated_at = ?,
+             heartbeat_at = ?,
+             lease_expires_at = ?
+         WHERE id = ?
+           AND status = 'running'
+           AND lease_owner = ?`
+      )
+      .run(nowIso, nowIso, leaseExpiresAt, runId, workerId);
+
+    return result.changes > 0;
+  }
+
+  public recoverStaleRunningRuns(maxStaleMs = 15 * 60 * 1000, reason = "Recovered stale running run."): string[] {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const staleCutoff = new Date(now.getTime() - Math.max(0, maxStaleMs)).toISOString();
+
+    const staleRows = this.db
+      .prepare(
+        `SELECT id FROM runs
+         WHERE status = 'running'
+           AND (
+             (lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+             OR (heartbeat_at IS NOT NULL AND heartbeat_at < ?)
+             OR (heartbeat_at IS NULL AND updated_at < ?)
+           )`
+      )
+      .all(nowIso, staleCutoff, staleCutoff) as Array<{ id: string }>;
+
+    if (staleRows.length === 0) {
+      return [];
+    }
+
+    const recoveredIds: string[] = [];
+    for (const row of staleRows) {
+      const result = this.db
+        .prepare(
+          `UPDATE runs
+           SET status = 'failed',
+               error = ?,
+               updated_at = ?,
+               lease_owner = NULL,
+               lease_expires_at = NULL,
+               heartbeat_at = NULL
+           WHERE id = ?
+             AND status = 'running'`
+        )
+        .run(reason, nowIso, row.id);
+
+      if (result.changes > 0) {
+        recoveredIds.push(row.id);
+      }
+    }
+
+    return recoveredIds;
   }
 
   public completeRun(runId: string, reportPath: string, resultsPath: string): void {
     const now = new Date().toISOString();
     this.db
-      .prepare(`UPDATE runs SET status = 'completed', report_path = ?, results_path = ?, updated_at = ? WHERE id = ?`)
+      .prepare(
+        `UPDATE runs
+         SET status = 'completed',
+             report_path = ?,
+             results_path = ?,
+             updated_at = ?,
+             lease_owner = NULL,
+             lease_expires_at = NULL,
+             heartbeat_at = NULL
+         WHERE id = ?`
+      )
       .run(reportPath, resultsPath, now, runId);
   }
 
   public failRun(runId: string, error: string): void {
     const now = new Date().toISOString();
     this.db
-      .prepare(`UPDATE runs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`)
+      .prepare(
+        `UPDATE runs
+         SET status = 'failed',
+             error = ?,
+             updated_at = ?,
+             lease_owner = NULL,
+             lease_expires_at = NULL,
+             heartbeat_at = NULL
+         WHERE id = ?`
+      )
       .run(error, now, runId);
   }
 
