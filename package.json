@@ -10,7 +10,9 @@
     "start:artbot": "./scripts/start-artbot.sh",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "hooks:install": "./scripts/install-git-hooks.sh",
+    "prepare": "pnpm hooks:install"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",

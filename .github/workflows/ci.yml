@@ -29,6 +29,9 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Build internal types first
+        run: pnpm --filter @artbot/shared-types build
+
       - name: Typecheck
         run: pnpm typecheck
 

@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+
+"$(git rev-parse --show-toplevel)/scripts/local-ci-checks.sh" quick
