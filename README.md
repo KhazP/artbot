@@ -259,11 +259,18 @@ pnpm test             # Run monorepo test suite
 
 ---
 
+## 📚 Documentation
+
+- [Docs Index](docs/README.md)
+- [Changelog](CHANGELOG.md)
+
+---
+
 ## 🤝 Community
 
-- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Support channels: [SUPPORT.md](SUPPORT.md)
-- Security reporting: [SECURITY.md](SECURITY.md)
+- Contribution guide: [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md)
+- Support channels: [.github/SUPPORT.md](.github/SUPPORT.md)
+- Security reporting: [.github/SECURITY.md](.github/SECURITY.md)
 
 ---
 

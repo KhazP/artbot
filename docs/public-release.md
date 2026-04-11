@@ -1,6 +1,6 @@
 # Public GitHub Release Guide
 
-This guide is tailored to `https://github.com/KhazP/CCGAgent` and reflects the repository state prepared on **April 11, 2026**.
+This guide is tailored to `https://github.com/KhazP/artbot` and reflects the repository state prepared on **April 11, 2026**.
 
 ## About Box
 
@@ -223,7 +223,7 @@ For the owner profile tied to the release:
 | ----------------- | ---------------------- |
 | Name              | `Alp Yalay`            |
 | Public contact    | `contact@alpyalay.org` |
-| Pinned repository | `CCGAgent`             |
+| Pinned repository | `artbot`               |
 
 Pin this repository on the profile once it is public so visitors do not have to discover it through the repo list.
 

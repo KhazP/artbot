@@ -29,8 +29,8 @@ Thanks for contributing. This repository is released publicly, but it is maintai
 
 ```bash
 # 1. Fork and clone the repo
-git clone https://github.com/KhazP/CCGAgent.git
-cd CCGAgent
+git clone https://github.com/KhazP/artbot.git
+cd artbot
 
 # 2. Install dependencies
 pnpm install
@@ -51,7 +51,7 @@ pnpm test
 - Branch from `main`.
 - Keep each pull request to one logical change.
 - Add or update tests when behavior changes.
-- Update `README.md`, [`docs/`](/Users/alpyalay/Documents/GitHub/CCGAgent/docs), or package docs for user-visible changes.
+- Update `README.md`, [`docs/`](../docs), or package docs for user-visible changes.
 - Do not commit secrets, local auth state, run artifacts, or generated logs.
 
 ## Pull Request Guidelines
@@ -90,4 +90,4 @@ Do **not** open a public issue for vulnerabilities. Follow [SECURITY.md](SECURIT
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
+By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](../LICENSE).

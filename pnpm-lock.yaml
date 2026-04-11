@@ -60,7 +60,7 @@ importers:
         specifier: ^11.0.1
         version: 11.2.0
       '@mendable/firecrawl-js':
-        specifier: ^1.29.2
+        specifier: ^1.29.3
         version: 1.29.3
       boxen:
         specifier: ^8.0.1
@@ -167,7 +167,7 @@ importers:
         version: 1.59.1
     optionalDependencies:
       '@browserbasehq/stagehand':
-        specifier: ^2.0.0
+        specifier: ^2.5.8
         version: 2.5.8(deepmerge@4.3.1)(dotenv@16.6.1)(react@19.2.4)(zod@3.25.76)
 
   packages/extraction:
@@ -176,7 +176,7 @@ importers:
         specifier: workspace:*
         version: link:../shared-types
       '@mendable/firecrawl-js':
-        specifier: ^1.29.2
+        specifier: ^1.29.3
         version: 1.29.3
       cheerio:
         specifier: ^1.0.0

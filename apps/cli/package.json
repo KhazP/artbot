@@ -29,12 +29,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KhazP/CCGAgent.git",
+    "url": "git+https://github.com/KhazP/artbot.git",
     "directory": "apps/cli"
   },
-  "homepage": "https://github.com/KhazP/CCGAgent#readme",
+  "homepage": "https://github.com/KhazP/artbot#readme",
   "bugs": {
-    "url": "https://github.com/KhazP/CCGAgent/issues",
+    "url": "https://github.com/KhazP/artbot/issues",
     "email": "contact@alpyalay.org"
   },
   "scripts": {
@@ -48,7 +48,7 @@
   "dependencies": {
     "@clack/prompts": "^0.9.1",
     "@fastify/cors": "^11.0.1",
-    "@mendable/firecrawl-js": "^1.29.2",
+    "@mendable/firecrawl-js": "^1.29.3",
     "boxen": "^8.0.1",
     "cheerio": "^1.0.0",
     "cli-table3": "^0.6.5",

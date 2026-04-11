@@ -26,3 +26,8 @@ apps/*/data/*.db
 apps/*/data/**/*.db
 data/**/*.db
 playwright/.auth
+
+# Internal planning/audit docs should remain local
+docs/internal/
+AUDIT.md
+IMPLEMENTATION_PLAN.md

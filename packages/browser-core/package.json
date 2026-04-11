@@ -17,6 +17,6 @@
     "playwright": "^1.52.0"
   },
   "optionalDependencies": {
-    "@browserbasehq/stagehand": "^2.0.0"
+    "@browserbasehq/stagehand": "^2.5.8"
   }
 }
