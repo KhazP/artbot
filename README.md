@@ -50,6 +50,7 @@ turkish-art-price-agent/
 ├── data/
 │   ├── fixtures/        # Eval inputs
 │   └── golden-results/  # Sample outputs
+├── var/                 # Local runtime artifacts (DB, runs, logs)
 └── ...
 ```
 
@@ -177,7 +178,7 @@ Set `AUTH_PROFILES_JSON` in your environment:
 Each run produces a structured evidence directory:
 
 ```
-runs/<run_id>/
+var/runs/<run_id>/
 ├── results.json
 ├── report.md
 └── evidence/

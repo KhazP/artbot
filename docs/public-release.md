@@ -193,7 +193,7 @@ If you later enable the wiki, use this page map:
 | Installation                 | Node, pnpm, LM Studio, Docker paths                |
 | Configuration                | `.env`, auth profiles, provider settings           |
 | Source Adapters              | Supported sources, access modes, limitations       |
-| Evidence and Outputs         | `runs/`, reports, screenshots, traces              |
+| Evidence and Outputs         | `var/runs/`, reports, screenshots, traces          |
 | Operations                   | Local API, worker, logs, troubleshooting           |
 | Development                  | Monorepo structure, tests, package map             |
 | Security and Responsible Use | Terms, licensed sources, disclosure policy         |

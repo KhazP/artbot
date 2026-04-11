@@ -17,7 +17,7 @@ cd "$repo_root"
 git config core.hooksPath .githooks
 
 chmod +x \
-  scripts/local-ci-checks.sh \
+  scripts/ci/local-ci-checks.sh \
   .githooks/pre-commit \
   .githooks/pre-push \
   .githooks/pre-merge-commit

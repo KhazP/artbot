@@ -6,7 +6,7 @@ Measure extraction truthfulness and valuation eligibility quality for Turkey-fir
 ## Dataset
 - Primary: `data/fixtures/eval-artists.json`
 - Source fixtures: `data/fixtures/adapters/*`
-- Replay artifacts: run output snapshots under `runs/*` or `data/golden-results/*`
+- Replay artifacts: run output snapshots under `var/runs/*` or `data/golden-results/*`
 
 ## Required Metrics (P0 Gates)
 1. Valuation-eligible null-price rate must be `0%`.
@@ -24,5 +24,5 @@ Measure extraction truthfulness and valuation eligibility quality for Turkey-fir
 1. Start API + worker.
 2. Run CLI query:
    - `pnpm --filter artbot dev -- research artist --artist "<artist>" --wait`
-3. Validate `runs/<run_id>/results.json`:
+3. Validate `var/runs/<run_id>/results.json`:
    - `records[].accepted_for_valuation` contains no `price_amount: null` entries.

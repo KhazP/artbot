@@ -71,7 +71,7 @@ function ensureWorkspaceRuntimeBuilt(workspaceRoot: string): void {
 
 function resolveStatePath(mode: Exclude<LocalBackendMode, "none">, root: string): string {
   if (mode === "workspace") {
-    return path.join(root, ".artbot-logs", "backend-state.json");
+    return path.join(root, "var", "state", "backend-state.json");
   }
 
   return resolveLocalRuntimePaths().backendStatePath;
@@ -346,7 +346,7 @@ export async function startLocalBackendServices(
       mode: status.mode,
       runtimeRoot: status.runtimeRoot,
       logDir:
-        status.mode === "workspace" ? path.join(status.runtimeRoot, ".artbot-logs") : ensureLocalRuntimePaths().logDir,
+        status.mode === "workspace" ? path.join(status.runtimeRoot, "var", "logs") : ensureLocalRuntimePaths().logDir,
       apiLogPath: status.api.logPath ?? "",
       workerLogPath: status.worker.logPath ?? "",
       apiPid: status.api.pid,
@@ -363,7 +363,7 @@ export async function startLocalBackendServices(
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const runtimeRoot = status.mode === "workspace" ? status.runtimeRoot : ensureLocalRuntimePaths().homeDir;
-  const logDir = status.mode === "workspace" ? path.join(runtimeRoot, ".artbot-logs") : ensureLocalRuntimePaths().logDir;
+  const logDir = status.mode === "workspace" ? path.join(runtimeRoot, "var", "logs") : ensureLocalRuntimePaths().logDir;
   fs.mkdirSync(logDir, { recursive: true });
 
   const apiLogPath = path.join(logDir, `api-${stamp}.log`);

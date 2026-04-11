@@ -20,9 +20,9 @@ Deliver a session-aware, evidence-first art price research system with determini
 - `packages/orchestrator`: end-to-end run coordinator.
 
 ## Storage and Evidence
-- Metadata: SQLite via Node built-in `node:sqlite` (`data/artbot.db`).
-- Evidence: filesystem under `runs/<run_id>/evidence/`.
-- Artifacts: `runs/<run_id>/results.json` and `runs/<run_id>/report.md`.
+- Metadata: SQLite via Node built-in `node:sqlite` (`var/data/artbot.db`).
+- Evidence: filesystem under `var/runs/<run_id>/evidence/`.
+- Artifacts: `var/runs/<run_id>/results.json` and `var/runs/<run_id>/report.md`.
 
 ## Auth and Session Model
 - Operator-supplied profiles are loaded through `AUTH_PROFILES_JSON`.

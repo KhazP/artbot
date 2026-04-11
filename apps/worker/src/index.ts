@@ -18,8 +18,8 @@ function resolveWorkspaceDefault(relativePath: string): string {
   return path.resolve(workspaceRoot, relativePath);
 }
 
-const dbPath = process.env.DATABASE_PATH ?? resolveWorkspaceDefault("data/artbot.db");
-const runsRoot = process.env.RUNS_ROOT ?? resolveWorkspaceDefault("runs");
+const dbPath = process.env.DATABASE_PATH ?? resolveWorkspaceDefault("var/data/artbot.db");
+const runsRoot = process.env.RUNS_ROOT ?? resolveWorkspaceDefault("var/runs");
 
 const storage = new ArtbotStorage(dbPath, runsRoot);
 const orchestrator = new ResearchOrchestrator(storage);

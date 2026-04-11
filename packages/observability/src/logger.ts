@@ -36,7 +36,7 @@ function write(level: LogLevel, message: string, context: LogContext = {}): void
     message,
     ...sanitizeContext(context)
   };
-  // eslint-disable-next-line no-console
+   
   console.log(JSON.stringify(payload));
 }
 

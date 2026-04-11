@@ -929,7 +929,7 @@ export class ResearchOrchestrator {
     try {
       const html = fs.readFileSync(rawSnapshotPath, "utf-8");
       const parsed = parseGenericLotFields(html);
-      let recoveredRecord = result.record ?? this.createRecoveredRecordFromSnapshot(task, run, result.attempt, parsed);
+      const recoveredRecord = result.record ?? this.createRecoveredRecordFromSnapshot(task, run, result.attempt, parsed);
 
       if (!recoveredRecord) {
         return null;

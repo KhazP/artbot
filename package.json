@@ -7,19 +7,26 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
-    "start:artbot": "./scripts/start-artbot.sh",
+    "start:artbot": "./scripts/dev/start-artbot.sh",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
+    "lint": "turbo run //#lint:root",
+    "lint:packages": "turbo run lint",
+    "lint:root": "eslint .",
     "format": "prettier --write .",
-    "hooks:install": "./scripts/install-git-hooks.sh",
+    "hooks:install": "./scripts/setup/install-git-hooks.sh",
     "prepare": "pnpm hooks:install"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.14.1",
+    "eslint": "^10.2.0",
+    "globals": "^17.4.0",
     "prettier": "^3.5.3",
-    "turbo": "^2.5.0",
     "tsx": "^4.19.3",
+    "turbo": "^2.5.0",
     "typescript": "^5.8.3",
+    "typescript-eslint": "^8.58.1",
     "vitest": "^3.1.1"
   }
 }

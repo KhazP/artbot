@@ -11,8 +11,8 @@ Note: `node:sqlite` may emit an experimental warning depending on Node version.
 Copy `.env.example` to `.env` and set:
 - `ARTBOT_API_KEY`
 - `API_BASE_URL` (optional; CLI base URL, defaults to `http://localhost:4000`)
-- `DATABASE_PATH`
-- `RUNS_ROOT`
+- `DATABASE_PATH` (default: `./var/data/artbot.db`)
+- `RUNS_ROOT` (default: `./var/runs`)
 - `FIRECRAWL_API_KEY` (optional)
 - `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` (optional)
 - `STRUCTURED_LLM_PROVIDER` (`auto` | `gemini` | `openai_compatible`; optional)
@@ -52,10 +52,10 @@ Provide `AUTH_PROFILES_JSON` as JSON array:
 
 Capture/update browser session states (manual login):
 - `pnpm exec playwright install chromium`
-- `scripts/capture-auth-state.sh artsy-auth`
-- `scripts/capture-auth-state.sh mutualart-auth`
-- `scripts/capture-auth-state.sh sanatfiyat-license`
-- `scripts/capture-auth-state.sh askart-license`
+- `scripts/setup/capture-auth-state.sh artsy-auth`
+- `scripts/setup/capture-auth-state.sh mutualart-auth`
+- `scripts/setup/capture-auth-state.sh sanatfiyat-license`
+- `scripts/setup/capture-auth-state.sh askart-license`
 
 ## Start Services
 1. Build: `pnpm build`
