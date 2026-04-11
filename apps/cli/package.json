@@ -1,24 +1,73 @@
 {
-  "name": "@artbot/cli",
-  "version": "0.1.0",
-  "private": true,
+  "name": "artbot",
+  "version": "0.2.0",
+  "private": false,
+  "description": "CLI for running ArtBot market research locally.",
+  "license": "Apache-2.0",
   "type": "module",
+  "main": "dist/index.js",
   "bin": {
-    "artbot": "dist/index.js"
+    "artbot": "bin/artbot.cjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "preferGlobal": true,
+  "keywords": [
+    "art",
+    "cli",
+    "research",
+    "valuation",
+    "turkish-art"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KhazP/CCGAgent.git"
+  },
+  "homepage": "https://github.com/KhazP/CCGAgent#readme",
+  "bugs": {
+    "url": "https://github.com/KhazP/CCGAgent/issues"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "node ./scripts/build.mjs",
+    "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "verify:install": "node ./scripts/verify-install.mjs"
   },
   "dependencies": {
-    "@artbot/shared-types": "workspace:*",
+    "@clack/prompts": "^0.9.1",
+    "@fastify/cors": "^11.0.1",
+    "@mendable/firecrawl-js": "^1.29.2",
+    "boxen": "^8.0.1",
+    "cheerio": "^1.0.0",
     "cli-table3": "^0.6.5",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "figlet": "^1.8.0",
+    "gradient-string": "^3.0.0",
+    "ink": "^5.2.1",
+    "ink-text-input": "^6.0.0",
     "ora": "^8.2.0",
     "picocolors": "^1.1.1",
+    "playwright": "^1.59.1",
+    "react": "^18.3.1",
+    "uuid": "^11.1.0",
     "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@artbot/shared-types": "workspace:*",
+    "@types/figlet": "^1.7.0",
+    "@types/gradient-string": "^1.1.6",
+    "@types/react": "^18.3.12",
+    "esbuild": "^0.25.11"
   }
 }

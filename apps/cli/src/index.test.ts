@@ -1,6 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { researchQuerySchema } from "@artbot/shared-types";
 import type { RunDetailsResponse } from "./index.js";
 import { runCli } from "./index.js";
+
+const cliPackageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
+  version: string;
+};
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -16,14 +22,18 @@ function buildRunDetails(status: "pending" | "running" | "completed" | "failed")
     run: {
       id: "run-123",
       runType: "artist",
-      query: {
+      query: researchQuerySchema.parse({
         artist: "Burhan Dogancay",
         scope: "turkey_plus_international",
         turkeyFirst: true,
+        analysisMode: "comprehensive",
+        priceNormalization: "usd_dual",
         manualLoginCheckpoint: false,
         allowLicensed: false,
-        licensedIntegrations: []
-      },
+        licensedIntegrations: [],
+        crawlMode: "backfill",
+        sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+      }),
       status,
       createdAt: "2026-04-08T12:00:00.000Z",
       updatedAt: "2026-04-08T12:01:00.000Z"
@@ -169,8 +179,24 @@ describe("artbot cli v2", () => {
 
     const { stdout, stderr } = io.read();
     expect(code).toBe(0);
+    expect(stdout).toContain("local");
     expect(stdout).toContain("research-work");
     expect(stdout).toContain("runs");
+    expect(stderr).toBe("");
+  });
+
+  it("prints the package version from package.json", async () => {
+    const io = createMockIo();
+    const code = await runCli(["node", "artbot", "--version"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stdout.trim()).toBe(cliPackageVersion.version);
     expect(stderr).toBe("");
   });
 
@@ -294,14 +320,18 @@ describe("artbot cli v2", () => {
           {
             id: "run-1",
             runType: "artist",
-            query: {
+            query: researchQuerySchema.parse({
               artist: "Burhan Dogancay",
               scope: "turkey_plus_international",
               turkeyFirst: true,
+              analysisMode: "comprehensive",
+              priceNormalization: "usd_dual",
               manualLoginCheckpoint: false,
               allowLicensed: false,
-              licensedIntegrations: []
-            },
+              licensedIntegrations: [],
+              crawlMode: "backfill",
+              sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+            }),
             status: "completed",
             createdAt: "2026-04-08T10:00:00.000Z",
             updatedAt: "2026-04-08T10:05:00.000Z"

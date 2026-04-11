@@ -1,12 +1,52 @@
-import "dotenv/config";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import Table from "cli-table3";
 import { Command, CommanderError } from "commander";
 import ora from "ora";
 import picocolors from "picocolors";
 import { ZodError } from "zod";
-import type { PriceRecord, RunEntity, RunStatus, RunSummary, SourceAttempt } from "@artbot/shared-types";
+import type {
+  PriceRecord,
+  RunEntity,
+  RunDetailsResponsePayload,
+  RunStatus,
+  RunSummary,
+  SourceAttempt
+} from "@artbot/shared-types";
 import { researchQuerySchema } from "@artbot/shared-types";
+import {
+  assessLocalSetup,
+  buildAuthCaptureCommand,
+  defaultSourceUrlForProfile,
+  inspectLocalBackendStatus,
+  loadWorkspaceEnv,
+  resolveAuthProfilesFromEnv,
+  startLocalBackendServices,
+  stopLocalBackendServices,
+  type LocalBackendStatus,
+  type SetupAssessment
+} from "./setup/index.js";
+import { runSetupWizard } from "./setup/workflow.js";
+
+declare const __ARTBOT_VERSION__: string;
+
+function resolveCliVersion(): string {
+  if (typeof __ARTBOT_VERSION__ === "string" && __ARTBOT_VERSION__.length > 0) {
+    return __ARTBOT_VERSION__;
+  }
+
+  try {
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf-8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    return parsed.version ?? "0.1.0";
+  } catch {
+    return "0.1.0";
+  }
+}
+
+const CLI_VERSION = resolveCliVersion();
 
 const EXIT_CODES = {
   OK: 0,
@@ -15,10 +55,14 @@ const EXIT_CODES = {
   TERMINAL: 4
 } as const;
 
+const require = createRequire(import.meta.url);
+
 interface CommonOptions {
   artist: string;
   turkeyFirst?: boolean;
   scope?: "turkey_only" | "turkey_plus_international";
+  analysisMode?: "comprehensive" | "balanced" | "fast";
+  priceNormalization?: "legacy" | "usd_dual" | "usd_nominal" | "usd_2026";
   year?: string;
   medium?: string;
   title?: string;
@@ -35,6 +79,7 @@ interface CommonOptions {
   depthCm?: string;
   wait?: boolean;
   waitInterval?: string;
+  refresh?: boolean;
 }
 
 interface RunsListOptions {
@@ -50,6 +95,10 @@ interface RunsWatchOptions extends RunsShowOptions {
   interval?: string;
 }
 
+interface AuthCaptureOptions {
+  profileId: string;
+}
+
 interface GlobalOptions {
   json: boolean;
   apiBaseUrl: string;
@@ -58,12 +107,7 @@ interface GlobalOptions {
   quiet: boolean;
 }
 
-export interface RunDetailsResponse {
-  run: RunEntity;
-  summary: RunSummary;
-  records: PriceRecord[];
-  attempts: SourceAttempt[];
-}
+export type RunDetailsResponse = RunDetailsResponsePayload;
 
 interface RunsListResponse {
   runs: RunEntity[];
@@ -230,6 +274,8 @@ function buildQuery(options: CommonOptions, requireTitle: boolean) {
         : undefined,
     scope: options.scope ?? "turkey_plus_international",
     turkeyFirst: options.turkeyFirst ?? true,
+    analysisMode: options.analysisMode ?? "comprehensive",
+    priceNormalization: options.priceNormalization ?? "usd_dual",
     authProfileId: options.authProfile,
     cookieFile: options.cookieFile,
     manualLoginCheckpoint: options.manualLogin ?? false,
@@ -239,7 +285,8 @@ function buildQuery(options: CommonOptions, requireTitle: boolean) {
           .split(",")
           .map((entry) => entry.trim())
           .filter(Boolean)
-      : []
+      : [],
+    crawlMode: options.refresh ? "refresh" : "backfill"
   };
 
   return researchQuerySchema.parse(query);
@@ -271,7 +318,7 @@ async function requestJson<T>(
   return body as T;
 }
 
-function renderRunsTable(runs: RunEntity[]): string {
+export function renderRunsTable(runs: RunEntity[]): string {
   const table = new Table({
     head: ["Run ID", "Type", "Status", "Artist", "Created"],
     wordWrap: true
@@ -290,7 +337,7 @@ function renderRunsTable(runs: RunEntity[]): string {
   return table.toString();
 }
 
-function renderRecordsTable(records: PriceRecord[], limit = 8): string {
+export function renderRecordsTable(records: PriceRecord[], limit = 8): string {
   const table = new Table({
     head: ["Artist", "Work", "Source", "Price Type", "Amount", "Currency"],
     wordWrap: true
@@ -310,30 +357,165 @@ function renderRecordsTable(records: PriceRecord[], limit = 8): string {
   return table.toString();
 }
 
-function renderSummaryTable(summary: RunSummary): string {
+export function renderSummaryTable(summary: RunSummary): string {
   const table = new Table({
     head: ["Metric", "Value"]
   });
+
+  const crawledCoverage =
+    summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio;
 
   table.push(
     ["Accepted", summary.accepted_records],
     ["Rejected", summary.rejected_candidates],
     ["Discovered Candidates", summary.discovered_candidates],
     ["Accepted from Discovery", summary.accepted_from_discovery],
+    [
+      "Priced Coverage (Crawled)",
+      crawledCoverage != null ? `${Math.round(crawledCoverage * 100)}%` : "n/a"
+    ],
     ["Valuation Generated", summary.valuation_generated ? "yes" : "no"],
     ["Valuation Reason", summary.valuation_reason]
   );
 
+  if (summary.priced_crawled_source_coverage_ratio != null && summary.priced_source_coverage_ratio != null) {
+    table.push(["Priced Coverage (Attempted)", `${Math.round(summary.priced_source_coverage_ratio * 100)}%`]);
+  }
+
   return table.toString();
 }
 
-function renderBreakdownTable(title: string, values: Record<string, number>): string {
+export function renderBreakdownTable(title: string, values: Record<string, number>): string {
   const table = new Table({
     head: [title, "Count"]
   });
 
   for (const [key, value] of Object.entries(values)) {
     table.push([key, value]);
+  }
+
+  return table.toString();
+}
+
+function renderSetupAssessment(assessment: SetupAssessment): string {
+  const table = new Table({
+    head: ["Check", "Status", "Detail"]
+  });
+
+  const localBackendStatus =
+    assessment.localBackendMode === "workspace"
+      ? picocolors.green("repo")
+      : assessment.localBackendMode === "bundled"
+        ? picocolors.green("bundled")
+        : picocolors.yellow("unavailable");
+  const localBackendDetail =
+    assessment.localBackendMode === "workspace"
+      ? assessment.workspaceRoot ?? "Workspace root unavailable"
+      : assessment.localBackendMode === "bundled"
+        ? assessment.localBackendPath ?? "Bundled runtime home unavailable"
+        : "No local backend runtime detected";
+
+  table.push(
+    [
+      "LM Studio",
+      assessment.llmHealth.ok ? picocolors.green("healthy") : picocolors.red("offline"),
+      assessment.llmHealth.modelId ?? assessment.llmHealth.reason ?? assessment.llmBaseUrl
+    ],
+    [
+      "ArtBot API",
+      assessment.apiHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
+      assessment.apiHealth.reason ?? assessment.apiBaseUrl
+    ],
+    [
+      "Local Backend",
+      localBackendStatus,
+      localBackendDetail
+    ],
+    [
+      "Config",
+      picocolors.green("env"),
+      assessment.envPath
+    ],
+    [
+      "Auth Profiles",
+      assessment.authProfilesError ? picocolors.red("invalid") : picocolors.green(String(assessment.profiles.length)),
+      assessment.authProfilesError?.message ?? `${assessment.profiles.length} configured`
+    ],
+    [
+      "Sessions",
+      assessment.sessionStates.length === 0 ? picocolors.yellow("none") : picocolors.green(String(assessment.sessionStates.length)),
+      assessment.sessionStates
+        .map((session) => `${session.profileId}:${session.exists ? (session.expired ? "expired" : "ready") : "missing"}`)
+        .join(", ") || "No relevant sessions"
+    ]
+  );
+
+  return table.toString();
+}
+
+function renderBackendStatus(status: LocalBackendStatus): string {
+  const table = new Table({
+    head: ["Check", "Status", "Detail"]
+  });
+
+  table.push(
+    [
+      "Mode",
+      status.available ? picocolors.green(status.mode) : picocolors.yellow("unavailable"),
+      status.runtimeRoot ?? "No local backend runtime detected"
+    ],
+    [
+      "API Process",
+      status.api.running ? picocolors.green("running") : picocolors.yellow("stopped"),
+      status.api.pid ? `pid ${status.api.pid}${status.api.logPath ? ` · ${status.api.logPath}` : ""}` : status.api.logPath ?? "No managed API process"
+    ],
+    [
+      "Worker Process",
+      status.worker.running ? picocolors.green("running") : picocolors.yellow("stopped"),
+      status.worker.pid
+        ? `pid ${status.worker.pid}${status.worker.logPath ? ` · ${status.worker.logPath}` : ""}`
+        : status.worker.logPath ?? "No managed worker process"
+    ],
+    [
+      "API Health",
+      status.apiHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
+      status.apiHealth.reason ?? status.apiBaseUrl
+    ],
+    ["Entry Command", picocolors.green("ready"), status.recommendedEntryCommand]
+  );
+
+  return table.toString();
+}
+
+function renderSetupIssues(assessment: SetupAssessment): string {
+  if (assessment.issues.length === 0) {
+    return picocolors.green("No setup issues detected.");
+  }
+
+  return assessment.issues
+    .map((issue) => {
+      const prefix = issue.severity === "error" ? picocolors.red("error") : picocolors.yellow("warning");
+      return `${prefix} ${issue.message}${issue.detail ? ` (${issue.detail})` : ""}`;
+    })
+    .join("\n");
+}
+
+function renderAuthProfilesTable(assessment: SetupAssessment): string {
+  const table = new Table({
+    head: ["Profile", "Mode", "Matched Sources", "Storage State"]
+  });
+
+  const relevantById = new Map(assessment.relevantProfiles.map((entry) => [entry.profile.id, entry.matchedSources]));
+  const sessionsById = new Map(assessment.sessionStates.map((session) => [session.profileId, session]));
+
+  for (const profile of assessment.profiles) {
+    const session = sessionsById.get(profile.id);
+    table.push([
+      profile.id,
+      profile.mode,
+      (relevantById.get(profile.id) ?? []).join(", ") || "—",
+      session ? `${session.exists ? (session.expired ? "expired" : "ready") : "missing"} · ${session.storageStatePath}` : "—"
+    ]);
   }
 
   return table.toString();
@@ -352,6 +534,24 @@ function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: 
     logInfo(globals, ctx, "");
     logInfo(globals, ctx, "Top comparable records:");
     logInfo(globals, ctx, renderRecordsTable(details.records));
+  }
+  if (details.run.runType === "artist_market_inventory") {
+    logInfo(globals, ctx, "");
+    logInfo(
+      globals,
+      ctx,
+      `Inventory rows: ${details.inventory?.length ?? 0} · clusters: ${details.clusters?.length ?? 0} · review items: ${details.review_queue?.length ?? 0}`
+    );
+    if (details.inventory_summary) {
+      const realizedStats = details.inventory_summary.price_stats.realized ?? { count: 0 };
+      const askingStats = details.inventory_summary.price_stats.asking ?? { count: 0 };
+      const estimateStats = details.inventory_summary.price_stats.estimate ?? { count: 0 };
+      logInfo(
+        globals,
+        ctx,
+        `Price stats: realized ${realizedStats.count}, asking ${askingStats.count}, estimate ${estimateStats.count}`
+      );
+    }
   }
 }
 
@@ -395,15 +595,21 @@ async function handleResearch(
   ctx: CliContext,
   options: CommonOptions,
   command: Command,
-  runType: "artist" | "work"
+  runType: "artist" | "work" | "artist_market_inventory"
 ): Promise<void> {
   const globals = resolveGlobals(command);
   const query = buildQuery(options, runType === "work");
+  const path =
+    runType === "artist"
+      ? "/research/artist"
+      : runType === "work"
+        ? "/research/work"
+        : "/crawl/artist-market";
   const created = await requestJson<{ runId: string; status: RunStatus }>(
     ctx,
     globals,
     "POST",
-    runType === "artist" ? "/research/artist" : "/research/work",
+    path,
     { query }
   );
 
@@ -474,6 +680,156 @@ async function handleRunsWatch(ctx: CliContext, options: RunsWatchOptions, comma
   }
 }
 
+async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const result = await runSetupWizard();
+  printJson(globals, ctx, result);
+  if (!globals.json) {
+    logInfo(globals, ctx, renderSetupAssessment(result.assessment));
+    logInfo(globals, ctx, "");
+    logInfo(globals, ctx, renderSetupIssues(result.assessment));
+    if (result.backendStart) {
+      logInfo(globals, ctx, "");
+      logInfo(
+        globals,
+        ctx,
+        result.backendStart.reusedExisting ? "Local backend was already running." : "Started local backend."
+      );
+      logInfo(globals, ctx, `API log: ${result.backendStart.apiLogPath}`);
+      logInfo(globals, ctx, `Worker log: ${result.backendStart.workerLogPath}`);
+    }
+  }
+}
+
+async function handleDoctor(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const assessment = await assessLocalSetup();
+  printJson(globals, ctx, assessment);
+  if (globals.json) {
+    return;
+  }
+  logInfo(globals, ctx, renderSetupAssessment(assessment));
+  logInfo(globals, ctx, "");
+  logInfo(globals, ctx, renderSetupIssues(assessment));
+}
+
+async function handleBackendStart(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const started = await startLocalBackendServices(process.cwd(), globals.apiBaseUrl);
+  printJson(globals, ctx, started);
+  if (globals.json) {
+    return;
+  }
+
+  if (started.reusedExisting) {
+    logInfo(globals, ctx, "Local backend is already running.");
+  } else {
+    logInfo(globals, ctx, "Started local backend.");
+  }
+  logInfo(globals, ctx, `API log: ${started.apiLogPath}`);
+  logInfo(globals, ctx, `Worker log: ${started.workerLogPath}`);
+}
+
+async function handleBackendStop(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const status = await stopLocalBackendServices();
+  printJson(globals, ctx, status);
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, renderBackendStatus(status));
+}
+
+async function handleBackendStatus(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const status = await inspectLocalBackendStatus(process.cwd(), globals.apiBaseUrl);
+  printJson(globals, ctx, status);
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, renderBackendStatus(status));
+}
+
+async function handleLocalStart(ctx: CliContext, command: Command): Promise<void> {
+  await handleBackendStart(ctx, command);
+}
+
+async function handleLocalStop(ctx: CliContext, command: Command): Promise<void> {
+  await handleBackendStop(ctx, command);
+}
+
+async function handleLocalStatus(ctx: CliContext, command: Command): Promise<void> {
+  await handleBackendStatus(ctx, command);
+}
+
+async function handleAuthList(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const assessment = await assessLocalSetup();
+  printJson(globals, ctx, {
+    profiles: assessment.profiles,
+    relevant_profiles: assessment.relevantProfiles,
+    session_states: assessment.sessionStates,
+    auth_profiles_error: assessment.authProfilesError
+  });
+  if (globals.json) {
+    return;
+  }
+  if (assessment.authProfilesError) {
+    logError(globals, ctx, assessment.authProfilesError.message);
+    return;
+  }
+  logInfo(globals, ctx, renderAuthProfilesTable(assessment));
+}
+
+async function handleAuthStatus(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const assessment = await assessLocalSetup();
+  printJson(globals, ctx, assessment.sessionStates);
+  if (globals.json) {
+    return;
+  }
+  logInfo(globals, ctx, renderSetupAssessment(assessment));
+  logInfo(globals, ctx, "");
+  logInfo(globals, ctx, renderAuthProfilesTable(assessment));
+}
+
+async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const parsed = resolveAuthProfilesFromEnv();
+  if (parsed.error) {
+    throw new InputValidationError(parsed.error.message);
+  }
+
+  const profile = parsed.profiles.find((entry) => entry.id === options.profileId);
+  if (!profile) {
+    throw new InputValidationError(`Unknown auth profile "${options.profileId}".`);
+  }
+
+  const capture = buildAuthCaptureCommand(profile, defaultSourceUrlForProfile(profile.id));
+  printJson(globals, ctx, capture);
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Launching Playwright auth capture for ${profile.id}...`);
+  const playwrightCli = require.resolve("playwright/cli");
+  const result = spawnSync(
+    process.execPath,
+    [playwrightCli, "codegen", capture.sourceUrl, `--save-storage=${capture.storageStatePath}`],
+    {
+      cwd: process.cwd(),
+      stdio: "inherit",
+      shell: false
+    }
+  );
+
+  if (result.status !== 0) {
+    throw new Error(`Auth capture exited with status ${result.status ?? 1}.`);
+  }
+}
+
 function addCommonResearchFlags(command: Command, withOptionalTitle: boolean): Command {
   const target = command
     .requiredOption("--artist <name>", "Artist name")
@@ -483,6 +839,8 @@ function addCommonResearchFlags(command: Command, withOptionalTitle: boolean): C
     .option("--width-cm <number>", "Width in cm")
     .option("--depth-cm <number>", "Depth in cm")
     .option("--scope <scope>", "turkey_only or turkey_plus_international")
+    .option("--analysis-mode <mode>", "comprehensive | balanced | fast")
+    .option("--price-normalization <mode>", "legacy | usd_dual | usd_nominal | usd_2026")
     .option("--no-turkey-first", "Disable Turkey-first source routing")
     .option("--date-from <date>", "YYYY-MM-DD")
     .option("--date-to <date>", "YYYY-MM-DD")
@@ -492,6 +850,7 @@ function addCommonResearchFlags(command: Command, withOptionalTitle: boolean): C
     .option("--manual-login", "Enable manual login checkpoint")
     .option("--allow-licensed", "Allow licensed integrations")
     .option("--licensed-integrations <list>", "Comma-separated source names")
+    .option("--refresh", "Run an incremental refresh instead of a full backfill")
     .option("--wait", "Wait until run reaches terminal state")
     .option("--wait-interval <seconds>", "Polling interval when --wait is enabled");
 
@@ -528,6 +887,16 @@ function registerResearchCommands(program: Command, ctx: CliContext): void {
     .action(async (options: CommonOptions, command: Command) => {
       await handleResearch(ctx, options, command, "work");
     });
+}
+
+function registerCrawlCommands(program: Command, ctx: CliContext): void {
+  const crawlGroup = program.command("crawl").description("Long-running crawl commands");
+
+  addCommonResearchFlags(crawlGroup.command("artist-market").description("Deep crawl artist market inventory"), true).action(
+    async (options: CommonOptions, command: Command) => {
+      await handleResearch(ctx, options, command, "artist_market_inventory");
+    }
+  );
 }
 
 function registerRunsCommands(program: Command, ctx: CliContext): void {
@@ -568,6 +937,91 @@ function registerRunsCommands(program: Command, ctx: CliContext): void {
     });
 }
 
+function registerSetupCommands(program: Command, ctx: CliContext): void {
+  program
+    .command("setup")
+    .description("Guided local onboarding for LM Studio, backend services, and auth profiles")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleSetup(ctx, command);
+    });
+
+  program
+    .command("doctor")
+    .description("Inspect local setup and health status")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleDoctor(ctx, command);
+    });
+
+  const backendGroup = program.command("backend").description("Local backend lifecycle commands");
+  const localGroup = program.command("local").description("Preferred alias for local backend lifecycle commands");
+
+  backendGroup
+    .command("start")
+    .description("Start the local ArtBot API and worker")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleBackendStart(ctx, command);
+    });
+
+  backendGroup
+    .command("stop")
+    .description("Stop the local ArtBot API and worker")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleBackendStop(ctx, command);
+    });
+
+  backendGroup
+    .command("status")
+    .description("Inspect local backend process and health status")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleBackendStatus(ctx, command);
+    });
+
+  localGroup
+    .command("start")
+    .description("Start the local ArtBot API and worker")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleLocalStart(ctx, command);
+    });
+
+  localGroup
+    .command("stop")
+    .description("Stop the local ArtBot API and worker")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleLocalStop(ctx, command);
+    });
+
+  localGroup
+    .command("status")
+    .description("Inspect local backend process and health status")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleLocalStatus(ctx, command);
+    });
+
+  const authGroup = program.command("auth").description("Auth profile and session-state commands");
+
+  authGroup
+    .command("list")
+    .description("List configured auth profiles and matched sources")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleAuthList(ctx, command);
+    });
+
+  authGroup
+    .command("status")
+    .description("Inspect saved browser session state for auth profiles")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleAuthStatus(ctx, command);
+    });
+
+  authGroup
+    .command("capture")
+    .description("Capture browser auth state for a profile via Playwright")
+    .argument("<profileId>", "Profile identifier")
+    .action(async (profileId: string, _options: Record<string, never>, command: Command) => {
+      await handleAuthCapture(ctx, { profileId }, command);
+    });
+}
+
 function defaultDeps(partial: CliDeps = {}): Required<CliDeps> {
   return {
     fetchImpl: partial.fetchImpl ?? fetch,
@@ -579,7 +1033,7 @@ function defaultDeps(partial: CliDeps = {}): Required<CliDeps> {
 }
 
 function mapErrorToExitCode(error: unknown): number {
-  if (error instanceof CommanderError && error.code === "commander.helpDisplayed") {
+  if (error instanceof CommanderError && (error.code === "commander.helpDisplayed" || error.code === "commander.version")) {
     return EXIT_CODES.OK;
   }
   if (error instanceof CommanderError) {
@@ -640,7 +1094,7 @@ function formatError(error: unknown): string {
 
 export function createProgram(ctx: CliContext): Command {
   const program = new Command();
-  program.name("artbot").description("Turkish art price research agent CLI").version("0.2.0");
+  program.name("artbot").description("Turkish art price research agent CLI").version(CLI_VERSION);
 
   program
     .showHelpAfterError()
@@ -658,16 +1112,27 @@ export function createProgram(ctx: CliContext): Command {
     .option("--quiet", "Suppress non-error human output");
 
   registerResearchCommands(program, ctx);
+  registerCrawlCommands(program, ctx);
   registerRunsCommands(program, ctx);
+  registerSetupCommands(program, ctx);
 
   return program;
 }
 
 export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<number> {
+  loadWorkspaceEnv();
+
   const ctx: CliContext = {
     deps: defaultDeps(deps),
     exitCode: EXIT_CODES.OK
   };
+
+  // Launch interactive mode when no arguments provided and stdout is a TTY
+  const userArgs = argv.slice(2);
+  if (userArgs.length === 0 && process.stdout.isTTY) {
+    const { startInteractive } = await import("./interactive.js");
+    return startInteractive();
+  }
 
   const program = createProgram(ctx);
 
@@ -676,7 +1141,7 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
     return ctx.exitCode;
   } catch (error) {
     const exitCode = mapErrorToExitCode(error);
-    if (!(error instanceof CommanderError && error.code === "commander.helpDisplayed")) {
+    if (!(error instanceof CommanderError && (error.code === "commander.helpDisplayed" || error.code === "commander.version"))) {
       const globals = (() => {
         try {
           return resolveGlobals(program);
