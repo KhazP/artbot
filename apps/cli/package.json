@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "private": false,
   "description": "CLI for running ArtBot market research locally.",
+  "author": "Alp Yalay <contact@alpyalay.org>",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
@@ -28,11 +29,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KhazP/CCGAgent.git"
+    "url": "git+https://github.com/KhazP/CCGAgent.git",
+    "directory": "apps/cli"
   },
   "homepage": "https://github.com/KhazP/CCGAgent#readme",
   "bugs": {
-    "url": "https://github.com/KhazP/CCGAgent/issues"
+    "url": "https://github.com/KhazP/CCGAgent/issues",
+    "email": "contact@alpyalay.org"
   },
   "scripts": {
     "dev": "tsx src/index.ts",

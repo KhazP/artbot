@@ -4,19 +4,19 @@
 
 Security fixes are applied to the latest version on `main`.
 
-| Version | Supported |
-|---|---|
-| `main` (latest) | ✅ |
-| Older releases | ❌ |
+| Version         | Supported |
+| --------------- | --------- |
+| `main` (latest) | ✅        |
+| Older releases  | ❌        |
 
 ## Reporting a Vulnerability
 
-**Please do not disclose security issues publicly** (e.g. as a public GitHub issue).
+Do **not** disclose security issues publicly in GitHub issues, pull requests, or discussions.
 
-To report a vulnerability:
+Preferred reporting channels:
 
-1. Open a **private** GitHub issue (use the *Report a vulnerability* button on the Security tab), **or**
-2. Contact the maintainer directly via GitHub.
+1. GitHub Security Advisories / private vulnerability reporting, when enabled for the repository
+2. Email: `contact@alpyalay.org`
 
 Please include:
 
@@ -25,7 +25,13 @@ Please include:
 - Potential impact
 - Any suggested mitigations (optional)
 
-We will acknowledge your report within **72 hours** and aim to release a fix or mitigation within **14 days** for critical issues.
+Response targets:
+
+- Initial acknowledgment within **72 hours**
+- Triage and severity assessment as quickly as possible
+- Fix or mitigation target within **14 days** for critical issues when a safe patch is straightforward
+
+Coordinated disclosure is preferred. Please give reasonable time for a fix before making anything public.
 
 ## Responsible Use Reminder
 

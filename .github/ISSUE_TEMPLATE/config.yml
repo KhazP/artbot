@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and usage help
+    url: https://github.com/KhazP/CCGAgent/discussions
+    about: Use GitHub Discussions for setup help, usage questions, and open-ended ideas.
+  - name: Support policy
+    url: https://github.com/KhazP/CCGAgent/blob/main/SUPPORT.md
+    about: See where to ask for help, where to file bugs, and how to route security issues.
+  - name: Report a security issue
+    url: https://github.com/KhazP/CCGAgent/security/policy
+    about: Do not open public issues for vulnerabilities. Use the private security reporting path.

@@ -3,7 +3,7 @@
 # 🎨 turkish-art-price-agent
 
 **Production-oriented, Turkey-first painting price research bot**
-*Session-aware extraction · Evidence capture · Strict structured outputs*
+_Session-aware extraction · Evidence capture · Strict structured outputs_
 
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10.x-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
@@ -16,16 +16,16 @@
 
 ## ✨ Key Characteristics
 
-| Area | Details |
-|------|---------|
-| **Runtime** | Local-first — SQLite (`node:sqlite`) + filesystem evidence |
-| **Pipeline** | `search → select source → extract → verify → normalize → score → report` |
-| **Access Statuses** | `public_access` · `auth_required` · `licensed_access` · `blocked` · `price_hidden` |
-| **Session Handling** | Authorized profiles, cookie injection, persistent browser state, manual-login checkpoints; expired/missing sessions refresh automatically |
-| **Turkey-First Sources** | `muzayedeapp-platform` · `portakal-catalog` · `clar-buy-now` · `clar-archive` · `sanatfiyat-licensed-extractor` |
-| **Discovery** | Bounded query variants, listing-to-lot routing, comprehensive hybrid web discovery with strict host/domain caps |
-| **FX Normalization** | Nominal USD + CPI-adjusted 2026 USD outputs |
-| **Evidence** | Screenshot + raw snapshot + parser metadata for every accepted/rejected candidate |
+| Area                     | Details                                                                                                                                   |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Runtime**              | Local-first — SQLite (`node:sqlite`) + filesystem evidence                                                                                |
+| **Pipeline**             | `search → select source → extract → verify → normalize → score → report`                                                                  |
+| **Access Statuses**      | `public_access` · `auth_required` · `licensed_access` · `blocked` · `price_hidden`                                                        |
+| **Session Handling**     | Authorized profiles, cookie injection, persistent browser state, manual-login checkpoints; expired/missing sessions refresh automatically |
+| **Turkey-First Sources** | `muzayedeapp-platform` · `portakal-catalog` · `clar-buy-now` · `clar-archive` · `sanatfiyat-licensed-extractor`                           |
+| **Discovery**            | Bounded query variants, listing-to-lot routing, comprehensive hybrid web discovery with strict host/domain caps                           |
+| **FX Normalization**     | Nominal USD + CPI-adjusted 2026 USD outputs                                                                                               |
+| **Evidence**             | Screenshot + raw snapshot + parser metadata for every accepted/rejected candidate                                                         |
 
 ---
 
@@ -108,15 +108,15 @@ pnpm --filter artbot dev
 
 ## 🔐 Session-Aware CLI Flags
 
-| Flag | Description |
-|------|-------------|
-| `--auth-profile <id>` | Use a named auth profile |
-| `--cookie-file <path>` | Path to cookie JSON file |
-| `--manual-login` | Pause for manual browser login |
-| `--allow-licensed` | Enable licensed source access |
-| `--licensed-integrations "askART,..."` | Comma-separated licensed sources |
-| `--analysis-mode comprehensive\|balanced\|fast` | Analysis depth |
-| `--price-normalization legacy\|usd_dual\|usd_nominal\|usd_2026` | Price output format |
+| Flag                                                            | Description                      |
+| --------------------------------------------------------------- | -------------------------------- |
+| `--auth-profile <id>`                                           | Use a named auth profile         |
+| `--cookie-file <path>`                                          | Path to cookie JSON file         |
+| `--manual-login`                                                | Pause for manual browser login   |
+| `--allow-licensed`                                              | Enable licensed source access    |
+| `--licensed-integrations "askART,..."`                          | Comma-separated licensed sources |
+| `--analysis-mode comprehensive\|balanced\|fast`                 | Analysis depth                   |
+| `--price-normalization legacy\|usd_dual\|usd_nominal\|usd_2026` | Price output format              |
 
 ---
 
@@ -137,13 +137,13 @@ artbot runs watch --run-id <id> [--interval 2]
 
 **Global options:**
 
-| Option | Description |
-|--------|-------------|
-| `--json` | Strict JSON on stdout |
-| `--api-base-url <url>` | API endpoint override |
-| `--api-key <key>` | Authentication key |
-| `--verbose` | Verbose logging |
-| `--quiet` | Suppress non-essential output |
+| Option                 | Description                   |
+| ---------------------- | ----------------------------- |
+| `--json`               | Strict JSON on stdout         |
+| `--api-base-url <url>` | API endpoint override         |
+| `--api-key <key>`      | Authentication key            |
+| `--verbose`            | Verbose logging               |
+| `--quiet`              | Suppress non-essential output |
 
 **Environment fallback:** `API_BASE_URL` (defaults to `http://localhost:4000`)
 
@@ -193,13 +193,13 @@ runs/<run_id>/
 
 ## 🤖 Model Policy
 
-| Variable | Purpose |
-|----------|---------|
-| `MODEL_CHEAP_DEFAULT` | Default model ID |
-| `MODEL_CHEAP_FALLBACK` | Fallback model ID |
-| `STRUCTURED_LLM_PROVIDER` | `auto` \| `gemini` \| `openai_compatible` |
-| `LLM_BASE_URL` | Local OpenAI-compatible endpoint (e.g., LM Studio) |
-| `GEMINI_API_KEY` | Gemini API key |
+| Variable                  | Purpose                                            |
+| ------------------------- | -------------------------------------------------- |
+| `MODEL_CHEAP_DEFAULT`     | Default model ID                                   |
+| `MODEL_CHEAP_FALLBACK`    | Fallback model ID                                  |
+| `STRUCTURED_LLM_PROVIDER` | `auto` \| `gemini` \| `openai_compatible`          |
+| `LLM_BASE_URL`            | Local OpenAI-compatible endpoint (e.g., LM Studio) |
+| `GEMINI_API_KEY`          | Gemini API key                                     |
 
 > No hard-model escalation path is enabled in v1.
 
@@ -244,11 +244,11 @@ docker compose up --build
 
 ## 🛠 Development
 
-| Requirement | Version |
-|-------------|---------|
-| Node.js | 22+ |
-| pnpm | 10.x |
-| Docker | Recent (optional, recommended) |
+| Requirement | Version                        |
+| ----------- | ------------------------------ |
+| Node.js     | 22+                            |
+| pnpm        | 10.x                           |
+| Docker      | Recent (optional, recommended) |
 
 ```bash
 pnpm install          # Install dependencies
@@ -256,6 +256,14 @@ pnpm build            # Compile all workspaces
 pnpm dev              # Start dev servers (where supported)
 pnpm test             # Run monorepo test suite
 ```
+
+---
+
+## 🤝 Community
+
+- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Support channels: [SUPPORT.md](SUPPORT.md)
+- Security reporting: [SECURITY.md](SECURITY.md)
 
 ---
 

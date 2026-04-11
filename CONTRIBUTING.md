@@ -1,30 +1,36 @@
 # Contributing to ArtBot
 
-Thank you for your interest in contributing! This guide covers everything you need to get started.
+Thanks for contributing. This repository is released publicly, but it is maintained with a small-core workflow: clear issues, focused pull requests, and reproducible changes are the standard.
 
 ## Ways to Contribute
 
-- **Bug reports** — open an issue using the Bug Report template
-- **Feature requests** — open an issue using the Feature Request template
-- **Pull requests** — fixes, improvements, new source adapters
-- **Documentation** — improve README, `docs/`, or inline comments
+- Bug reports via the Bug Report issue template
+- Feature requests via the Feature Request issue template
+- Pull requests for fixes, docs, source adapters, and operational improvements
+- Questions and broader ideas in GitHub Discussions once enabled
 
-## Getting Started
+## Before You Open Anything
+
+- Use **issues** for concrete bugs and scoped feature work.
+- Use **discussions** for setup questions, design exploration, and usage help.
+- Use **private reporting only** for security issues. See [SECURITY.md](SECURITY.md).
+
+## Local Setup
 
 ### Prerequisites
 
-| Requirement | Version |
-|---|---|
-| Node.js | 22+ |
-| pnpm | 10.x |
-| Docker | Recent (optional) |
+| Requirement | Version           |
+| ----------- | ----------------- |
+| Node.js     | 22+               |
+| pnpm        | 10.x              |
+| Docker      | Recent (optional) |
 
 ### Setup
 
 ```bash
 # 1. Fork and clone the repo
-git clone https://github.com/<your-username>/artbot.git
-cd artbot
+git clone https://github.com/KhazP/CCGAgent.git
+cd CCGAgent
 
 # 2. Install dependencies
 pnpm install
@@ -35,44 +41,52 @@ cp .env.example .env
 # 4. Build all workspaces
 pnpm build
 
-# 5. Run tests
+# 5. Validate locally
+pnpm typecheck
 pnpm test
 ```
 
+## Development Workflow
+
+- Branch from `main`.
+- Keep each pull request to one logical change.
+- Add or update tests when behavior changes.
+- Update `README.md`, [`docs/`](/Users/alpyalay/Documents/GitHub/CCGAgent/docs), or package docs for user-visible changes.
+- Do not commit secrets, local auth state, run artifacts, or generated logs.
+
 ## Pull Request Guidelines
 
-- **Keep changes focused** — one logical change per PR.
-- **Add or update tests** when behaviour changes.
-- **Update documentation** (README or `docs/*`) for user-visible changes.
-- **Pass all tests** — `pnpm test` must be green before requesting review.
-- **Use conventional commits** — e.g. `fix: ...`, `feat: ...`, `docs: ...`, `chore: ...`
+- Keep changes focused.
+- Link the issue or discussion when one exists.
+- Use clear commit messages such as `fix:`, `feat:`, `docs:`, or `chore:`.
+- Explain user impact, test coverage, and any follow-up work in the PR body.
 
-## Code Style
+## Local Quality Gates
 
-The project uses TypeScript with strict settings. Run the type checker with:
+Run these before requesting review:
 
 ```bash
+pnpm typecheck
+pnpm test
 pnpm build
 ```
 
 ## Reporting Bugs
 
-Please use the **Bug Report** issue template. Include:
-- Steps to reproduce
-- Expected vs actual behaviour
+Use the **Bug Report** issue template and include:
+
+- A minimal reproduction
+- Expected versus actual behavior
 - Node.js and pnpm versions
-- Relevant log output
+- Relevant logs, screenshots, or traces
 
 ## Requesting Features
 
-Please use the **Feature Request** issue template. Describe:
-- The problem you're trying to solve
-- Your proposed solution
-- Any alternatives you considered
+Use the **Feature Request** issue template for scoped proposals. If the request is still exploratory, start it as a discussion first.
 
 ## Security Issues
 
-Do **not** open a public issue for security vulnerabilities. Please follow the process in [SECURITY.md](SECURITY.md).
+Do **not** open a public issue for vulnerabilities. Follow [SECURITY.md](SECURITY.md).
 
 ## License
 

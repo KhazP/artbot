@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use ArtBot in research or operational work, please cite it using the metadata below."
+title: "ArtBot"
+abstract: "Local-first CLI and evidence pipeline for Turkish art market research, structured extraction, and valuation workflows."
+authors:
+  - family-names: "Yalay"
+    given-names: "Alp"
+    email: "contact@alpyalay.org"
+license: "Apache-2.0"
+repository-code: "https://github.com/KhazP/CCGAgent"
+url: "https://github.com/KhazP/CCGAgent"
