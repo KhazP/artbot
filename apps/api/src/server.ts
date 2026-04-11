@@ -6,8 +6,13 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import {
   acceptanceReasonList,
+  artistMarketInventoryResultsPayloadSchema,
+  artistMarketInventoryRequestSchema,
+  failureClassList,
   researchArtistRequestSchema,
   researchWorkRequestSchema,
+  runDetailsResponseSchema,
+  type ArtistMarketInventoryResultsPayload,
   type RunSummary,
   sourceStatusList
 } from "@artbot/shared-types";
@@ -15,6 +20,7 @@ import { ArtbotStorage } from "@artbot/storage";
 import { z } from "zod";
 
 const port = Number(process.env.PORT ?? 4000);
+const host = process.env.HOST?.trim() || "0.0.0.0";
 const apiKey = process.env.ARTBOT_API_KEY;
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,6 +36,14 @@ const storage = new ArtbotStorage(dbPath, runsRoot);
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
+
+function isPricedAcceptanceReason(reason: (typeof acceptanceReasonList)[number]): boolean {
+  return reason === "valuation_ready" || reason === "estimate_range_ready" || reason === "asking_price_ready";
+}
+
+function isCrawledSourceStatus(status: (typeof sourceStatusList)[number]): boolean {
+  return status !== "blocked" && status !== "auth_required";
+}
 
 const runsQuerySchema = z.object({
   status: z.enum(["pending", "running", "completed", "failed"]).optional(),
@@ -76,6 +90,16 @@ app.post("/research/work", async (request, reply) => {
   return reply.status(202).send({ runId: run.id, status: run.status });
 });
 
+app.post("/crawl/artist-market", async (request, reply) => {
+  const parsed = artistMarketInventoryRequestSchema.safeParse(request.body);
+  if (!parsed.success) {
+    return reply.status(400).send({ error: parsed.error.flatten() });
+  }
+
+  const run = storage.createRun("artist_market_inventory", parsed.data.query);
+  return reply.status(202).send({ runId: run.id, status: run.status });
+});
+
 app.get("/runs", async (request, reply) => {
   const parsed = runsQuerySchema.safeParse(request.query);
   if (!parsed.success) {
@@ -98,21 +122,41 @@ app.get("/runs/:id", async (request, reply) => {
 
   let valuationGenerated = false;
   let valuationReason = details.run.status === "completed" ? "Valuation output unavailable." : "Run still in progress.";
+  let valuation: unknown = null;
+  let duplicates: unknown[] = [];
+  let perPaintingStats: unknown[] = [];
+  let persistedPayload: Record<string, unknown> | null = null;
+  let persistedInventoryPayload: ArtistMarketInventoryResultsPayload | null = null;
+  let persistedSummary: RunSummary | null = null;
   if (details.run.resultsPath && fs.existsSync(details.run.resultsPath)) {
     try {
-      const payload = JSON.parse(fs.readFileSync(details.run.resultsPath, "utf-8")) as {
+      const payload = JSON.parse(fs.readFileSync(details.run.resultsPath, "utf-8")) as Record<string, unknown> & {
+        summary?: RunSummary;
         valuation?: { generated?: boolean; reason?: string };
+        duplicates?: unknown[];
+        per_painting_stats?: unknown[];
       };
+      persistedPayload = payload;
+      const inventoryParsed = artistMarketInventoryResultsPayloadSchema.safeParse(payload);
+      if (inventoryParsed.success) {
+        persistedInventoryPayload = inventoryParsed.data;
+      }
+      persistedSummary = payload.summary ?? null;
       if (payload.valuation) {
         valuationGenerated = Boolean(payload.valuation.generated);
         valuationReason = payload.valuation.reason ?? valuationReason;
+        valuation = payload.valuation;
       }
+      duplicates = Array.isArray(payload.duplicates) ? payload.duplicates : [];
+      perPaintingStats = Array.isArray(payload.per_painting_stats) ? payload.per_painting_stats : [];
     } catch {
       valuationReason = "Failed to parse valuation output.";
     }
   }
 
-  const acceptedForEvidenceCount = details.attempts.filter(
+  const acceptedForEvidenceCount = details.records.length > 0
+    ? details.records.length
+    : details.attempts.filter(
     (attempt) => attempt.accepted_for_evidence ?? attempt.accepted
   ).length;
   const totalAttempts = details.attempts.length;
@@ -121,13 +165,34 @@ app.get("/runs/:id", async (request, reply) => {
     (typeof acceptanceReasonList)[number],
     number
   >;
+  const failureClassBreakdown = Object.fromEntries(failureClassList.map((failureClass) => [failureClass, 0])) as Record<
+    (typeof failureClassList)[number],
+    number
+  >;
   for (const attempt of details.attempts) {
     if (attempt.acceptance_reason in acceptanceReasonBreakdown) {
       acceptanceReasonBreakdown[attempt.acceptance_reason] += 1;
     }
+    if (attempt.failure_class && attempt.failure_class in failureClassBreakdown) {
+      failureClassBreakdown[attempt.failure_class] += 1;
+    }
   }
 
-  const summary: RunSummary = {
+  const attemptedSources = new Set(details.attempts.map((attempt) => attempt.source_name));
+  const crawledSources = new Set(
+    details.attempts.filter((attempt) => isCrawledSourceStatus(attempt.source_access_status)).map((attempt) => attempt.source_name)
+  );
+  const pricedSources = new Set(
+    details.attempts
+      .filter((attempt) => isPricedAcceptanceReason(attempt.acceptance_reason))
+      .map((attempt) => attempt.source_name)
+  );
+  const pricedSourceCoverageRatio =
+    attemptedSources.size === 0 ? 0 : Number((pricedSources.size / attemptedSources.size).toFixed(4));
+  const pricedCrawledSourceCoverageRatio =
+    crawledSources.size === 0 ? 0 : Number((pricedSources.size / crawledSources.size).toFixed(4));
+
+  const computedSummary: RunSummary = {
     run_id: details.run.id,
     total_records: totalAttempts,
     total_attempts: totalAttempts,
@@ -139,6 +204,8 @@ app.get("/runs/:id", async (request, reply) => {
     accepted_from_discovery: details.attempts.filter(
       (attempt) => (attempt.accepted_for_evidence ?? attempt.accepted) && attempt.discovery_provenance && attempt.discovery_provenance !== "seed"
     ).length,
+    priced_source_coverage_ratio: pricedSourceCoverageRatio,
+    priced_crawled_source_coverage_ratio: pricedCrawledSourceCoverageRatio,
     source_candidate_breakdown: details.attempts.reduce<Record<string, number>>((acc, attempt) => {
       acc[attempt.source_name] = (acc[attempt.source_name] ?? 0) + 1;
       return acc;
@@ -147,17 +214,39 @@ app.get("/runs/:id", async (request, reply) => {
       sourceStatusList.map((status) => [status, details.sourceStatusBreakdown[status]])
     ) as RunSummary["source_status_breakdown"],
     auth_mode_breakdown: details.authModeBreakdown,
+    failure_class_breakdown: failureClassBreakdown,
     acceptance_reason_breakdown: acceptanceReasonBreakdown,
     valuation_generated: valuationGenerated,
     valuation_reason: valuationReason
   };
 
-  return {
+  const summary: RunSummary = persistedSummary
+    ? {
+        ...persistedSummary,
+        valuation_generated: valuationGenerated,
+        valuation_reason: valuationReason
+      }
+    : computedSummary;
+
+  const response = {
     run: details.run,
     summary,
     records: details.records,
-    attempts: details.attempts
+    attempts: details.attempts,
+    valuation,
+    duplicates,
+    per_painting_stats: perPaintingStats,
+    inventory_summary: persistedInventoryPayload?.inventory_summary,
+    inventory: persistedInventoryPayload?.inventory,
+    clusters: persistedInventoryPayload?.clusters,
+    cluster_memberships: persistedInventoryPayload?.cluster_memberships,
+    review_queue: persistedInventoryPayload?.review_queue,
+    source_hosts: persistedInventoryPayload?.source_hosts,
+    checkpoints: persistedInventoryPayload?.checkpoints,
+    artifacts: persistedInventoryPayload?.artifacts
   };
+
+  return runDetailsResponseSchema.parse(response);
 });
 
 app.post("/runs/recover-stale", async (request, reply) => {
@@ -177,7 +266,7 @@ app.post("/runs/recover-stale", async (request, reply) => {
   };
 });
 
-app.listen({ port, host: "0.0.0.0" }).catch((error) => {
+app.listen({ port, host }).catch((error) => {
   app.log.error(error);
   process.exit(1);
 });

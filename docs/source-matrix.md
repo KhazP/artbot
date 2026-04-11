@@ -19,6 +19,8 @@
 | christies-lot | Christie’s | generic adapter | probe | International | public/auth/licensed modes |
 | bonhams-lot | Bonhams | generic adapter | probe | International | public/auth/licensed modes |
 | phillips-lot | Phillips | generic adapter | probe | International | public/auth/licensed modes |
+| invaluable-lot-detail-adapter | Invaluable Lot Detail | deterministic venue adapter | partial | International | public/auth/licensed modes |
+| liveauctioneers-public-lot-adapter | LiveAuctioneers Public Lots | deterministic venue adapter | partial | International | public/auth/licensed modes |
 
 ## Optional Probe Adapters (Disabled by Default)
 Enabled only when `ENABLE_OPTIONAL_PROBE_ADAPTERS=true`.
@@ -28,7 +30,6 @@ Enabled only when `ENABLE_OPTIONAL_PROBE_ADAPTERS=true`.
 | artsy-probe | Artsy | auth-sensitive probe |
 | mutualart-probe | MutualArt | auth-sensitive probe |
 | askart-probe | askART | licensed/auth-sensitive probe |
-| invaluable-listing | Invaluable | probe |
 
 ## Notes
 - `turkish-auction-generic` was removed to avoid Google-search seeding and misleading coverage.

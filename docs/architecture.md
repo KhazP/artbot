@@ -36,7 +36,7 @@ Deliver a session-aware, evidence-first art price research system with determini
 - Deterministic adapters first.
 - Browser retries with linear backoff.
 - Selective heavy evidence mode (`EVIDENCE_TRACE_MODE=selective`) captures Playwright trace/HAR for failed or low-confidence attempts.
-- Gemini schema-bound fallback is used only when deterministic parsing is insufficient.
+- Schema-bound LLM fallback (Gemini or OpenAI-compatible local endpoint) is used only when deterministic parsing is insufficient.
 - Per-candidate evidence capture.
 - Structured status and blocker reasons for each source attempt.
 - No bypass/brute-force logic.

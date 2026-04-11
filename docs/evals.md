@@ -23,6 +23,6 @@ Measure extraction truthfulness and valuation eligibility quality for Turkey-fir
 ## Command Template
 1. Start API + worker.
 2. Run CLI query:
-   - `pnpm --filter @artbot/cli dev -- research artist --artist "<artist>" --wait`
+   - `pnpm --filter artbot dev -- research artist --artist "<artist>" --wait`
 3. Validate `runs/<run_id>/results.json`:
    - `records[].accepted_for_valuation` contains no `price_amount: null` entries.

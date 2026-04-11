@@ -10,14 +10,22 @@ Note: `node:sqlite` may emit an experimental warning depending on Node version.
 ## Environment
 Copy `.env.example` to `.env` and set:
 - `ARTBOT_API_KEY`
+- `API_BASE_URL` (optional; CLI base URL, defaults to `http://localhost:4000`)
 - `DATABASE_PATH`
 - `RUNS_ROOT`
 - `FIRECRAWL_API_KEY` (optional)
 - `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` (optional)
-- `GEMINI_API_KEY` (optional; schema-bound fallback extraction only)
+- `STRUCTURED_LLM_PROVIDER` (`auto` | `gemini` | `openai_compatible`; optional)
+- `LLM_BASE_URL` (optional; OpenAI-compatible endpoint such as LM Studio)
+- `LLM_API_KEY` (optional; OpenAI-compatible auth token if required)
+- `GEMINI_API_KEY` (optional; schema-bound fallback extraction when provider is `gemini` or `auto`)
 - `DISCOVERY_MAX_CANDIDATES_PER_SOURCE`
 - `DISCOVERY_MAX_VARIANTS`
 - `DISCOVERY_DOMAIN_THROTTLE_PER_SOURCE`
+- `WEB_DISCOVERY_ENABLED`, `WEB_DISCOVERY_PROVIDER`, `BRAVE_SEARCH_API_KEY`
+- `WEB_DISCOVERY_PREFERRED_HOST_TOKENS`, `WEB_DISCOVERY_LOW_QUALITY_HOST_TOKENS`, `WEB_DISCOVERY_MIN_HOST_QUALITY_SCORE`
+- `WEB_DISCOVERY_MAX_DOMAINS_PER_RUN`, `WEB_DISCOVERY_MAX_URLS_PER_DOMAIN`, `WEB_DISCOVERY_MAX_TOTAL_CANDIDATES`
+- `FX_PROVIDER`, `FX_TRY_FALLBACK_PROVIDER`, `USD_INFLATION_PROVIDER`, `USD_INFLATION_BASE_YEAR`
 - `EVIDENCE_TRACE_MODE` (`selective` recommended)
 
 ## Auth Profiles
@@ -42,17 +50,24 @@ Provide `AUTH_PROFILES_JSON` as JSON array:
 ]
 ```
 
+Capture/update browser session states (manual login):
+- `pnpm exec playwright install chromium`
+- `scripts/capture-auth-state.sh artsy-auth`
+- `scripts/capture-auth-state.sh mutualart-auth`
+- `scripts/capture-auth-state.sh sanatfiyat-license`
+- `scripts/capture-auth-state.sh askart-license`
+
 ## Start Services
 1. Build: `pnpm build`
 2. API: `pnpm --filter @artbot/api start`
 3. Worker: `pnpm --filter @artbot/worker start`
 
 ## CLI Usage
-- `pnpm --filter @artbot/cli dev -- research artist --artist "Burhan Dogancay" --wait`
-- `pnpm --filter @artbot/cli dev -- research work --artist "Erol Akyavas" --title "Kusatma" --medium "oil on canvas" --height-cm 100 --width-cm 80`
-- `pnpm --filter @artbot/cli dev -- runs list --status completed --limit 20`
-- `pnpm --filter @artbot/cli dev -- runs show --run-id <id>`
-- `pnpm --filter @artbot/cli dev -- runs watch --run-id <id> --interval 2`
+- `pnpm --filter artbot dev -- research artist --artist "Burhan Dogancay" --wait`
+- `pnpm --filter artbot dev -- research work --artist "Erol Akyavas" --title "Kusatma" --medium "oil on canvas" --height-cm 100 --width-cm 80`
+- `pnpm --filter artbot dev -- runs list --status completed --limit 20`
+- `pnpm --filter artbot dev -- runs show --run-id <id>`
+- `pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2`
 
 CLI global options:
 - `--json`
@@ -67,6 +82,8 @@ Session-aware flags:
 - `--manual-login`
 - `--allow-licensed`
 - `--licensed-integrations "askART,SomeLicensedSource"`
+- `--analysis-mode comprehensive|balanced|fast`
+- `--price-normalization legacy|usd_dual|usd_nominal|usd_2026`
 
 ## Access Policy
 - Anonymous mode for public pages.

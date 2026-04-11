@@ -18,6 +18,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: "pnpm"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -35,3 +36,34 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Verify Published CLI Install Path
+        run: pnpm --filter artbot verify:install
+
+      - name: Pack CLI
+        run: |
+          mkdir -p /tmp/artbot-pack
+          cd apps/cli
+          npm_config_cache=/tmp/artbot-npm-cache npm pack --pack-destination /tmp/artbot-pack
+
+      - name: Smoke test packed install
+        run: |
+          set -euo pipefail
+          API_BASE_URL=http://127.0.0.1:4100
+          export ARTBOT_HOME=/tmp/artbot-home
+          rm -rf /tmp/artbot-install "$ARTBOT_HOME"
+          mkdir -p /tmp/artbot-install
+          TARBALL="$(ls /tmp/artbot-pack/artbot-*.tgz)"
+
+          cleanup() {
+            if [ -x /tmp/artbot-install/node_modules/.bin/artbot ]; then
+              ARTBOT_HOME="$ARTBOT_HOME" /tmp/artbot-install/node_modules/.bin/artbot --api-base-url "$API_BASE_URL" backend stop >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          npm_config_cache=/tmp/artbot-npm-cache npm install --prefix /tmp/artbot-install "$TARBALL"
+          ARTBOT_HOME="$ARTBOT_HOME" /tmp/artbot-install/node_modules/.bin/artbot --help
+          ARTBOT_HOME="$ARTBOT_HOME" /tmp/artbot-install/node_modules/.bin/artbot --api-base-url "$API_BASE_URL" backend start
+          ARTBOT_HOME="$ARTBOT_HOME" /tmp/artbot-install/node_modules/.bin/artbot --json --api-base-url "$API_BASE_URL" backend status
+          ARTBOT_HOME="$ARTBOT_HOME" /tmp/artbot-install/node_modules/.bin/artbot --json --api-base-url "$API_BASE_URL" runs list
