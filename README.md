@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🎨 turkish-art-price-agent
+# 🎨 artbot
 
-**Production-oriented, Turkey-first painting price research bot**
+**Production-oriented, painting price research bot**
 _Session-aware extraction · Evidence capture · Strict structured outputs_
 
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
