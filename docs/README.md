@@ -11,8 +11,5 @@
 ## Release
 - [Public Release Guide](public-release.md)
 
-## Internal
-- [Internal Docs](internal/README.md)
-
 ## Project History
 - [Changelog](../CHANGELOG.md)
