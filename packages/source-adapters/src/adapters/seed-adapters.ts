@@ -133,18 +133,6 @@ export function buildSeedAdapters() {
       requiresAuth: true,
       requiresLicense: true,
       supportedAccessModes: ["licensed"]
-    }),
-    new GenericSourceAdapter({
-      id: "invaluable-listing",
-      sourceName: "Invaluable",
-      venueName: "Invaluable",
-      venueType: "marketplace",
-      sourcePageType: "listing",
-      tier: 2,
-      country: null,
-      city: null,
-      baseUrl: "https://www.invaluable.com",
-      searchPath: "/search?query="
     })
   ];
 

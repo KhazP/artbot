@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { researchQuerySchema } from "@artbot/shared-types";
 import { ArtbotStorage } from "./storage.js";
 
 const cleanupPaths: string[] = [];
@@ -16,14 +17,18 @@ function mkTempPaths() {
 }
 
 function query(artist: string) {
-  return {
+  return researchQuerySchema.parse({
     artist,
     scope: "turkey_plus_international" as const,
     turkeyFirst: true,
+    analysisMode: "balanced" as const,
+    priceNormalization: "usd_dual" as const,
     manualLoginCheckpoint: false,
     allowLicensed: false,
-    licensedIntegrations: []
-  };
+    licensedIntegrations: [],
+    crawlMode: "backfill" as const,
+    sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+  });
 }
 
 afterEach(() => {

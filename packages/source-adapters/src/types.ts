@@ -1,6 +1,8 @@
+import type { SessionContext } from "@artbot/extraction";
 import type {
   AccessContext,
   AccessMode,
+  CrawlStrategy,
   PriceRecord,
   ResearchQuery,
   SourceAccessStatus,
@@ -14,7 +16,8 @@ export type DiscoveryProvenance =
   | "query_variant"
   | "listing_expansion"
   | "signature_expansion"
-  | "direct_lot";
+  | "direct_lot"
+  | "web_discovery";
 
 export interface SourceCandidate {
   url: string;
@@ -30,6 +33,7 @@ export interface AdapterExtractionContext {
   query: ResearchQuery;
   accessContext: AccessContext;
   evidenceDir: string;
+  sessionContext?: SessionContext;
 }
 
 export interface AdapterExtractionResult {
@@ -51,6 +55,7 @@ export interface SourceAdapter {
   requiresAuth: boolean;
   requiresLicense: boolean;
   supportedAccessModes: AccessMode[];
+  crawlStrategies: CrawlStrategy[];
   discoverCandidates(query: ResearchQuery): Promise<SourceCandidate[]>;
   extract(candidate: SourceCandidate, context: AdapterExtractionContext): Promise<AdapterExtractionResult>;
 }

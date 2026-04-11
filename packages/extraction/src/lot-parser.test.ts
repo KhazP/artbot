@@ -72,4 +72,52 @@ describe("parseGenericLotFields numeric normalization", () => {
     expect(parsed.priceAmount).toBe(45000);
     expect(parsed.currency).toBe("USD");
   });
+
+  it("extracts sale price and currency from non-JSON-LD script payloads", () => {
+    const content = `
+      <html>
+        <body>
+          <script>
+            window.__NUXT__ = {
+              lot: {
+                "lotNumber": "218",
+                "salePrice": "1.250.000",
+                "currency": "TRY",
+                "saleDate": "2020-10-11"
+              }
+            };
+          </script>
+        </body>
+      </html>
+    `;
+
+    const parsed = parseGenericLotFields(content);
+    expect(parsed.priceType).toBe("realized_price");
+    expect(parsed.priceAmount).toBe(1250000);
+    expect(parsed.currency).toBe("TRY");
+    expect(parsed.lotNumber).toBe("218");
+    expect(parsed.saleDate).toBe("2020-10-11");
+  });
+
+  it("extracts estimate ranges from non-JSON-LD script payloads", () => {
+    const content = `
+      <html>
+        <body>
+          <script>
+            window.__APP_DATA__ = {
+              "estimateLow": "45,000",
+              "estimateHigh": "65,000",
+              "priceCurrency": "USD"
+            };
+          </script>
+        </body>
+      </html>
+    `;
+
+    const parsed = parseGenericLotFields(content);
+    expect(parsed.priceType).toBe("estimate");
+    expect(parsed.estimateLow).toBe(45000);
+    expect(parsed.estimateHigh).toBe(65000);
+    expect(parsed.currency).toBe("USD");
+  });
 });

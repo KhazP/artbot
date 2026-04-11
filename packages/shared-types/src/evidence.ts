@@ -14,11 +14,27 @@ export const sourceAttemptSchema = z.object({
     "blocked",
     "price_hidden"
   ]),
+  failure_class: z
+    .enum([
+      "access_blocked",
+      "waf_challenge",
+      "not_found",
+      "transport_timeout",
+      "transport_dns",
+      "transport_other",
+      "host_circuit"
+    ])
+    .optional(),
   access_reason: z.string().nullable(),
   blocker_reason: z.string().nullable(),
+  transport_kind: z.string().nullable().optional(),
+  transport_provider: z.string().nullable().optional(),
+  transport_host: z.string().nullable().optional(),
+  transport_status_code: z.number().int().nullable().optional(),
+  transport_retryable: z.boolean().nullable().optional(),
   extracted_fields: z.record(z.unknown()).default({}),
   discovery_provenance: z
-    .enum(["seed", "query_variant", "listing_expansion", "signature_expansion", "direct_lot"])
+    .enum(["seed", "query_variant", "listing_expansion", "signature_expansion", "direct_lot", "web_discovery"])
     .optional(),
   discovery_score: z.number().min(0).max(1).nullable().optional(),
   discovered_from_url: z.string().url().nullable().optional(),
@@ -45,6 +61,7 @@ export const sourceAttemptSchema = z.object({
     "asking_price_ready",
     "inquiry_only_evidence",
     "price_hidden_evidence",
+    "generic_shell_page",
     "missing_numeric_price",
     "missing_currency",
     "missing_estimate_range",

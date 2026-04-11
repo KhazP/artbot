@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { AuthManager } from "@artbot/auth-manager";
+import { researchQuerySchema } from "@artbot/shared-types";
 import type { SourceAdapter } from "@artbot/source-adapters";
 import { planSources } from "./routing.js";
 
-const baseQuery = {
+const baseQuery = researchQuerySchema.parse({
   artist: "Artist",
   scope: "turkey_plus_international" as const,
   turkeyFirst: true,
+  analysisMode: "balanced" as const,
+  priceNormalization: "usd_dual" as const,
   manualLoginCheckpoint: false,
   allowLicensed: false,
-  licensedIntegrations: []
-};
+  licensedIntegrations: [],
+  crawlMode: "backfill" as const,
+  sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+});
 
 function adapter(overrides: Partial<SourceAdapter> = {}): SourceAdapter {
   return {
@@ -25,6 +30,7 @@ function adapter(overrides: Partial<SourceAdapter> = {}): SourceAdapter {
     requiresAuth: false,
     requiresLicense: false,
     supportedAccessModes: ["anonymous", "authorized", "licensed"],
+    crawlStrategies: ["search"],
     discoverCandidates: async () => [
       { url: "https://example.com/search?q=artist", sourcePageType: "price_db", provenance: "seed", score: 0.9 }
     ],

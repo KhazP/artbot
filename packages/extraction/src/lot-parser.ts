@@ -7,6 +7,7 @@ export interface GenericParsedFields {
   medium: string | null;
   dimensionsText: string | null;
   year: string | null;
+  imageUrl: string | null;
   lotNumber: string | null;
   estimateLow: number | null;
   estimateHigh: number | null;
@@ -31,6 +32,22 @@ interface JsonLdFields {
   priceType: PriceType;
   currency: string | null;
   saleDate: string | null;
+}
+
+interface ScriptPayloadFields {
+  lotNumber: string | null;
+  estimateLow: number | null;
+  estimateHigh: number | null;
+  priceAmount: number | null;
+  priceType: PriceType;
+  currency: string | null;
+  saleDate: string | null;
+}
+
+interface CurrencyAmountMatch {
+  amount: number;
+  currency: string;
+  index: number;
 }
 
 function normalizeNumber(input: string): number | null {
@@ -80,6 +97,51 @@ function inferCurrency(text: string): string | null {
   return null;
 }
 
+function normalizeCurrencyToken(token: string | null): string | null {
+  if (!token) return null;
+  const normalized = token.trim().toUpperCase();
+  if (normalized === "TL" || normalized === "TRY") return "TRY";
+  if (normalized === "US$" || normalized === "$" || normalized === "USD") return "USD";
+  if (normalized === "€" || normalized === "EUR") return "EUR";
+  if (normalized === "£" || normalized === "GBP") return "GBP";
+  return /^[A-Z]{3}$/.test(normalized) ? normalized : inferCurrency(normalized);
+}
+
+function extractCurrencyAmounts(text: string): CurrencyAmountMatch[] {
+  const matches: CurrencyAmountMatch[] = [];
+  const patternBefore =
+    /(TRY|TL|USD|EUR|GBP|₺|\$|€|£)\s*([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)/gi;
+  const patternAfter =
+    /([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)\s*(TRY|TL|USD|EUR|GBP|₺|\$|€|£)/gi;
+
+  for (const pattern of [patternBefore, patternAfter]) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const currencyToken = normalizeCurrencyToken(pattern === patternBefore ? match[1] : match[2]);
+      const amountToken = pattern === patternBefore ? match[2] : match[1];
+      const amount = normalizeNumber(amountToken);
+      if (!currencyToken || amount === null || amount <= 0) {
+        continue;
+      }
+      matches.push({
+        amount,
+        currency: currencyToken,
+        index: match.index
+      });
+    }
+  }
+
+  const deduped = new Map<string, CurrencyAmountMatch>();
+  for (const entry of matches) {
+    const key = `${entry.currency}:${entry.amount}:${entry.index}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, entry);
+    }
+  }
+
+  return [...deduped.values()].sort((a, b) => a.index - b.index);
+}
+
 function sanitizeTitle(value: string | null | undefined): string | null {
   if (!value) return null;
   const cleaned = value
@@ -113,6 +175,50 @@ function extractTitle(content: string): string | null {
 
   const textTitle = content.match(/(?:title|eser adı|work title)\s*[:\-]\s*([^\n|]{3,150})/i)?.[1];
   return sanitizeTitle(textTitle);
+}
+
+function normalizeImageUrl(rawUrl: string | undefined, baseUrl?: string): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  try {
+    if (trimmed.startsWith("//")) {
+      return new URL(`https:${trimmed}`).toString();
+    }
+    if (baseUrl) {
+      return new URL(trimmed, baseUrl).toString();
+    }
+    const parsed = new URL(trimmed);
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractImageUrl(content: string, baseUrl?: string): string | null {
+  if (!/<[a-z][\s\S]*>/i.test(content)) {
+    return null;
+  }
+
+  const $ = load(content);
+  const candidates = [
+    $("meta[property='og:image']").attr("content"),
+    $("meta[name='twitter:image']").attr("content"),
+    $("meta[property='og:image:url']").attr("content"),
+    $("img[data-zoom-image]").first().attr("data-zoom-image"),
+    $("img[data-src]").first().attr("data-src"),
+    $("img[src]").first().attr("src")
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeImageUrl(candidate, baseUrl);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
 }
 
 function extractJsonLdScripts(content: string): string[] {
@@ -275,16 +381,115 @@ function parseJsonLd(content: string): JsonLdFields {
   return bestMetadataOnly ?? fallback;
 }
 
+function matchFirst(scriptContent: string, patterns: RegExp[]): RegExpMatchArray | null {
+  for (const pattern of patterns) {
+    const match = scriptContent.match(pattern);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
+function extractScriptPayloadFields(content: string): ScriptPayloadFields {
+  const fallback: ScriptPayloadFields = {
+    lotNumber: null,
+    estimateLow: null,
+    estimateHigh: null,
+    priceAmount: null,
+    priceType: "unknown",
+    currency: null,
+    saleDate: null
+  };
+
+  const scripts = content.match(/<script\b[^>]*>([\s\S]*?)<\/script>/gi) ?? [];
+  if (scripts.length === 0) {
+    return fallback;
+  }
+
+  const scriptBlob = scripts
+    .map((script) => script.replace(/<script\b[^>]*>/i, "").replace(/<\/script>/i, ""))
+    .join("\n")
+    .replace(/\\u20ba/gi, "₺")
+    .replace(/\\u20ac/gi, "€")
+    .replace(/\\u00a3/gi, "£");
+
+  const lotNumber =
+    matchFirst(scriptBlob, [
+      /"(?:lotNumber|lotNo|lot_no|lot_number|lotId)"\s*:\s*"([^"]{1,32})"/i,
+      /'(?:lotNumber|lotNo|lot_no|lot_number|lotId)'\s*:\s*'([^']{1,32})'/i
+    ])?.[1] ?? null;
+  const estimateLow =
+    normalizeNumber(
+      matchFirst(scriptBlob, [
+        /"(?:estimateLow|lowEstimate|minEstimate|estimate_from|startingPrice)"\s*:\s*"?([^"}\]]+)"/i,
+        /'(?:estimateLow|lowEstimate|minEstimate|estimate_from|startingPrice)'\s*:\s*'?([^'}\]]+)'?/i
+      ])?.[1] ?? ""
+    ) ?? null;
+  const estimateHigh =
+    normalizeNumber(
+      matchFirst(scriptBlob, [
+        /"(?:estimateHigh|highEstimate|maxEstimate|estimate_to)"\s*:\s*"?([^"}\]]+)"/i,
+        /'(?:estimateHigh|highEstimate|maxEstimate|estimate_to)'\s*:\s*'?([^'}\]]+)'?/i
+      ])?.[1] ?? ""
+    ) ?? null;
+
+  const priceMatch = matchFirst(scriptBlob, [
+    /"(?:realizedPrice|soldPrice|salePrice|finalPrice|hammerPrice|currentBid|lastBid|priceAmount|amount|price)"\s*:\s*"?([^"}\]]+)"/i,
+    /'(?:realizedPrice|soldPrice|salePrice|finalPrice|hammerPrice|currentBid|lastBid|priceAmount|amount|price)'\s*:\s*'?([^'}\]]+)'?/i
+  ]);
+  const priceAmount = normalizeNumber(priceMatch?.[1] ?? "");
+
+  const currencyToken =
+    matchFirst(scriptBlob, [
+      /"(?:priceCurrency|currencyCode|currency)"\s*:\s*"([A-Za-z$€£₺]{1,5})"/i,
+      /'(?:priceCurrency|currencyCode|currency)'\s*:\s*'([A-Za-z$€£₺]{1,5})'/i
+    ])?.[1] ?? inferCurrency(scriptBlob);
+
+  const saleDate =
+    matchFirst(scriptBlob, [
+      /"(?:saleDate|auctionDate|datePublished|publishedDate|eventDate|startDate|endDate|date)"\s*:\s*"([^"]{8,32})"/i,
+      /'(?:saleDate|auctionDate|datePublished|publishedDate|eventDate|startDate|endDate|date)'\s*:\s*'([^']{8,32})'/i
+    ])?.[1] ?? null;
+
+  let priceType: PriceType = "unknown";
+  const lowerBlob = scriptBlob.toLowerCase();
+  if (estimateLow !== null || estimateHigh !== null) {
+    priceType = "estimate";
+  } else if (priceAmount !== null) {
+    if (/hammerprice|hammer_price|hammer/.test(lowerBlob)) {
+      priceType = "hammer_price";
+    } else if (/realizedprice|soldprice|saleprice|finalprice|realized|sold/.test(lowerBlob)) {
+      priceType = "realized_price";
+    } else if (/askingprice|buy ?now|listingprice/.test(lowerBlob)) {
+      priceType = "asking_price";
+    } else {
+      priceType = "asking_price";
+    }
+  }
+
+  return {
+    lotNumber,
+    estimateLow,
+    estimateHigh,
+    priceAmount,
+    priceType,
+    currency: normalizeCurrencyToken(currencyToken),
+    saleDate
+  };
+}
+
 function estimateMidpoint(low: number | null, high: number | null): number | null {
   if (low !== null && high !== null) return (low + high) / 2;
   return low ?? high;
 }
 
-export function parseGenericLotFields(content: string): GenericParsedFields {
+export function parseGenericLotFields(content: string, baseUrl?: string): GenericParsedFields {
   const text = content.replace(/\s+/g, " ").trim();
   const jsonLd = parseJsonLd(content);
+  const scriptPayload = extractScriptPayloadFields(content);
 
-  const lotMatch = text.match(/(?:lot|lot no|lot nr|lot#|lot numarası)\s*[:#]?\s*([a-z0-9-]+)/i);
+  const lotMatch = text.match(/(?:\blot\b|lot no|lot nr|lot#|lot numarası)\s*[:#]?\s*([a-z0-9-]+)/i);
   const estMatch = text.match(
     /(?:estimate|estimated|estimate range|tahmini|ekspertiz)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)\s*(?:-|to|–|—)\s*([\d.,\s₺$€A-Za-z]+)/i
   );
@@ -300,10 +505,10 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
 
   const inquiryOnly = /price on request|inquire|iletişime geçiniz|fiyat sorunuz/i.test(text);
 
-  let priceType: PriceType = jsonLd.priceType;
-  let priceAmount: number | null = jsonLd.priceAmount;
-  let estimateLow: number | null = jsonLd.estimateLow;
-  let estimateHigh: number | null = jsonLd.estimateHigh;
+  let priceType: PriceType = jsonLd.priceType !== "unknown" ? jsonLd.priceType : scriptPayload.priceType;
+  let priceAmount: number | null = jsonLd.priceAmount ?? scriptPayload.priceAmount;
+  let estimateLow: number | null = jsonLd.estimateLow ?? scriptPayload.estimateLow;
+  let estimateHigh: number | null = jsonLd.estimateHigh ?? scriptPayload.estimateHigh;
   let buyersPremiumIncluded: boolean | null = null;
 
   if (estMatch) {
@@ -327,7 +532,7 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
     } else {
       priceType = "realized_price";
     }
-  } else if (askMatch && !inquiryOnly && (priceType === "unknown" || priceAmount === null)) {
+  } else if (askMatch && !inquiryOnly && priceType === "unknown") {
     priceType = "asking_price";
     priceAmount = normalizeNumber(askMatch[1]);
   }
@@ -347,7 +552,51 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
   }
 
   const saleDateMatch = text.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}-\d{2}-\d{2})/);
-  const currency = inferCurrency(text) ?? jsonLd.currency;
+  const currencyMatches = extractCurrencyAmounts(text);
+  let currency = inferCurrency(text) ?? jsonLd.currency ?? scriptPayload.currency ?? currencyMatches[0]?.currency ?? null;
+  const currencyAmounts = currencyMatches
+    .filter((entry) => !currency || entry.currency === currency)
+    .map((entry) => entry.amount)
+    .filter((amount) => amount > 0);
+  const sortedCurrencyAmounts = [...currencyAmounts].sort((a, b) => a - b);
+
+  if (priceType !== "inquiry_only") {
+    if (priceType === "estimate" && estimateLow == null && estimateHigh == null && sortedCurrencyAmounts.length >= 2) {
+      estimateLow = sortedCurrencyAmounts[0] ?? null;
+      estimateHigh = sortedCurrencyAmounts[sortedCurrencyAmounts.length - 1] ?? null;
+      priceAmount = estimateMidpoint(estimateLow, estimateHigh);
+    }
+
+    if (
+      (priceType === "asking_price" ||
+        priceType === "hammer_price" ||
+        priceType === "realized_price" ||
+        priceType === "realized_with_buyers_premium") &&
+      (priceAmount == null || priceAmount <= 0) &&
+      sortedCurrencyAmounts.length > 0
+    ) {
+      priceAmount = sortedCurrencyAmounts[sortedCurrencyAmounts.length - 1] ?? null;
+    }
+
+    if (priceType === "unknown" && sortedCurrencyAmounts.length > 0) {
+      if (/estimate|estimated|estimate range|tahmini|ekspertiz/i.test(text) && sortedCurrencyAmounts.length >= 2) {
+        priceType = "estimate";
+        estimateLow = sortedCurrencyAmounts[0] ?? null;
+        estimateHigh = sortedCurrencyAmounts[sortedCurrencyAmounts.length - 1] ?? null;
+        priceAmount = estimateMidpoint(estimateLow, estimateHigh);
+      } else if (/realized|sold|satış|satildi|satıldı|hammer|çekiç|cekic/i.test(text)) {
+        priceType = "realized_price";
+        priceAmount = sortedCurrencyAmounts[sortedCurrencyAmounts.length - 1] ?? null;
+      } else {
+        priceType = "asking_price";
+        priceAmount = sortedCurrencyAmounts[sortedCurrencyAmounts.length - 1] ?? null;
+      }
+    }
+
+    if (!currency && currencyMatches.length > 0) {
+      currency = currencyMatches[0]?.currency ?? null;
+    }
+  }
   const artistMatch = text.match(/(?:artist|sanatçı|sanatci)\s*[:\-]\s*([^|]{3,120})/i);
   const mediumMatch = text.match(/(?:medium|teknik|material)\s*[:\-]\s*([^|]{3,120})/i);
   const dimensionsMatch = text.match(
@@ -355,19 +604,23 @@ export function parseGenericLotFields(content: string): GenericParsedFields {
   );
   const yearMatch = text.match(/(?:dated|year|yıl|yil|tarih)\s*[:\-]\s*((?:18|19|20)\d{2})/i) ?? text.match(/\b((?:18|19|20)\d{2})\b/);
 
+  const lotFromText = lotMatch?.[1] ?? null;
+  const normalizedLotFromText = lotFromText && !/^number$/i.test(lotFromText) ? lotFromText : null;
+
   return {
     title: jsonLd.title ?? extractTitle(content),
     artistName: jsonLd.artistName ?? (artistMatch ? artistMatch[1].trim() : null),
     medium: jsonLd.medium ?? (mediumMatch ? mediumMatch[1].trim() : null),
     dimensionsText: jsonLd.dimensionsText ?? (dimensionsMatch ? dimensionsMatch[1].trim() : null),
     year: jsonLd.year ?? (yearMatch ? yearMatch[1] : null),
-    lotNumber: lotMatch ? lotMatch[1] : jsonLd.lotNumber,
+    imageUrl: extractImageUrl(content, baseUrl),
+    lotNumber: normalizedLotFromText ?? jsonLd.lotNumber ?? scriptPayload.lotNumber,
     estimateLow,
     estimateHigh,
     priceAmount,
     priceType,
     currency,
-    saleDate: saleDateMatch ? saleDateMatch[1] : jsonLd.saleDate,
+    saleDate: saleDateMatch ? saleDateMatch[1] : jsonLd.saleDate ?? scriptPayload.saleDate,
     priceHidden: inquiryOnly,
     buyersPremiumIncluded
   };

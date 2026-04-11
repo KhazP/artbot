@@ -34,6 +34,43 @@ function normalizeTitle(value: string | null | undefined): string {
     .trim();
 }
 
+const GENERIC_SHELL_TITLE_PATTERNS = [
+  /\banasayfa\b/i,
+  /\bkategoriler\b/i,
+  /\bonline muzayede app uygulamasi\b/i,
+  /\bbonhams search\b/i,
+  /\bsearch art and objects\b/i,
+  /\bsearch results\b/i,
+  /\bhome(page)?\b/i,
+  /\bcategories?\b/i
+];
+
+function isGenericShellTitle(
+  title: string | null | undefined,
+  sourceName: string | undefined,
+  sourcePageType: SourceCandidate["sourcePageType"] | undefined
+): boolean {
+  const normalizedTitle = normalizeTitle(title);
+  if (!normalizedTitle) {
+    return false;
+  }
+
+  if (GENERIC_SHELL_TITLE_PATTERNS.some((pattern) => pattern.test(normalizedTitle))) {
+    return true;
+  }
+
+  if (sourcePageType === "lot" || sourcePageType === "price_db") {
+    return false;
+  }
+
+  const normalizedSourceName = normalizeTitle(sourceName);
+  if (normalizedSourceName && normalizedTitle === normalizedSourceName) {
+    return true;
+  }
+
+  return false;
+}
+
 function inferValuationLane(priceType: GenericParsedFields["priceType"]): ValuationLane {
   if (priceType === "asking_price") return "asking";
   if (priceType === "estimate") return "estimate";
@@ -91,7 +128,14 @@ export function estimateEntityMatchConfidence(parsedTitle: string | null, queryT
   return 0.46;
 }
 
-export function evaluateAcceptance(parsed: GenericParsedFields, sourceStatus: SourceAccessStatus): AttemptAcceptanceDetails {
+export function evaluateAcceptance(
+  parsed: GenericParsedFields,
+  sourceStatus: SourceAccessStatus,
+  context?: {
+    sourceName?: string;
+    sourcePageType?: SourceCandidate["sourcePageType"];
+  }
+): AttemptAcceptanceDetails {
   if (sourceStatus === "blocked") {
     return {
       acceptedForEvidence: false,
@@ -100,6 +144,17 @@ export function evaluateAcceptance(parsed: GenericParsedFields, sourceStatus: So
       acceptanceReason: "blocked_access",
       rejectionReason: "Source access blocked.",
       valuationEligibilityReason: "Source access blocked."
+    };
+  }
+
+  if (isGenericShellTitle(parsed.title, context?.sourceName, context?.sourcePageType)) {
+    return {
+      acceptedForEvidence: false,
+      acceptedForValuation: false,
+      valuationLane: "none",
+      acceptanceReason: "generic_shell_page",
+      rejectionReason: "Generic navigation/search page detected; not retained as an artwork record.",
+      valuationEligibilityReason: "Shell pages are excluded from evidence and valuation."
     };
   }
 
@@ -285,6 +340,7 @@ export function buildBlockedResult(
         source_name: adapter.sourceName,
         source_url: candidate.url,
         source_access_status: decision.sourceAccessStatus,
+        failure_class: "access_blocked",
         access_reason: decision.accessReason,
         blocker_reason: decision.blockerReason,
         fetched_at: fetchedAt
@@ -301,8 +357,14 @@ export function buildBlockedResult(
     canonical_url: candidate.url,
     access_mode: context.accessContext.mode,
     source_access_status: decision.sourceAccessStatus,
+    failure_class: "access_blocked",
     access_reason: decision.accessReason,
     blocker_reason: decision.blockerReason,
+    transport_kind: null,
+    transport_provider: null,
+    transport_host: null,
+    transport_status_code: null,
+    transport_retryable: null,
     extracted_fields: {},
     discovery_provenance: candidate.provenance,
     discovery_score: candidate.score,
@@ -360,6 +422,54 @@ export function extractHrefCandidates(
   score: number,
   matchers: RegExp[]
 ): SourceCandidate[] {
+  const canonicalPageUrl = (() => {
+    try {
+      const url = new URL(pageUrl);
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return pageUrl;
+    }
+  })();
+
+  const normalizeCandidateUrl = (rawUrl: string): string | null => {
+    let url: URL;
+    try {
+      url = new URL(rawUrl, pageUrl);
+    } catch {
+      return null;
+    }
+
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+
+    url.hash = "";
+
+    for (const key of [...url.searchParams.keys()]) {
+      const lower = key.toLowerCase();
+      if (
+        lower.startsWith("utm_") ||
+        lower === "gclid" ||
+        lower === "fbclid" ||
+        lower === "mc_cid" ||
+        lower === "mc_eid"
+      ) {
+        url.searchParams.delete(key);
+      }
+    }
+
+    const lowerPath = url.pathname.toLowerCase();
+    if (lowerPath.endsWith("/feed") || lowerPath.endsWith("/feed/")) {
+      return null;
+    }
+    if (/\.(?:xml|rss|jpg|jpeg|png|gif|webp|svg|css|js|pdf|zip|mp3|mp4|ico)$/i.test(lowerPath)) {
+      return null;
+    }
+
+    return url.toString();
+  };
+
   const hrefRegex = /href\s*=\s*["']([^"']+)["']/gi;
   const out: SourceCandidate[] = [];
   const seen = new Set<string>();
@@ -367,14 +477,15 @@ export function extractHrefCandidates(
   let match: RegExpExecArray | null;
   while ((match = hrefRegex.exec(html)) !== null) {
     const raw = match[1];
-    if (!raw || raw.startsWith("javascript:") || raw.startsWith("mailto:")) {
+    if (!raw || raw.startsWith("#") || raw.startsWith("javascript:") || raw.startsWith("mailto:")) {
       continue;
     }
 
-    let absolute: string;
-    try {
-      absolute = new URL(raw, pageUrl).toString();
-    } catch {
+    const absolute = normalizeCandidateUrl(raw);
+    if (!absolute) {
+      continue;
+    }
+    if (absolute === canonicalPageUrl) {
       continue;
     }
 
@@ -440,7 +551,7 @@ export function buildRecordFromParsed(
     normalized_price_try: null,
     normalized_price_usd: null,
     buyers_premium_included: parsed.buyersPremiumIncluded,
-    image_url: null,
+    image_url: parsed.imageUrl,
     screenshot_path: null,
     raw_snapshot_path: rawSnapshotPath,
     visual_match_score: null,

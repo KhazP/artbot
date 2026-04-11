@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { crawlModeSchema, sourceClassSchema } from "./inventory.js";
 
 export const researchQuerySchema = z.object({
   artist: z.string().min(1),
@@ -22,11 +23,17 @@ export const researchQuerySchema = z.object({
     .optional(),
   scope: z.enum(["turkey_only", "turkey_plus_international"]).default("turkey_plus_international"),
   turkeyFirst: z.boolean().default(true),
+  analysisMode: z.enum(["comprehensive", "balanced", "fast"]).default("balanced"),
+  priceNormalization: z.enum(["legacy", "usd_dual", "usd_nominal", "usd_2026"]).default("usd_dual"),
   authProfileId: z.string().optional(),
   cookieFile: z.string().optional(),
   manualLoginCheckpoint: z.boolean().default(false),
   allowLicensed: z.boolean().default(false),
-  licensedIntegrations: z.array(z.string()).default([])
+  licensedIntegrations: z.array(z.string()).default([]),
+  crawlMode: crawlModeSchema.default("backfill"),
+  sourceClasses: z
+    .array(sourceClassSchema)
+    .default(["auction_house", "gallery", "dealer", "marketplace", "database"])
 });
 
 export type ResearchQuery = z.infer<typeof researchQuerySchema>;
@@ -39,4 +46,8 @@ export const researchWorkRequestSchema = z.object({
   query: researchQuerySchema.extend({
     title: z.string().min(1)
   })
+});
+
+export const artistMarketInventoryRequestSchema = z.object({
+  query: researchQuerySchema
 });

@@ -33,6 +33,7 @@ export type AcceptanceReason =
   | "asking_price_ready"
   | "inquiry_only_evidence"
   | "price_hidden_evidence"
+  | "generic_shell_page"
   | "missing_numeric_price"
   | "missing_currency"
   | "missing_estimate_range"
@@ -46,6 +47,17 @@ export type SourceAccessStatus =
   | "blocked"
   | "price_hidden";
 
+export type FailureClass =
+  | "access_blocked"
+  | "waf_challenge"
+  | "not_found"
+  | "transport_timeout"
+  | "transport_dns"
+  | "transport_other"
+  | "host_circuit";
+
 export type AccessMode = "anonymous" | "authorized" | "licensed";
 
 export type RunStatus = "pending" | "running" | "completed" | "failed";
+
+export type RunType = "artist" | "work" | "artist_market_inventory";

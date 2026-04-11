@@ -31,6 +31,7 @@ export function renderMarkdownReport(
     `- Accepted from discovery: ${summary.accepted_from_discovery}`,
     `- Source status breakdown: ${JSON.stringify(summary.source_status_breakdown)}`,
     `- Auth mode breakdown: ${JSON.stringify(summary.auth_mode_breakdown)}`,
+    `- Failure class breakdown: ${JSON.stringify(summary.failure_class_breakdown ?? {})}`,
     `- Source candidate breakdown: ${JSON.stringify(summary.source_candidate_breakdown)}`,
     "",
     "## Valuation",

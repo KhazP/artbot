@@ -61,12 +61,14 @@ function baseRecord(overrides: Partial<PriceRecord> = {}): PriceRecord {
 }
 
 describe("normalization", () => {
-  it("normalizes TRY to USD", () => {
+  it("normalizes TRY to USD", async () => {
     const provider = new FxRateProvider();
-    const normalized = normalizeRecordCurrencies(baseRecord(), provider);
+    const normalized = await normalizeRecordCurrencies(baseRecord(), provider);
 
     expect(normalized.normalized_price_try).toBeCloseTo(100000, 0);
     expect(normalized.normalized_price_usd).toBeGreaterThan(2000);
+    expect(normalized.normalized_price_usd_nominal).toBeGreaterThan(2000);
+    expect(normalized.inflation_base_year).toBe(2026);
   });
 
   it("dedupes strongly matching records", () => {

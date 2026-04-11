@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { researchQuerySchema } from "@artbot/shared-types";
 import type { AdapterExtractionContext, SourceCandidate } from "../types.js";
 import { DeterministicVenueAdapter, detectMuzayedeSignature } from "./specialized-adapters.js";
 
@@ -104,6 +105,42 @@ const fetchMock = vi.hoisted(() => {
         parserUsed: "fixture-fetch"
       };
     }
+    if (url.includes("invaluable.com") && /\/auction-lot\/|\/lot\//i.test(url)) {
+      return {
+        url,
+        html: fixtureFromRoot("invaluable/lot.html"),
+        markdown: fixtureFromRoot("invaluable/lot.html"),
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    }
+    if (url.includes("invaluable.com")) {
+      return {
+        url,
+        html: fixtureFromRoot("invaluable/listing.html"),
+        markdown: fixtureFromRoot("invaluable/listing.html"),
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    }
+    if (url.includes("liveauctioneers.com") && /\/item\/\d+|\/lot\//i.test(url)) {
+      return {
+        url,
+        html: fixtureFromRoot("liveauctioneers/lot.html"),
+        markdown: fixtureFromRoot("liveauctioneers/lot.html"),
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    }
+    if (url.includes("liveauctioneers.com")) {
+      return {
+        url,
+        html: fixtureFromRoot("liveauctioneers/listing.html"),
+        markdown: fixtureFromRoot("liveauctioneers/listing.html"),
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    }
 
     return {
       url,
@@ -131,15 +168,19 @@ function context(
   return {
     runId: "run-1",
     traceId: "trace-1",
-    query: {
+    query: researchQuerySchema.parse({
       artist: "Burhan Dogancay",
       title: "Mavi Kompozisyon",
       scope: "turkey_plus_international",
       turkeyFirst: true,
+      analysisMode: "balanced",
+      priceNormalization: "usd_dual",
       manualLoginCheckpoint: false,
       allowLicensed: true,
-      licensedIntegrations: ["Sanatfiyat"]
-    },
+      licensedIntegrations: ["Sanatfiyat"],
+      crawlMode: "backfill",
+      sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+    }),
     accessContext: {
       mode,
       sourceAccessStatus,
@@ -242,6 +283,47 @@ describe("specialized adapters", () => {
 
     const clarArchiveResult = await clarArchive.extract(candidate("https://clar-archive.test/search?q=dogancay"), context("anonymous", "public_access"));
     expect(["realized_price", "estimate"]).toContain(clarArchiveResult.record?.price_type);
+  });
+
+  it("marks maintenance pages as blocked", async () => {
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      const html = `
+        <html>
+          <body>
+            <h1>We apologize for the inconvenience.</h1>
+            <p>We are currently working to bring our website back online as soon as possible.</p>
+          </body>
+        </html>
+      `;
+      return {
+        url,
+        html,
+        markdown: html,
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    });
+
+    const adapter = new DeterministicVenueAdapter({
+      id: "maintenance-test",
+      sourceName: "Maintenance Source",
+      venueName: "Maintenance",
+      venueType: "auction_house",
+      sourcePageType: "listing",
+      tier: 1,
+      country: "USA",
+      city: "New York",
+      baseUrl: "https://www.phillips.com",
+      searchPaths: ["/search?q="],
+      lotUrlMatchers: [/\/lot\//i]
+    });
+
+    const result = await adapter.extract(candidate("https://www.phillips.com/search?q=dogancay"), context("anonymous", "public_access"));
+    expect(result.attempt.source_access_status).toBe("blocked");
+    expect(result.attempt.acceptance_reason).toBe("blocked_access");
+    expect(result.attempt.blocker_reason).toContain("maintenance");
+    expect(result.record).toBeNull();
+    expect(result.discoveredCandidates ?? []).toHaveLength(0);
   });
 
   it("enforces Sanatfiyat licensed mode transitions", async () => {
@@ -363,6 +445,64 @@ describe("specialized adapters", () => {
     expect(antikasaResult.record?.estimate_high).toBe(980000);
     expect(antikasaResult.attempt.canonical_url).toContain("antikasa.com");
     expect(antikasaResult.attempt.parser_used).toBe("fixture-fetch");
+  });
+
+  it("extracts Invaluable and LiveAuctioneers lot-detail adapters", async () => {
+    const invaluable = new DeterministicVenueAdapter({
+      id: "invaluable-lot-detail-adapter",
+      sourceName: "Invaluable Lot Detail",
+      venueName: "Invaluable",
+      venueType: "marketplace",
+      sourcePageType: "listing",
+      tier: 3,
+      country: null,
+      city: null,
+      baseUrl: "https://www.invaluable.com",
+      searchPaths: ["/search?query="],
+      lotUrlMatchers: [/\/auction-lot\//i, /\/lot\//i]
+    });
+
+    const liveauctioneers = new DeterministicVenueAdapter({
+      id: "liveauctioneers-public-lot-adapter",
+      sourceName: "LiveAuctioneers Public Lots",
+      venueName: "LiveAuctioneers",
+      venueType: "marketplace",
+      sourcePageType: "listing",
+      tier: 3,
+      country: null,
+      city: null,
+      baseUrl: "https://www.liveauctioneers.com",
+      searchPaths: ["/search/?keyword="],
+      lotUrlMatchers: [/\/item\/\d+/i, /\/lot\//i]
+    });
+
+    const invaluableListing = await invaluable.extract(
+      candidate("https://www.invaluable.com/search?query=dogancay"),
+      context("anonymous", "public_access")
+    );
+    expect((invaluableListing.discoveredCandidates ?? []).some((entry) => /auction-lot/i.test(entry.url))).toBe(true);
+
+    const invaluableLot = await invaluable.extract(
+      candidate("https://www.invaluable.com/auction-lot/burhan-dogancay-mavi-kompozisyon-55-c-ABCD1234", "lot"),
+      context("anonymous", "public_access")
+    );
+    expect(invaluableLot.record?.price_type).toBe("realized_price");
+    expect(invaluableLot.record?.currency).toBe("USD");
+    expect(invaluableLot.record?.price_amount).toBe(18500);
+
+    const liveListing = await liveauctioneers.extract(
+      candidate("https://www.liveauctioneers.com/search/?keyword=dogancay"),
+      context("anonymous", "public_access")
+    );
+    expect((liveListing.discoveredCandidates ?? []).some((entry) => /\/item\/\d+/i.test(entry.url))).toBe(true);
+
+    const liveLot = await liveauctioneers.extract(
+      candidate("https://www.liveauctioneers.com/item/198765432-burhan-dogancay-mavi-kompozisyon", "lot"),
+      context("anonymous", "public_access")
+    );
+    expect(liveLot.record?.price_type).toBe("realized_price");
+    expect(liveLot.record?.currency).toBe("USD");
+    expect(liveLot.record?.price_amount).toBe(11750);
   });
 
   it("meets fixture-level 2x coverage uplift target", async () => {

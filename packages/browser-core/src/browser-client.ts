@@ -3,7 +3,7 @@ import path from "node:path";
 import { AuthManager } from "@artbot/auth-manager";
 import { logger } from "@artbot/observability";
 import type { AccessContext } from "@artbot/shared-types";
-import { chromium, type BrowserContext } from "playwright";
+import { chromium, type BrowserContext, type Page } from "playwright";
 
 export interface BrowserCaptureInput {
   traceId: string;
@@ -29,8 +29,40 @@ export interface BrowserCaptureResult {
   modelUsed: string | null;
 }
 
+export interface BrowserDiscoveryInput extends BrowserCaptureInput {
+  maxPages?: number;
+  maxLinks?: number;
+}
+
+export interface BrowserDiscoveryResult {
+  finalUrl: string;
+  screenshotPaths: string[];
+  rawSnapshotPaths: string[];
+  discoveredUrls: string[];
+  discoveredImageUrls: string[];
+  pageCount: number;
+  requiresAuthDetected: boolean;
+  blockedDetected: boolean;
+}
+
+export interface RenderedPageProgressSnapshot {
+  url: string;
+  anchorCount: number;
+  imageCount: number;
+  itemCount: number;
+  textLength: number;
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
 }
 
 function containsAuthIndicators(content: string): boolean {
@@ -39,14 +71,62 @@ function containsAuthIndicators(content: string): boolean {
   return indicators.some((token) => lower.includes(token));
 }
 
-function containsBlockedIndicators(content: string): boolean {
-  const indicators = ["access denied", "forbidden", "blocked", "captcha", "cloudflare"];
+export function containsBlockedIndicators(content: string): boolean {
   const lower = content.toLowerCase();
-  if (indicators.some((token) => lower.includes(token))) {
+
+  const hardChallengePatterns = [
+    /cdn-cgi\/challenge-platform/i,
+    /__cf_chl_/i,
+    /\bcf-ray\b/i,
+    /just a moment\.\.\./i,
+    /enable javascript and cookies to continue/i,
+    /verify you are human/i,
+    /attention required/i
+  ];
+  if (hardChallengePatterns.some((pattern) => pattern.test(content))) {
     return true;
   }
 
-  return /\b(?:too many requests|status\s*code\s*:?\s*429|error\s*429|http\s*429)\b/i.test(lower);
+  if (/(access denied|request blocked|forbidden)/i.test(lower)) {
+    return true;
+  }
+
+  // Do not treat standalone "captcha" mentions as a block. Many normal pages include reCAPTCHA scripts.
+  if (lower.includes("captcha") && /(blocked|forbidden|cloudflare|challenge|verify you are human)/i.test(lower)) {
+    return true;
+  }
+
+  if (/\b(?:too many requests|status\s*code\s*:?\s*429|error\s*429|http\s*429)\b/i.test(lower)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function renderedPageProgressKey(snapshot: RenderedPageProgressSnapshot): string {
+  return [
+    snapshot.url,
+    snapshot.anchorCount,
+    snapshot.imageCount,
+    snapshot.itemCount,
+    snapshot.textLength
+  ].join("|");
+}
+
+export function didRenderedPaginationAdvance(
+  before: RenderedPageProgressSnapshot,
+  after: RenderedPageProgressSnapshot
+): boolean {
+  if (after.url !== before.url) {
+    return true;
+  }
+
+  return (
+    after.anchorCount > before.anchorCount ||
+    after.imageCount > before.imageCount ||
+    after.itemCount > before.itemCount ||
+    after.textLength > before.textLength + 120
+  );
 }
 
 export class BrowserClient {
@@ -241,6 +321,154 @@ export class BrowserClient {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
+  public async discoverRenderedArtifacts(input: BrowserDiscoveryInput): Promise<BrowserDiscoveryResult> {
+    const timeoutMs = input.timeoutMs ?? 45_000;
+    const maxPages = Math.max(1, Math.min(input.maxPages ?? 4, 10));
+    const maxLinks = Math.max(20, Math.min(input.maxLinks ?? 400, 2000));
+    const screenshotsDir = path.join(input.evidenceDir, "screenshots");
+    const rawDir = path.join(input.evidenceDir, "raw");
+    fs.mkdirSync(screenshotsDir, { recursive: true });
+    fs.mkdirSync(rawDir, { recursive: true });
+
+    const sessionPath = this.authManager.ensureSessionDir(input.accessContext.profileId);
+    const refreshDecision = this.authManager.shouldRefreshSession({
+      profileId: input.accessContext.profileId,
+      sessionPath
+    });
+
+    if (sessionPath && refreshDecision.refresh && fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { force: true });
+    }
+
+    const browser = await chromium.launch({ headless: true });
+    let context: BrowserContext | null = null;
+
+    try {
+      context = await this.newContext(browser, sessionPath);
+      await this.injectCookies(context, input.accessContext.cookieFile);
+
+      const page = await context.newPage();
+      page.setDefaultTimeout(timeoutMs);
+      await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+
+      const discoveredUrls = new Set<string>();
+      const discoveredImageUrls = new Set<string>();
+      const visitedPageStates = new Set<string>();
+      const screenshotPaths: string[] = [];
+      const rawSnapshotPaths: string[] = [];
+      let requiresAuthDetected = false;
+      let blockedDetected = false;
+
+      for (let index = 0; index < maxPages; index += 1) {
+        await this.scrollPage(page);
+
+        const html = await page.content();
+        const pageProgress = await this.captureRenderedPageProgress(page);
+        const pageStateKey = renderedPageProgressKey(pageProgress);
+        if (visitedPageStates.has(pageStateKey)) {
+          break;
+        }
+        visitedPageStates.add(pageStateKey);
+
+        requiresAuthDetected = requiresAuthDetected || containsAuthIndicators(html);
+        blockedDetected = blockedDetected || containsBlockedIndicators(html);
+
+        const stamp = `${Date.now()}-${index + 1}`;
+        const baseName = `${slugify(input.sourceName)}-${stamp}`;
+        const screenshotPath = path.join(screenshotsDir, `${baseName}-rendered.png`);
+        const rawSnapshotPath = path.join(rawDir, `${baseName}-rendered.html`);
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        fs.writeFileSync(rawSnapshotPath, html, "utf-8");
+        screenshotPaths.push(screenshotPath);
+        rawSnapshotPaths.push(rawSnapshotPath);
+
+        const pageArtifacts = await page.evaluate(() => {
+          const normalize = (value: string | null | undefined): string | null => {
+            if (!value) return null;
+            const trimmed = value.trim();
+            if (!trimmed || trimmed.startsWith("javascript:") || trimmed.startsWith("mailto:")) {
+              return null;
+            }
+            try {
+              return new URL(trimmed, window.location.href).toString();
+            } catch {
+              return null;
+            }
+          };
+
+          const urls = Array.from(document.querySelectorAll("a[href]"))
+            .map((element) => normalize((element as HTMLAnchorElement).getAttribute("href")))
+            .filter((value): value is string => Boolean(value));
+          const images = Array.from(document.querySelectorAll("img[src]"))
+            .map((element) => normalize((element as HTMLImageElement).getAttribute("src")))
+            .filter((value): value is string => Boolean(value));
+          const ogImage = normalize(
+            document.querySelector("meta[property='og:image']")?.getAttribute("content") ?? undefined
+          );
+
+          return {
+            urls,
+            images: ogImage ? [ogImage, ...images] : images
+          };
+        });
+
+        for (const url of pageArtifacts.urls) {
+          if (discoveredUrls.size >= maxLinks) break;
+          discoveredUrls.add(url);
+        }
+        for (const imageUrl of pageArtifacts.images) {
+          discoveredImageUrls.add(imageUrl);
+        }
+
+        const moved = await this.followNextPage(page, pageProgress, timeoutMs);
+        if (!moved) {
+          break;
+        }
+      }
+
+      if (sessionPath) {
+        await context.storageState({ path: sessionPath });
+      }
+
+      return {
+        finalUrl: page.url(),
+        screenshotPaths,
+        rawSnapshotPaths,
+        discoveredUrls: [...discoveredUrls],
+        discoveredImageUrls: [...discoveredImageUrls],
+        pageCount: visitedPageStates.size,
+        requiresAuthDetected,
+        blockedDetected
+      };
+    } finally {
+      if (context) {
+        try {
+          await context.close();
+        } catch (error) {
+          logger.warn("Failed to close browser context", {
+            traceId: input.traceId,
+            runId: input.runId,
+            source: input.sourceName,
+            stage: "browser_discovery_close_context",
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+
+      try {
+        await browser.close();
+      } catch (error) {
+        logger.warn("Failed to close browser instance", {
+          traceId: input.traceId,
+          runId: input.runId,
+          source: input.sourceName,
+          stage: "browser_discovery_close_instance",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
   private async newContext(
     browser: Awaited<ReturnType<typeof chromium.launch>>,
     sessionPath?: string,
@@ -376,5 +604,85 @@ export class BrowserClient {
       });
       return null;
     }
+  }
+
+  private async scrollPage(page: Page): Promise<void> {
+    await page.evaluate(async () => {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      let previousHeight = 0;
+      for (let step = 0; step < 6; step += 1) {
+        window.scrollTo(0, document.body.scrollHeight);
+        await sleep(300);
+        const currentHeight = document.body.scrollHeight;
+        if (currentHeight === previousHeight) {
+          break;
+        }
+        previousHeight = currentHeight;
+      }
+      window.scrollTo(0, 0);
+    });
+  }
+
+  private async captureRenderedPageProgress(page: Page): Promise<RenderedPageProgressSnapshot> {
+    return page.evaluate(() => ({
+      url: window.location.href,
+      anchorCount: document.querySelectorAll("a[href]").length,
+      imageCount: document.querySelectorAll("img[src]").length,
+      itemCount: document.querySelectorAll("article, li, [data-testid*='item'], [data-testid*='lot']").length,
+      textLength: (document.body?.innerText ?? "").replace(/\s+/g, " ").trim().length
+    }));
+  }
+
+  private async followNextPage(
+    page: Page,
+    beforeProgress: RenderedPageProgressSnapshot,
+    timeoutMs: number
+  ): Promise<boolean> {
+    const nextLocators = [
+      page.locator("a[rel='next']").first(),
+      page.locator("button[aria-label*='next' i]").first(),
+      page.locator("a:has-text('Next')").first(),
+      page.locator("button:has-text('Next')").first(),
+      page.locator("a:has-text('Sonraki')").first(),
+      page.locator("button:has-text('Sonraki')").first(),
+      page.locator("a:has-text('Daha fazla')").first(),
+      page.locator("button:has-text('Daha fazla')").first()
+    ];
+
+    for (const locator of nextLocators) {
+      try {
+        if ((await locator.count()) === 0 || !(await locator.isVisible())) {
+          continue;
+        }
+        const before = page.url();
+        await locator.click({ timeout: 2_000 });
+        await page.waitForLoadState("domcontentloaded", { timeout: timeoutMs }).catch(() => undefined);
+        await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => undefined);
+        await wait(500);
+        const after = page.url();
+        const afterProgress = await this.captureRenderedPageProgress(page);
+        if (after !== before || didRenderedPaginationAdvance(beforeProgress, afterProgress)) {
+          return true;
+        }
+      } catch {
+        // fall through to alternate candidates
+      }
+    }
+
+    const nextUrl = await page.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+      const next = candidates.find((link) => {
+        const text = (link.textContent ?? "").trim().toLowerCase();
+        return text === "next" || text === "sonraki" || text.includes("daha fazla");
+      });
+      return next?.href ?? null;
+    });
+
+    if (!nextUrl || nextUrl === beforeProgress.url) {
+      return false;
+    }
+
+    await page.goto(nextUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    return true;
   }
 }

@@ -13,6 +13,7 @@
   "dependencies": {
     "@artbot/auth-manager": "workspace:*",
     "@artbot/browser-core": "workspace:*",
+    "@artbot/extraction": "workspace:*",
     "@artbot/normalization": "workspace:*",
     "@artbot/observability": "workspace:*",
     "@artbot/report-generation": "workspace:*",
@@ -20,6 +21,7 @@
     "@artbot/source-adapters": "workspace:*",
     "@artbot/source-registry": "workspace:*",
     "@artbot/storage": "workspace:*",
-    "@artbot/valuation": "workspace:*"
+    "@artbot/valuation": "workspace:*",
+    "jimp": "^1.6.0"
   }
 }

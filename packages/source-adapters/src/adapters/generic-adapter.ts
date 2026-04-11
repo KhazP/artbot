@@ -29,6 +29,7 @@ interface GenericAdapterOptions {
   requiresAuth?: boolean;
   requiresLicense?: boolean;
   supportedAccessModes?: SourceAdapter["supportedAccessModes"];
+  crawlStrategies?: SourceAdapter["crawlStrategies"];
 }
 
 export class GenericSourceAdapter implements SourceAdapter {
@@ -43,6 +44,7 @@ export class GenericSourceAdapter implements SourceAdapter {
   public readonly requiresAuth: boolean;
   public readonly requiresLicense: boolean;
   public readonly supportedAccessModes: SourceAdapter["supportedAccessModes"];
+  public readonly crawlStrategies: SourceAdapter["crawlStrategies"];
   private readonly baseUrl: string;
   private readonly searchPath: string;
 
@@ -60,6 +62,7 @@ export class GenericSourceAdapter implements SourceAdapter {
     this.requiresAuth = Boolean(options.requiresAuth);
     this.requiresLicense = Boolean(options.requiresLicense);
     this.supportedAccessModes = options.supportedAccessModes ?? ["anonymous", "authorized", "licensed"];
+    this.crawlStrategies = options.crawlStrategies ?? ["search", "listing_to_lot"];
   }
 
   public async discoverCandidates(query: AdapterExtractionContext["query"]): Promise<SourceCandidate[]> {
@@ -84,13 +87,16 @@ export class GenericSourceAdapter implements SourceAdapter {
     }
 
     const fetchedAt = new Date().toISOString();
-    const extracted = await fetchCheapestFirst(candidate.url);
+    const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext);
     const rawSnapshotPath = ensureRawPath(context.evidenceDir, `${this.id}-${Date.now()}-cheap.html`);
     writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown);
 
-    const parsed = parseGenericLotFields(`${extracted.markdown} ${extracted.html}`);
+    const parsed = parseGenericLotFields(`${extracted.markdown} ${extracted.html}`, extracted.url);
     const sourceStatus = parsed.priceHidden ? "price_hidden" : decision.sourceAccessStatus;
-    const acceptance = evaluateAcceptance(parsed, sourceStatus);
+    const acceptance = evaluateAcceptance(parsed, sourceStatus, {
+      sourceName: this.sourceName,
+      sourcePageType: candidate.sourcePageType
+    });
 
     const record = buildRecordFromParsed(
       {
@@ -115,8 +121,14 @@ export class GenericSourceAdapter implements SourceAdapter {
       canonical_url: extracted.url,
       access_mode: context.accessContext.mode,
       source_access_status: sourceStatus,
+      failure_class: undefined,
       access_reason: decision.accessReason,
       blocker_reason: null,
+      transport_kind: null,
+      transport_provider: null,
+      transport_host: null,
+      transport_status_code: null,
+      transport_retryable: null,
       extracted_fields: {
         lot_number: parsed.lotNumber,
         estimate_low: parsed.estimateLow,
@@ -160,12 +172,14 @@ export class GenericSourceAdapter implements SourceAdapter {
       !acceptance.acceptedForValuation &&
       parsed.priceType !== "inquiry_only" &&
       !parsed.priceHidden;
+    const shouldSuppressBrowserVerification = acceptance.acceptanceReason === "generic_shell_page";
 
     return {
       attempt,
       record: acceptance.acceptedForEvidence ? record : null,
       needsBrowserVerification:
-        shouldEscalateForMissingPrice || !acceptance.acceptedForEvidence || context.accessContext.mode !== "anonymous"
+        !shouldSuppressBrowserVerification &&
+        (shouldEscalateForMissingPrice || !acceptance.acceptedForEvidence || context.accessContext.mode !== "anonymous")
     };
   }
 }

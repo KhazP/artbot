@@ -21,8 +21,9 @@ const explicitPolicyByAdapterId: Record<string, SourcePolicyClass> = {
   "artam-auction-records": "public_archive",
   "artam-lot": "public_archive",
   "alifart-lot": "public_archive",
+  "invaluable-lot-detail-adapter": "public_archive",
+  "liveauctioneers-public-lot-adapter": "public_archive",
   "sanatfiyat-licensed-extractor": "licensed_only",
-  "invaluable-listing": "probe",
   "mutualart-probe": "probe",
   "askart-probe": "probe",
   "artsy-probe": "probe"
@@ -71,4 +72,3 @@ export function evaluateSourcePolicy(adapter: SourceAdapter, query: ResearchQuer
     reason: `Allowed by source policy (${policyClass}).`
   };
 }
-

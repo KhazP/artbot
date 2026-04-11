@@ -1,12 +1,31 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { v4 as uuidv4 } from "uuid";
-import type { PriceRecord, ResearchQuery, RunEntity, RunStatus, SourceAttempt, SourceAccessStatus } from "@artbot/shared-types";
+import type {
+  ArtworkCluster,
+  ArtworkImage,
+  ClusterMembership,
+  CrawlCheckpoint,
+  FrontierItem,
+  FrontierStatus,
+  InventoryRecord,
+  PriceRecord,
+  PriceSemanticLane,
+  ResearchQuery,
+  ReviewItem,
+  RunEntity,
+  RunStatus,
+  RunType,
+  SourceAccessStatus,
+  SourceAttempt,
+  SourceHost
+} from "@artbot/shared-types";
 
 interface RunRow {
   id: string;
-  run_type: "artist" | "work";
+  run_type: RunType;
   query_json: string;
   status: RunStatus;
   error: string | null;
@@ -25,6 +44,31 @@ export interface RunDetails {
   attempts: SourceAttempt[];
   sourceStatusBreakdown: Record<SourceAccessStatus, number>;
   authModeBreakdown: Record<"anonymous" | "authorized" | "licensed", number>;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function stablePairKey(left: string, right: string): string {
+  return [left, right].sort().join("::");
+}
+
+export function artistKeyFromName(artist: string): string {
+  return artist
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function parsePayloadRows<T>(rows: Array<{ payload_json: string }>): T[] {
+  return rows.map((row) => JSON.parse(row.payload_json) as T);
+}
+
+function frontierCanonicalKey(url: string): string {
+  return createHash("sha256").update(url).digest("hex");
 }
 
 export class ArtbotStorage {
@@ -79,6 +123,85 @@ export class ArtbotStorage {
         payload_json TEXT NOT NULL,
         fetched_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS source_hosts (
+        id TEXT PRIMARY KEY,
+        host TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS crawl_frontier (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        artist_key TEXT NOT NULL,
+        source_host TEXT NOT NULL,
+        url TEXT NOT NULL,
+        canonical_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (artist_key, canonical_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS crawl_checkpoints (
+        id TEXT PRIMARY KEY,
+        artist_key TEXT NOT NULL,
+        source_host TEXT NOT NULL,
+        section_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (artist_key, source_host, section_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS inventory_records (
+        id TEXT PRIMARY KEY,
+        artist_key TEXT NOT NULL,
+        record_key TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS artwork_images (
+        id TEXT PRIMARY KEY,
+        artist_key TEXT NOT NULL,
+        record_key TEXT NOT NULL,
+        image_url TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (record_key, image_url)
+      );
+
+      CREATE TABLE IF NOT EXISTS artwork_clusters (
+        id TEXT PRIMARY KEY,
+        artist_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS cluster_memberships (
+        id TEXT PRIMARY KEY,
+        cluster_id TEXT NOT NULL,
+        record_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (cluster_id, record_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS review_items (
+        id TEXT PRIMARY KEY,
+        artist_key TEXT NOT NULL,
+        pair_key TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     this.ensureRunsColumn("lease_owner", "TEXT");
@@ -94,7 +217,7 @@ export class ArtbotStorage {
     this.db.exec(`ALTER TABLE runs ADD COLUMN ${columnName} ${columnSqlType}`);
   }
 
-  public createRun(runType: "artist" | "work", query: ResearchQuery): RunEntity {
+  public createRun(runType: RunType, query: ResearchQuery): RunEntity {
     const now = new Date().toISOString();
     const id = uuidv4();
 
@@ -311,6 +434,486 @@ export class ArtbotStorage {
       .run(uuidv4(), runId, JSON.stringify(attempt), new Date().toISOString());
   }
 
+  public upsertSourceHost(
+    sourceHost: Omit<SourceHost, "id" | "created_at" | "updated_at"> & { id?: string }
+  ): SourceHost {
+    const existing = this.getSourceHost(sourceHost.host);
+    const now = nowIso();
+    const payload: SourceHost = {
+      ...sourceHost,
+      id: existing?.id ?? sourceHost.id ?? uuidv4(),
+      created_at: existing?.created_at ?? now,
+      updated_at: now
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO source_hosts (id, host, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(host)
+         DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+      )
+      .run(
+        payload.id,
+        payload.host,
+        JSON.stringify(payload),
+        payload.created_at,
+        payload.updated_at
+      );
+
+    return payload;
+  }
+
+  public getSourceHost(host: string): SourceHost | null {
+    const row = this.db.prepare(`SELECT payload_json FROM source_hosts WHERE host = ?`).get(host) as
+      | { payload_json: string }
+      | undefined;
+    return row ? (JSON.parse(row.payload_json) as SourceHost) : null;
+  }
+
+  public listSourceHosts(): SourceHost[] {
+    const rows = this.db.prepare(`SELECT payload_json FROM source_hosts ORDER BY host ASC`).all() as Array<{
+      payload_json: string;
+    }>;
+    return parsePayloadRows<SourceHost>(rows);
+  }
+
+  public enqueueFrontierItem(
+    item: Omit<
+      FrontierItem,
+      "id" | "status" | "retry_count" | "revisit_after" | "last_error" | "created_at" | "updated_at"
+    >
+  ): FrontierItem {
+    const now = nowIso();
+    const canonicalKey = frontierCanonicalKey(item.url);
+    const existing = this.db
+      .prepare(`SELECT payload_json FROM crawl_frontier WHERE artist_key = ? AND canonical_key = ?`)
+      .get(item.artist_key, canonicalKey) as { payload_json: string } | undefined;
+    const existingItem = existing ? (JSON.parse(existing.payload_json) as FrontierItem) : null;
+    const frontierItem: FrontierItem = {
+      ...item,
+      id: existingItem?.id ?? uuidv4(),
+      status: existingItem?.status === "processing" ? "processing" : "pending",
+      retry_count: existingItem?.retry_count ?? 0,
+      revisit_after: existingItem?.revisit_after ?? null,
+      last_error: existingItem?.last_error ?? null,
+      created_at: existingItem?.created_at ?? now,
+      updated_at: now
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO crawl_frontier (id, run_id, artist_key, source_host, url, canonical_key, status, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(artist_key, canonical_key)
+         DO UPDATE SET
+           run_id = excluded.run_id,
+           source_host = excluded.source_host,
+           url = excluded.url,
+           status = CASE WHEN crawl_frontier.status = 'processing' THEN crawl_frontier.status ELSE 'pending' END,
+           payload_json = excluded.payload_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        frontierItem.id,
+        frontierItem.run_id,
+        frontierItem.artist_key,
+        frontierItem.source_host,
+        frontierItem.url,
+        canonicalKey,
+        frontierItem.status,
+        JSON.stringify(frontierItem),
+        frontierItem.created_at,
+        frontierItem.updated_at
+      );
+
+    return frontierItem;
+  }
+
+  public listPendingFrontier(runId: string, limit = 100): FrontierItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json
+         FROM crawl_frontier
+         WHERE run_id = ? AND status = 'pending'
+         ORDER BY created_at ASC
+         LIMIT ?`
+      )
+      .all(runId, limit) as Array<{ payload_json: string }>;
+    return parsePayloadRows<FrontierItem>(rows);
+  }
+
+  public claimNextFrontierItem(runId: string): FrontierItem | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json
+         FROM crawl_frontier
+         WHERE run_id = ?
+           AND status = 'pending'
+         ORDER BY created_at ASC
+         LIMIT 1`
+      )
+      .get(runId) as { payload_json: string } | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    const current = JSON.parse(row.payload_json) as FrontierItem;
+    const next: FrontierItem = {
+      ...current,
+      status: "processing",
+      updated_at: nowIso()
+    };
+
+    this.db
+      .prepare(`UPDATE crawl_frontier SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?`)
+      .run(next.status, JSON.stringify(next), next.updated_at, next.id);
+
+    return next;
+  }
+
+  public updateFrontierItemStatus(frontierId: string, status: FrontierStatus): void {
+    const row = this.db
+      .prepare(`SELECT payload_json FROM crawl_frontier WHERE id = ?`)
+      .get(frontierId) as { payload_json: string } | undefined;
+    if (!row) {
+      return;
+    }
+
+    const current = JSON.parse(row.payload_json) as FrontierItem;
+    const next: FrontierItem = {
+      ...current,
+      status,
+      retry_count: status === "failed" ? current.retry_count + 1 : current.retry_count,
+      updated_at: nowIso()
+    };
+
+    this.db
+      .prepare(`UPDATE crawl_frontier SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?`)
+      .run(next.status, JSON.stringify(next), next.updated_at, next.id);
+  }
+
+  public markFrontierProcessing(frontierId: string): void {
+    this.updateFrontierItemStatus(frontierId, "processing");
+  }
+
+  public markFrontierCompleted(frontierId: string): void {
+    this.updateFrontierItemStatus(frontierId, "completed");
+  }
+
+  public markFrontierSkipped(frontierId: string, error?: string): void {
+    const row = this.db
+      .prepare(`SELECT payload_json FROM crawl_frontier WHERE id = ?`)
+      .get(frontierId) as { payload_json: string } | undefined;
+    if (!row) {
+      return;
+    }
+    const current = JSON.parse(row.payload_json) as FrontierItem;
+    const next: FrontierItem = {
+      ...current,
+      status: "skipped",
+      last_error: error ?? current.last_error,
+      updated_at: nowIso()
+    };
+
+    this.db
+      .prepare(`UPDATE crawl_frontier SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?`)
+      .run(next.status, JSON.stringify(next), next.updated_at, next.id);
+  }
+
+  public markFrontierFailed(frontierId: string, error: string): void {
+    const row = this.db
+      .prepare(`SELECT payload_json FROM crawl_frontier WHERE id = ?`)
+      .get(frontierId) as { payload_json: string } | undefined;
+    if (!row) {
+      return;
+    }
+    const current = JSON.parse(row.payload_json) as FrontierItem;
+    const next: FrontierItem = {
+      ...current,
+      status: "failed",
+      retry_count: current.retry_count + 1,
+      last_error: error,
+      updated_at: nowIso()
+    };
+
+    this.db
+      .prepare(`UPDATE crawl_frontier SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?`)
+      .run(next.status, JSON.stringify(next), next.updated_at, next.id);
+  }
+
+  public listFrontierItems(runId: string, status?: FrontierStatus): FrontierItem[] {
+    const rows = status
+      ? (this.db
+          .prepare(`SELECT payload_json FROM crawl_frontier WHERE run_id = ? AND status = ? ORDER BY created_at ASC`)
+          .all(runId, status) as Array<{ payload_json: string }>)
+      : (this.db
+          .prepare(`SELECT payload_json FROM crawl_frontier WHERE run_id = ? ORDER BY created_at ASC`)
+          .all(runId) as Array<{ payload_json: string }>);
+
+    return parsePayloadRows<FrontierItem>(rows);
+  }
+
+  public upsertCrawlCheckpoint(
+    checkpoint: Omit<CrawlCheckpoint, "id" | "updated_at"> & { id?: string }
+  ): CrawlCheckpoint {
+    const existing = this.db
+      .prepare(
+        `SELECT payload_json FROM crawl_checkpoints WHERE artist_key = ? AND source_host = ? AND section_key = ?`
+      )
+      .get(checkpoint.artist_key, checkpoint.source_host, checkpoint.section_key) as { payload_json: string } | undefined;
+
+    const next: CrawlCheckpoint = {
+      ...checkpoint,
+      id: checkpoint.id ?? (existing ? (JSON.parse(existing.payload_json) as CrawlCheckpoint).id : uuidv4()),
+      updated_at: nowIso()
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO crawl_checkpoints (id, artist_key, source_host, section_key, payload_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(artist_key, source_host, section_key)
+         DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+      )
+      .run(next.id, next.artist_key, next.source_host, next.section_key, JSON.stringify(next), next.updated_at);
+
+    return next;
+  }
+
+  public listCrawlCheckpoints(artistKey: string): CrawlCheckpoint[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM crawl_checkpoints WHERE artist_key = ? ORDER BY updated_at DESC`)
+      .all(artistKey) as Array<{ payload_json: string }>;
+    return parsePayloadRows<CrawlCheckpoint>(rows);
+  }
+
+  public getCrawlCheckpoint(artistKey: string, sourceHost: string, sectionKey: string): CrawlCheckpoint | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json
+         FROM crawl_checkpoints
+         WHERE artist_key = ? AND source_host = ? AND section_key = ?`
+      )
+      .get(artistKey, sourceHost, sectionKey) as { payload_json: string } | undefined;
+    return row ? (JSON.parse(row.payload_json) as CrawlCheckpoint) : null;
+  }
+
+  public listCrawlCheckpointsForArtist(artistKey: string): CrawlCheckpoint[] {
+    return this.listCrawlCheckpoints(artistKey);
+  }
+
+  public saveInventoryRecord(
+    input: Omit<InventoryRecord, "id" | "created_at" | "updated_at"> & { id?: string }
+  ): { record: InventoryRecord; inserted: boolean } {
+    const existing = this.db
+      .prepare(`SELECT payload_json FROM inventory_records WHERE record_key = ?`)
+      .get(input.record_key) as { payload_json: string } | undefined;
+    const existingRecord = existing ? (JSON.parse(existing.payload_json) as InventoryRecord) : null;
+    const now = nowIso();
+    const record: InventoryRecord = {
+      ...input,
+      id: existingRecord?.id ?? input.id ?? uuidv4(),
+      created_at: existingRecord?.created_at ?? now,
+      updated_at: now
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO inventory_records (id, artist_key, record_key, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(record_key)
+         DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+      )
+      .run(record.id, record.artist_key, record.record_key, JSON.stringify(record), record.created_at, record.updated_at);
+
+    return {
+      record,
+      inserted: existingRecord === null
+    };
+  }
+
+  public upsertInventoryRecord(
+    input: Omit<InventoryRecord, "id" | "created_at" | "updated_at"> & { id?: string }
+  ): { record: InventoryRecord; inserted: boolean } {
+    return this.saveInventoryRecord(input);
+  }
+
+  public listInventoryRecordsByArtist(artistKey: string): InventoryRecord[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM inventory_records WHERE artist_key = ? ORDER BY updated_at ASC`)
+      .all(artistKey) as Array<{ payload_json: string }>;
+    return parsePayloadRows<InventoryRecord>(rows);
+  }
+
+  public listInventoryRecordsByRun(runId: string): InventoryRecord[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM inventory_records WHERE json_extract(payload_json, '$.run_id') = ? ORDER BY updated_at ASC`)
+      .all(runId) as Array<{ payload_json: string }>;
+    return parsePayloadRows<InventoryRecord>(rows);
+  }
+
+  public saveArtworkImage(
+    input: Omit<ArtworkImage, "id" | "created_at" | "updated_at"> & { id?: string }
+  ): { image: ArtworkImage; inserted: boolean } {
+    const existing = this.db
+      .prepare(`SELECT payload_json FROM artwork_images WHERE record_key = ? AND image_url = ?`)
+      .get(input.record_key, input.image_url) as { payload_json: string } | undefined;
+    const existingImage = existing ? (JSON.parse(existing.payload_json) as ArtworkImage) : null;
+    const now = nowIso();
+    const image: ArtworkImage = {
+      ...input,
+      id: existingImage?.id ?? input.id ?? uuidv4(),
+      created_at: existingImage?.created_at ?? now,
+      updated_at: now
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO artwork_images (id, artist_key, record_key, image_url, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(record_key, image_url)
+         DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+      )
+      .run(
+        image.id,
+        image.artist_key,
+        image.record_key,
+        image.image_url,
+        JSON.stringify(image),
+        image.created_at,
+        image.updated_at
+      );
+
+    return {
+      image,
+      inserted: existingImage === null
+    };
+  }
+
+  public upsertArtworkImage(
+    input: Omit<ArtworkImage, "id" | "created_at" | "updated_at"> & { id?: string }
+  ): { image: ArtworkImage; inserted: boolean } {
+    return this.saveArtworkImage(input);
+  }
+
+  public listArtworkImagesByArtist(artistKey: string): ArtworkImage[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM artwork_images WHERE artist_key = ? ORDER BY updated_at ASC`)
+      .all(artistKey) as Array<{ payload_json: string }>;
+    return parsePayloadRows<ArtworkImage>(rows);
+  }
+
+  public replaceRunClusters(
+    artistKey: string,
+    clusters: ArtworkCluster[],
+    memberships: ClusterMembership[],
+    reviewItems: ReviewItem[]
+  ): void {
+    const existingClusterIds = this.listArtworkClusters(artistKey).map((cluster) => cluster.id);
+    if (existingClusterIds.length > 0) {
+      const placeholders = existingClusterIds.map(() => "?").join(", ");
+      this.db.prepare(`DELETE FROM cluster_memberships WHERE cluster_id IN (${placeholders})`).run(...existingClusterIds);
+    }
+    this.db.prepare(`DELETE FROM artwork_clusters WHERE artist_key = ?`).run(artistKey);
+    this.db.prepare(`DELETE FROM review_items WHERE artist_key = ?`).run(artistKey);
+
+    for (const cluster of clusters) {
+      this.db
+        .prepare(`INSERT INTO artwork_clusters (id, artist_key, payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+        .run(cluster.id, artistKey, JSON.stringify(cluster), cluster.created_at, cluster.updated_at);
+    }
+
+    for (const membership of memberships) {
+      this.db
+        .prepare(
+          `INSERT INTO cluster_memberships (id, cluster_id, record_key, payload_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          membership.id,
+          membership.cluster_id,
+          membership.record_key,
+          JSON.stringify(membership),
+          membership.created_at,
+          membership.updated_at
+        );
+    }
+
+    for (const reviewItem of reviewItems) {
+      const pairKey = stablePairKey(reviewItem.left_record_key, reviewItem.right_record_key);
+      this.db
+        .prepare(
+          `INSERT INTO review_items (id, artist_key, pair_key, payload_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(pair_key)
+           DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+        )
+        .run(
+          reviewItem.id,
+          reviewItem.artist_key,
+          pairKey,
+          JSON.stringify(reviewItem),
+          reviewItem.created_at,
+          reviewItem.updated_at
+        );
+    }
+  }
+
+  public replaceClustersForArtist(
+    artistKey: string,
+    clusters: ArtworkCluster[],
+    memberships: ClusterMembership[],
+    reviewItems: ReviewItem[]
+  ): void {
+    this.replaceRunClusters(artistKey, clusters, memberships, reviewItems);
+  }
+
+  public listArtworkClusters(artistKey: string): ArtworkCluster[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM artwork_clusters WHERE artist_key = ? ORDER BY updated_at ASC`)
+      .all(artistKey) as Array<{ payload_json: string }>;
+    return parsePayloadRows<ArtworkCluster>(rows);
+  }
+
+  public listClusterMemberships(artistKey: string): ClusterMembership[] {
+    const clusterIds = this.listArtworkClusters(artistKey).map((cluster) => cluster.id);
+    if (clusterIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = clusterIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM cluster_memberships WHERE cluster_id IN (${placeholders}) ORDER BY updated_at ASC`)
+      .all(...clusterIds) as Array<{ payload_json: string }>;
+    return parsePayloadRows<ClusterMembership>(rows);
+  }
+
+  public listReviewItems(artistKey: string): ReviewItem[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM review_items WHERE artist_key = ? ORDER BY updated_at ASC`)
+      .all(artistKey) as Array<{ payload_json: string }>;
+    return parsePayloadRows<ReviewItem>(rows);
+  }
+
+  public listArtworkClustersByArtist(artistKey: string): ArtworkCluster[] {
+    return this.listArtworkClusters(artistKey);
+  }
+
+  public listReviewItemsByArtist(artistKey: string): ReviewItem[] {
+    return this.listReviewItems(artistKey);
+  }
+
+  public getRunRoot(runId: string): string {
+    const target = path.join(this.runsRoot, runId);
+    fs.mkdirSync(path.join(target, "evidence", "screenshots"), { recursive: true });
+    fs.mkdirSync(path.join(target, "evidence", "raw"), { recursive: true });
+    fs.mkdirSync(path.join(target, "images"), { recursive: true });
+    fs.mkdirSync(path.join(target, "exports"), { recursive: true });
+    return target;
+  }
+
   public getRunDetails(runId: string): RunDetails | null {
     const row = this.db
       .prepare(
@@ -394,13 +997,6 @@ export class ArtbotStorage {
     return row ? JSON.parse(row.payload_json) : null;
   }
 
-  public getRunRoot(runId: string): string {
-    const target = path.join(this.runsRoot, runId);
-    fs.mkdirSync(path.join(target, "evidence", "screenshots"), { recursive: true });
-    fs.mkdirSync(path.join(target, "evidence", "raw"), { recursive: true });
-    return target;
-  }
-
   private mapRun(row: RunRow): RunEntity {
     return {
       id: row.id,
@@ -414,4 +1010,5 @@ export class ArtbotStorage {
       resultsPath: row.results_path ?? undefined
     };
   }
+
 }

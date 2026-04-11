@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenericParsedFields } from "@artbot/extraction";
+import { researchQuerySchema } from "@artbot/shared-types";
 import type { AdapterExtractionContext } from "../types.js";
 import { GenericSourceAdapter } from "./generic-adapter.js";
 
@@ -11,12 +12,13 @@ const mocks = vi.hoisted(() => ({
     status: 200,
     parserUsed: "mock-fetch"
   })),
-  parseGenericLotFieldsMock: vi.fn<(content: string) => GenericParsedFields>(() => ({
+  parseGenericLotFieldsMock: vi.fn<(content: string, baseUrl?: string) => GenericParsedFields>(() => ({
     title: "Untitled",
     artistName: "Artist",
     medium: null,
     dimensionsText: null,
     year: null,
+    imageUrl: null,
     lotNumber: "12",
     estimateLow: null,
     estimateHigh: null,
@@ -43,14 +45,18 @@ function context(
   return {
     runId: "run-1",
     traceId: "trace-1",
-    query: {
+    query: researchQuerySchema.parse({
       artist: "Artist",
       scope: "turkey_plus_international",
       turkeyFirst: true,
+      analysisMode: "balanced",
+      priceNormalization: "usd_dual",
       manualLoginCheckpoint: false,
       allowLicensed: false,
-      licensedIntegrations: []
-    },
+      licensedIntegrations: [],
+      crawlMode: "backfill",
+      sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+    }),
     accessContext: {
       mode,
       sourceAccessStatus,
@@ -68,6 +74,7 @@ describe("GenericSourceAdapter access handling", () => {
       medium: null,
       dimensionsText: null,
       year: null,
+      imageUrl: null,
       lotNumber: "12",
       estimateLow: null,
       estimateHigh: null,
@@ -163,6 +170,7 @@ describe("GenericSourceAdapter access handling", () => {
       medium: null,
       dimensionsText: null,
       year: null,
+      imageUrl: null,
       lotNumber: "33",
       estimateLow: null,
       estimateHigh: null,
@@ -197,6 +205,49 @@ describe("GenericSourceAdapter access handling", () => {
     expect(result.attempt.acceptance_reason).toBe("missing_numeric_price");
     expect(result.record?.accepted_for_valuation).toBe(false);
     expect(result.record?.work_title).toBe("Parsed Listing");
+  });
+
+  it("rejects generic shell pages instead of surfacing them as records", async () => {
+    mocks.parseGenericLotFieldsMock.mockImplementation(() => ({
+      title: "Anasayfa | Bayrak Müzayede",
+      artistName: "Artist",
+      medium: null,
+      dimensionsText: null,
+      year: null,
+      imageUrl: null,
+      lotNumber: null,
+      estimateLow: null,
+      estimateHigh: null,
+      priceAmount: 16000,
+      priceType: "asking_price",
+      currency: "TRY",
+      saleDate: "2026-02-02",
+      priceHidden: false,
+      buyersPremiumIncluded: null
+    }));
+
+    const adapter = new GenericSourceAdapter({
+      id: "public-source",
+      sourceName: "Bayrak Muzayede Listing",
+      venueName: "Bayrak Muzayede",
+      venueType: "auction_house",
+      sourcePageType: "listing",
+      tier: 1,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://example.com",
+      searchPath: "/q="
+    });
+
+    const result = await adapter.extract(
+      { url: "https://example.com/public", sourcePageType: "listing", provenance: "seed", score: 0.9 },
+      context("anonymous", "public_access")
+    );
+
+    expect(result.attempt.accepted).toBe(false);
+    expect(result.attempt.acceptance_reason).toBe("generic_shell_page");
+    expect(result.record).toBeNull();
+    expect(result.needsBrowserVerification).toBe(false);
   });
 
   it("extracts in licensed mode for licensed source", async () => {
