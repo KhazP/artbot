@@ -1,12 +1,40 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { RunEntity } from "@artbot/shared-types";
-import { ArtbotTuiShell, buildDefaultCommandHints, type TuiAppModel, type TuiRuntimeStatus } from "./tui/index.js";
-import { RenderTuiNode } from "./tui/ink-renderer.js";
 import { assessLocalSetup } from "./setup/workflow.js";
 import type { SetupAssessment } from "./setup/index.js";
-import type { PerPaintingStat, ReportRecord, ReportSummary, ReportValuation } from "./ui/report.js";
+import {
+  buildCompletedReportMessage,
+  generateAndOpenBrowserReportFromPayload,
+  shouldPromptForReportSurface,
+  shouldAutoOpenBrowserReport,
+  type ReportSurfacePreference
+} from "./report/browser-report.js";
+import {
+  ArtbotInteractiveShell,
+  COMPLETED_REPORT_SURFACE_OPTIONS,
+  RECENT_RUNS_VISIBLE_LIMIT,
+  TuiKeyHintRail,
+  buildComposerState,
+  closeOverlay,
+  filterRecentRuns,
+  getCompletedReportSurfaceByIndex,
+  getThemeIndex,
+  getThemeNameByIndex,
+  getTuiTheme,
+  openOverlay,
+  resolveDisplayedRun,
+  resolveDisplayedSidePane,
+  resolvePrimaryView,
+  saveTuiPreferences,
+  stepSelection,
+  toggleSecondaryPane,
+  type Overlay,
+  type PipelineDetails,
+  type TuiPreferences,
+  type TuiSurfaceState
+} from "./tui/index.js";
 
 export interface InteractiveStartContext {
   apiBaseUrl: string;
@@ -14,309 +42,28 @@ export interface InteractiveStartContext {
   defaults: {
     analysisMode: "comprehensive" | "balanced" | "fast";
     priceNormalization: "legacy" | "usd_dual" | "usd_nominal" | "usd_2026";
+    reportSurface: ReportSurfacePreference;
     authProfileId?: string;
     allowLicensed: boolean;
     licensedIntegrations: string[];
   };
 }
 
-interface PipelineDetails {
-  run?: { id?: string; status?: string };
-  summary?: ReportSummary;
-  records?: ReportRecord[];
-  duplicates?: ReportRecord[];
-  valuation?: ReportValuation;
-  per_painting_stats?: PerPaintingStat[];
-  attempts?: Array<{
-    source_url: string;
-    source_access_status: string;
-    blocker_reason?: string | null;
-    extracted_fields?: Record<string, unknown>;
-  }>;
-}
-
 interface InteractiveAppProps {
   context: InteractiveStartContext;
   initialAssessment: SetupAssessment | null;
+  initialPreferences: TuiPreferences;
   onExit: (code: number) => void;
 }
 
 type RunInteractiveTuiProps = Omit<InteractiveAppProps, "onExit">;
 
-type DetailMode = "help" | "status" | "setup" | "auth" | "runs" | "report";
-
-function fmtCurrency(amount: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency,
-      maximumFractionDigits: 0
-    }).format(amount);
-  } catch {
-    return `${amount.toLocaleString("en-US")} ${currency}`;
-  }
-}
-
-function asRuntimeStatus(
-  label: string,
-  ok: boolean,
-  detail?: string,
-  tone?: TuiRuntimeStatus["tone"]
-): TuiRuntimeStatus {
-  return {
-    label,
-    state: ok ? "healthy" : "offline",
-    detail,
-    tone: tone ?? (ok ? "success" : "danger")
-  };
-}
-
-function blockerSummary(details: PipelineDetails | null): string | undefined {
-  if (!details?.summary?.acceptance_reason_breakdown) return undefined;
-  const entries = Object.entries(details.summary.acceptance_reason_breakdown)
-    .filter(([, count]) => count > 0)
-    .sort((a, b) => b[1] - a[1]);
-  if (entries.length === 0) return undefined;
-  return `Top issue: ${entries[0][0]} (${entries[0][1]})`;
-}
-
-function priceLabel(record: ReportRecord): string {
-  if (typeof record.normalized_price_usd_nominal === "number") return fmtCurrency(record.normalized_price_usd_nominal, "USD");
-  if (typeof record.normalized_price_usd === "number") return fmtCurrency(record.normalized_price_usd, "USD");
-  if (typeof record.price_amount === "number") return fmtCurrency(record.price_amount, record.currency ?? "TRY");
-  if (typeof record.estimate_low === "number" && typeof record.estimate_high === "number") {
-    return `${fmtCurrency(record.estimate_low, record.currency ?? "TRY")}–${fmtCurrency(record.estimate_high, record.currency ?? "TRY")}`;
-  }
-  if (record.price_type === "inquiry_only" || record.price_hidden) return "Inquiry only";
-  return "n/a";
-}
-
-function rangeLabel(range?: { low: number; high: number } | null): string {
-  if (!range) return "n/a";
-  return `${fmtCurrency(range.low, "TRY")} – ${fmtCurrency(range.high, "TRY")}`;
-}
-
-function buildModel(params: {
-  assessment: SetupAssessment | null;
-  details: PipelineDetails | null;
-  recentRuns: RunEntity[];
-  activeArtist: string;
-  input: string;
-  history: string[];
-  detailMode: DetailMode;
-  busy: boolean;
-  message: string;
-  context: InteractiveStartContext;
-  tick: number;
-  runStartedAt: number | null;
-}): TuiAppModel {
-  const { assessment, details, recentRuns, activeArtist, input, history, detailMode, busy, message, context, tick, runStartedAt } = params;
+function summarizeCompletedRun(details: PipelineDetails | null): { accepted: number; coverage: number } | null {
   const summary = details?.summary;
-  const records = details?.records ?? [];
-  const runId = details?.run?.id ?? "n/a";
-  const valuation = details?.valuation;
-
-  const issueLines = assessment?.issues.map((issue) => `${issue.severity}: ${issue.message}${issue.detail ? ` (${issue.detail})` : ""}`) ?? [];
-  const recentRunLines = recentRuns.slice(0, 5).map((run) => `${run.id} · ${run.status} · ${run.query.artist}`);
-  const authLines =
-    assessment?.sessionStates.map((session) => `${session.profileId}: ${session.exists ? (session.expired ? "expired" : "ready") : "missing"}`) ?? [];
-
-  const diagnosticsLines =
-    detailMode === "runs"
-      ? recentRunLines
-      : detailMode === "auth"
-        ? authLines
-        : detailMode === "setup"
-          ? issueLines
-          : [message || "No additional diagnostics."];
-
+  if (!summary) return null;
   return {
-    title: "ArtBot",
-    subtitle: "Market operations console",
-    command: {
-      mode: busy ? "running" : detailMode === "setup" ? "setup" : "idle",
-      input,
-      placeholder: "Type /research <artist> or plain artist text. /help for commands.",
-      hints: buildDefaultCommandHints(),
-      history
-    },
-    status: {
-      llm: assessment
-        ? asRuntimeStatus("LM Studio", assessment.llmHealth.ok, assessment.llmHealth.modelId ?? assessment.llmHealth.reason)
-        : asRuntimeStatus("LM Studio", false, "checking"),
-      api: assessment ? asRuntimeStatus("ArtBot API", assessment.apiHealth.ok, assessment.apiHealth.reason ?? assessment.apiBaseUrl) : asRuntimeStatus("ArtBot API", false, "checking"),
-      worker:
-        assessment && assessment.apiHealth.ok
-          ? { label: "Worker", state: "healthy", detail: "assumed with local backend", tone: "success" }
-          : { label: "Worker", state: "unknown", detail: "verify with /doctor", tone: "muted" },
-      auth:
-        assessment
-          ? {
-              label: "Auth",
-              state: assessment.authProfilesError ? "offline" : assessment.sessionStates.some((session) => session.exists && !session.expired) ? "healthy" : "degraded",
-              detail: assessment.authProfilesError?.message ?? `${assessment.profiles.length} profiles`,
-              tone: assessment.authProfilesError ? "danger" : assessment.sessionStates.some((session) => session.exists && !session.expired) ? "success" : "warning"
-            }
-          : { label: "Auth", state: "unknown", detail: "checking", tone: "muted" },
-      licensed: {
-        label: "Licensed",
-        state: context.defaults.allowLicensed ? "healthy" : "degraded",
-        detail:
-          context.defaults.licensedIntegrations.length > 0
-            ? context.defaults.licensedIntegrations.join(", ")
-            : "none",
-        tone: context.defaults.allowLicensed ? "success" : "warning"
-      },
-      model: assessment?.llmHealth.modelId,
-      apiBaseUrl: context.apiBaseUrl,
-      llmBaseUrl: assessment?.llmBaseUrl
-    },
-    progress: {
-      runId,
-      artistName: activeArtist || "n/a",
-      status:
-        details?.run?.status === "completed"
-          ? "completed"
-          : details?.run?.status === "failed"
-            ? "failed"
-            : details?.run?.status === "running"
-              ? "running"
-              : details?.run?.status === "pending"
-                ? "queued"
-                : "idle",
-      stages: [
-        {
-          id: "queue",
-          label: "Queue",
-          state: details?.run?.status ? (details.run.status === "pending" ? "running" : "done") : "pending"
-        },
-        {
-          id: "scan",
-          label: "Scan sources",
-          state: details?.run?.status === "running" ? "running" : summary ? "done" : "pending"
-        },
-        {
-          id: "analyze",
-          label: "Analyze",
-          state: summary ? (details?.run?.status === "completed" ? "done" : "running") : "pending"
-        },
-        {
-          id: "report",
-          label: "Report",
-          state: details?.run?.status === "completed" ? "done" : details?.run?.status === "failed" ? "failed" : "pending"
-        }
-      ],
-      summaryLines: [
-        summary ? `Accepted: ${summary.accepted_records}` : "Accepted: n/a",
-        summary ? `Valuation eligible: ${summary.valuation_eligible_records ?? 0}` : "Valuation eligible: n/a",
-        summary ? `Priced coverage: ${Math.round((summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio ?? 0) * 100)}%` : "Priced coverage: n/a"
-      ],
-      blockerSummary: blockerSummary(details),
-      tick,
-      elapsed: runStartedAt ? Math.floor((Date.now() - runStartedAt) / 1000) : undefined
-    },
-    report: {
-      artistName: activeArtist || "No active research",
-      runId,
-      overview: [
-        { label: "Accepted", value: String(summary?.accepted_records ?? 0), tone: "success" },
-        { label: "URLs Crawled", value: String(summary?.total_attempts ?? 0), tone: "muted" },
-        {
-          label: "Coverage",
-          value: `${Math.round((summary?.priced_crawled_source_coverage_ratio ?? summary?.priced_source_coverage_ratio ?? 0) * 100)}%`,
-          tone: (summary?.priced_crawled_source_coverage_ratio ?? 0) >= 0.7 ? "success" : "warning"
-        }
-      ],
-      sourceCoverage: [
-        { label: "Platforms", value: String(Object.keys(summary?.source_candidate_breakdown ?? {}).length), tone: "accent" },
-        { label: "Public", value: String(summary?.source_status_breakdown?.public_access ?? 0), tone: "success" },
-        { label: "Blocked", value: String(summary?.source_status_breakdown?.blocked ?? 0), tone: "danger" }
-      ],
-      valuation: [
-        { label: "Blended", value: rangeLabel(valuation?.blendedRange), tone: valuation?.generated ? "success" : "warning" },
-        { label: "Turkey", value: rangeLabel(valuation?.turkeyRange), tone: "accent" },
-        { label: "Intl", value: rangeLabel(valuation?.internationalRange), tone: "muted" }
-      ],
-      acceptedRecords: records.slice(0, 8).map((record) => ({
-        price: priceLabel(record),
-        priceType: record.price_type,
-        workTitle: record.work_title ?? "Untitled",
-        sourceName: record.source_name,
-        detail: [record.sale_or_listing_date, record.dimensions_text, record.year].filter(Boolean).join(" · ")
-      })),
-      diagnostics: [
-        {
-          title: detailMode === "help" ? "Commands" : detailMode === "setup" ? "Setup Issues" : detailMode === "auth" ? "Auth State" : detailMode === "runs" ? "Recent Runs" : "Run Notes",
-          tone: detailMode === "setup" ? "warning" : "muted",
-          lines:
-            detailMode === "help"
-              ? [
-                  "/research <artist>",
-                  "/work <artist> --title <title>",
-                  "/setup",
-                  "/auth",
-                  "/doctor",
-                  "/status",
-                  "/runs",
-                  "/help",
-                  "/exit"
-                ]
-              : diagnosticsLines.length > 0
-                ? diagnosticsLines
-                : ["No detail available."]
-        }
-      ]
-    },
-    detail: {
-      title:
-        detailMode === "auth"
-          ? "Auth"
-          : detailMode === "runs"
-            ? "Runs"
-            : detailMode === "setup"
-              ? "Setup"
-              : detailMode === "help"
-                ? "Help"
-                : "Context",
-      subtitle: detailMode === "setup" ? "Run `artbot setup` for the guided wizard and `artbot auth capture <profile>` for login capture." : message,
-      status: [
-        assessment
-          ? asRuntimeStatus("LM Studio", assessment.llmHealth.ok, assessment.llmHealth.modelId ?? assessment.llmHealth.reason)
-          : asRuntimeStatus("LM Studio", false, "checking"),
-        assessment
-          ? asRuntimeStatus("ArtBot API", assessment.apiHealth.ok, assessment.apiHealth.reason ?? assessment.apiBaseUrl)
-          : asRuntimeStatus("ArtBot API", false, "checking")
-      ],
-      details:
-        detailMode === "auth"
-          ? (assessment?.sessionStates.map((session) => ({
-              label: session.profileId,
-              value: session.exists ? (session.expired ? "expired" : "ready") : "missing",
-              tone: session.exists ? (session.expired ? "warning" : "success") : "danger",
-              detail: session.storageStatePath
-            })) ?? [])
-          : detailMode === "runs"
-            ? recentRuns.slice(0, 6).map((run) => ({
-                label: run.id,
-                value: run.status,
-                tone: run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "accent",
-                detail: run.query.artist
-              }))
-            : [
-                {
-                  label: "Mode",
-                  value: detailMode,
-                  tone: detailMode === "setup" ? "warning" : "accent"
-                },
-                {
-                  label: "Artist",
-                  value: activeArtist || "n/a",
-                  tone: "neutral"
-                }
-              ],
-      blockers: detailMode === "setup" ? issueLines : [blockerSummary(details) ?? "No blockers recorded."],
-      evidence: details?.attempts?.slice(0, 4).map((attempt) => attempt.source_url) ?? []
-    }
+    accepted: summary.accepted_records ?? 0,
+    coverage: Math.round((summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio ?? 0) * 100)
   };
 }
 
@@ -327,6 +74,28 @@ function parseWorkCommand(value: string): { artist: string; title: string } | nu
     artist: match[1].trim(),
     title: match[2].trim()
   };
+}
+
+function useTerminalDimensions() {
+  const [dimensions, setDimensions] = useState(() => ({
+    columns: process.stdout.columns ?? 120,
+    rows: process.stdout.rows ?? 40
+  }));
+
+  useEffect(() => {
+    const update = () =>
+      setDimensions({
+        columns: process.stdout.columns ?? 120,
+        rows: process.stdout.rows ?? 40
+      });
+
+    process.stdout.on("resize", update);
+    return () => {
+      process.stdout.off("resize", update);
+    };
+  }, []);
+
+  return dimensions;
 }
 
 export function runInteractiveTui(props: RunInteractiveTuiProps): Promise<number> {
@@ -346,34 +115,71 @@ export function runInteractiveTui(props: RunInteractiveTuiProps): Promise<number
   });
 }
 
-function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppProps) {
+function InteractiveApp({ context, initialAssessment, initialPreferences, onExit }: InteractiveAppProps) {
   const { exit } = useApp();
+  const dimensions = useTerminalDimensions();
+
   const [assessment, setAssessment] = useState<SetupAssessment | null>(initialAssessment);
-  const [details, setDetails] = useState<PipelineDetails | null>(null);
+  const [sessionRunDetails, setSessionRunDetails] = useState<PipelineDetails | null>(null);
+  const [browsedRunDetails, setBrowsedRunDetails] = useState<PipelineDetails | null>(null);
   const [recentRuns, setRecentRuns] = useState<RunEntity[]>([]);
   const [input, setInput] = useState("");
   const [history, setHistory] = useState<string[]>([]);
-  const [detailMode, setDetailMode] = useState<DetailMode>(initialAssessment?.issues.length ? "setup" : "help");
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [busy, setBusy] = useState(false);
   const [activeArtist, setActiveArtist] = useState("");
   const [message, setMessage] = useState("Slash command ready.");
-  const [tick, setTick] = useState(0);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [browserReportPath, setBrowserReportPath] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState<TuiPreferences>(initialPreferences);
+  const [uiState, setUiState] = useState<TuiSurfaceState>(() => ({
+    sidePane: initialAssessment?.issues.length ? ("setup" as const) : ("none" as const),
+    sidePaneDismissed: false,
+    overlay: "none" as Overlay,
+    focusTarget: "composer" as const,
+    recentRunsQuery: "",
+    selectedRecentRunIndex: 0,
+    selectedThemeIndex: getThemeIndex(initialPreferences.theme),
+    selectedReportSurfaceIndex: 0
+  }));
   const cancelPollingRef = useRef(false);
 
-  useInput((_input, key) => {
-    if (key.ctrl && _input === "c") {
-      exit();
-      onExit(0);
-    }
-  });
-
-  // Spinner animation tick — only runs while pipeline is active
-  useEffect(() => {
-    if (!busy) return;
-    const interval = setInterval(() => setTick((t) => t + 1), 150);
-    return () => clearInterval(interval);
-  }, [busy]);
+  const deferredRecentRunsQuery = useDeferredValue(uiState.recentRunsQuery);
+  const filteredRecentRuns = useMemo(
+    () => filterRecentRuns(recentRuns, deferredRecentRunsQuery),
+    [deferredRecentRunsQuery, recentRuns]
+  );
+  const visibleRecentRuns = useMemo(
+    () => filteredRecentRuns.slice(0, RECENT_RUNS_VISIBLE_LIMIT),
+    [filteredRecentRuns]
+  );
+  const displayedRun = useMemo(
+    () => resolveDisplayedRun({ busy, sessionRun: sessionRunDetails, browsedRun: browsedRunDetails }),
+    [browsedRunDetails, busy, sessionRunDetails]
+  );
+  const primaryView = useMemo(() => resolvePrimaryView(displayedRun), [displayedRun]);
+  const displayedSidePane = useMemo(
+    () =>
+      resolveDisplayedSidePane({
+        primaryView,
+        requestedSidePane: uiState.sidePane,
+        sidePaneDismissed: uiState.sidePaneDismissed,
+        preferences,
+        hasSetupIssues: Boolean(assessment?.issues.length)
+      }),
+    [assessment?.issues.length, preferences, primaryView, uiState.sidePane, uiState.sidePaneDismissed]
+  );
+  const effectiveThemeName =
+    uiState.overlay === "theme-picker" ? getThemeNameByIndex(uiState.selectedThemeIndex) : preferences.theme;
+  const theme = useMemo(() => getTuiTheme(effectiveThemeName), [effectiveThemeName]);
+  const composerState = useMemo(
+    () =>
+      buildComposerState({
+        overlay: uiState.overlay,
+        focusTarget: uiState.focusTarget
+      }),
+    [uiState.focusTarget, uiState.overlay]
+  );
 
   const refreshAssessment = useCallback(async () => {
     const next = await assessLocalSetup();
@@ -384,13 +190,195 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
   const fetchRecentRuns = useCallback(async () => {
     const headers: Record<string, string> = {};
     if (context.apiKey) headers["x-api-key"] = context.apiKey;
-    const response = await fetch(`${context.apiBaseUrl}/runs?limit=8`, { headers });
+    const response = await fetch(`${context.apiBaseUrl}/runs?limit=30`, { headers });
     if (!response.ok) {
       throw new Error(`Failed to load runs (${response.status})`);
     }
     const payload = (await response.json()) as { runs: RunEntity[] };
     setRecentRuns(payload.runs);
+    return payload.runs;
   }, [context.apiBaseUrl, context.apiKey]);
+
+  const fetchRunDetails = useCallback(
+    async (runId: string) => {
+      const detailResponse = await fetch(`${context.apiBaseUrl}/runs/${runId}`, {
+        headers: context.apiKey ? { "x-api-key": context.apiKey } : undefined
+      });
+      if (!detailResponse.ok) {
+        throw new Error(`Failed to load run ${runId} (${detailResponse.status})`);
+      }
+
+      return (await detailResponse.json()) as PipelineDetails;
+    },
+    [context.apiBaseUrl, context.apiKey]
+  );
+
+  const persistPreferences = useCallback((nextPreferences: TuiPreferences) => {
+    setPreferences(nextPreferences);
+    try {
+      saveTuiPreferences(nextPreferences);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  const openBrowserReportForRun = useCallback(async (nextDetails: PipelineDetails | null) => {
+    const runId = nextDetails?.run?.id;
+    const snapshot = summarizeCompletedRun(nextDetails);
+    if (!runId || !snapshot) {
+      setMessage("Browser report unavailable for this run.");
+      return false;
+    }
+
+    const result = await generateAndOpenBrowserReportFromPayload(nextDetails, {
+      runId,
+      resultsPath: nextDetails?.run?.resultsPath
+    });
+    setBrowserReportPath(result.htmlPath);
+    setMessage(
+      buildCompletedReportMessage({
+        accepted: snapshot.accepted,
+        coverage: snapshot.coverage,
+        surface: "web",
+        browserPath: result.htmlPath,
+        error: result.opened ? undefined : result.error
+      })
+    );
+    return result.opened;
+  }, []);
+
+  const presentCompletedRun = useCallback(
+    async (surface: Exclude<ReportSurfacePreference, "ask">, nextDetails: PipelineDetails | null = displayedRun) => {
+      if (nextDetails?.run?.status !== "completed") {
+        setMessage(
+          surface === "web"
+            ? "No completed run is available for browser report mode."
+            : "No completed run is available for CLI report mode."
+        );
+        return;
+      }
+
+      setUiState((current) => closeOverlay(current));
+
+      if (surface === "web") {
+        await openBrowserReportForRun(nextDetails);
+        return;
+      }
+
+      const snapshot = summarizeCompletedRun(nextDetails);
+      if (!snapshot) {
+        setMessage("CLI report unavailable for this run.");
+        return;
+      }
+
+      setMessage(
+        buildCompletedReportMessage({
+          accepted: snapshot.accepted,
+          coverage: snapshot.coverage,
+          surface: "cli",
+          browserPath: browserReportPath ?? undefined
+        })
+      );
+    },
+    [browserReportPath, displayedRun, openBrowserReportForRun]
+  );
+
+  const openRecentRunsOverlay = useCallback(() => {
+    startTransition(() => {
+      setUiState((current) => openOverlay(current, "recent-runs", getThemeIndex(preferences.theme)));
+    });
+
+    void (async () => {
+      try {
+        await fetchRecentRuns();
+        setMessage("Recent runs loaded.");
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [fetchRecentRuns, preferences.theme]);
+
+  const openThemeOverlay = useCallback(() => {
+    startTransition(() => {
+      setUiState((current) => openOverlay(current, "theme-picker", getThemeIndex(preferences.theme)));
+    });
+    setMessage("Theme preview open.");
+  }, [preferences.theme]);
+
+  const openReportSurfaceOverlay = useCallback(() => {
+    startTransition(() => {
+      setUiState((current) => openOverlay(current, "report-surface", current.selectedThemeIndex, 0));
+    });
+    setMessage("Choose how to view the completed report.");
+  }, []);
+
+  const openSetupSidePane = useCallback(() => {
+    startTransition(() => {
+      setUiState((current) => ({
+        ...closeOverlay(current),
+        sidePane: "setup",
+        sidePaneDismissed: false,
+        focusTarget: "side"
+      }));
+    });
+
+    void (async () => {
+      try {
+        await refreshAssessment();
+        setMessage("Setup diagnostics loaded.");
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [refreshAssessment]);
+
+  const openAuthSidePane = useCallback(() => {
+    startTransition(() => {
+      setUiState((current) => ({
+        ...closeOverlay(current),
+        sidePane: "auth",
+        sidePaneDismissed: false,
+        focusTarget: "side"
+      }));
+    });
+
+    void (async () => {
+      try {
+        await refreshAssessment();
+        setMessage("Auth profile status loaded.");
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [refreshAssessment]);
+
+  const commitThemeSelection = useCallback(() => {
+    const nextTheme = getThemeNameByIndex(uiState.selectedThemeIndex);
+    const nextPreferences = {
+      ...preferences,
+      theme: nextTheme
+    } satisfies TuiPreferences;
+
+    persistPreferences(nextPreferences);
+    setUiState((current) => closeOverlay(current));
+    setMessage(`Theme saved: ${nextTheme}`);
+  }, [persistPreferences, preferences, uiState.selectedThemeIndex]);
+
+  const selectHistoricalRun = useCallback(
+    async (runId: string) => {
+      const details = await fetchRunDetails(runId);
+      setBrowsedRunDetails(details);
+      setActiveArtist(details.run?.query?.artist ?? activeArtist);
+      setUiState((current) => ({
+        ...closeOverlay(current),
+        sidePane: "run-details",
+        sidePaneDismissed: false,
+        focusTarget: "main"
+      }));
+      setMessage(`Loaded run ${runId}`);
+    },
+    [activeArtist, fetchRunDetails]
+  );
 
   useEffect(() => {
     void (async () => {
@@ -403,10 +391,18 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
     })();
   }, [fetchRecentRuns, refreshAssessment]);
 
+  useEffect(() => {
+    if (uiState.selectedRecentRunIndex >= visibleRecentRuns.length) {
+      setUiState((current) => ({
+        ...current,
+        selectedRecentRunIndex: Math.max(0, visibleRecentRuns.length - 1)
+      }));
+    }
+  }, [uiState.selectedRecentRunIndex, visibleRecentRuns.length]);
+
   const startResearch = useCallback(
     async (kind: "artist" | "work" | "artist_market_inventory", artist: string, title?: string) => {
       setBusy(true);
-      setDetailMode("report");
       setActiveArtist(artist);
       setMessage(
         kind === "artist_market_inventory"
@@ -414,12 +410,25 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
           : `Launching ${kind} research for ${artist}...`
       );
       setRunStartedAt(Date.now());
+      setBrowserReportPath(null);
+      setBrowsedRunDetails(null);
+      setUiState((current) => ({
+        ...closeOverlay(current),
+        sidePane: "run-details",
+        sidePaneDismissed: false,
+        focusTarget: "main"
+      }));
       cancelPollingRef.current = false;
 
       try {
         const nextAssessment = await refreshAssessment();
         if (!nextAssessment.apiHealth.ok) {
-          setDetailMode("setup");
+          setUiState((current) => ({
+            ...current,
+            sidePane: "setup",
+            sidePaneDismissed: false,
+            focusTarget: "side"
+          }));
           setMessage(`ArtBot API offline at ${nextAssessment.apiBaseUrl}. Run /setup or artbot setup.`);
           return;
         }
@@ -456,32 +465,38 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
         }
 
         const created = (await response.json()) as { runId: string; status: string };
-        setDetails({
+        setSessionRunDetails({
           run: {
             id: created.runId,
-            status: created.status
+            status: created.status,
+            runType: kind,
+            query: {
+              artist,
+              title
+            }
           }
         });
         setMessage(`Run created: ${created.runId}`);
 
         while (!cancelPollingRef.current) {
-          const detailResponse = await fetch(`${context.apiBaseUrl}/runs/${created.runId}`, {
-            headers: context.apiKey ? { "x-api-key": context.apiKey } : undefined
-          });
-          if (!detailResponse.ok) {
-            throw new Error(`Failed to poll run ${created.runId} (${detailResponse.status})`);
-          }
-
-          const nextDetails = (await detailResponse.json()) as PipelineDetails;
-          setDetails(nextDetails);
+          const nextDetails = await fetchRunDetails(created.runId);
+          setSessionRunDetails(nextDetails);
 
           const status = nextDetails.run?.status;
           if (status === "completed" || status === "failed") {
             if (status === "completed") {
-              const s = nextDetails.summary;
-              const accepted = s?.accepted_records ?? 0;
-              const coverage = Math.round((s?.priced_crawled_source_coverage_ratio ?? s?.priced_source_coverage_ratio ?? 0) * 100);
-              setMessage(`✓ Run completed — ${accepted} accepted, ${coverage}% coverage`);
+              const snapshot = summarizeCompletedRun(nextDetails);
+              if (snapshot) {
+                const reportSurface = context.defaults.reportSurface;
+
+                if (shouldAutoOpenBrowserReport(reportSurface)) {
+                  await presentCompletedRun("web", nextDetails);
+                } else if (shouldPromptForReportSurface(reportSurface)) {
+                  openReportSurfaceOverlay();
+                } else {
+                  await presentCompletedRun("cli", nextDetails);
+                }
+              }
             } else {
               setMessage(`✗ Run failed: ${created.runId}`);
             }
@@ -496,15 +511,61 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
         setBusy(false);
       }
     },
-    [context.apiBaseUrl, context.apiKey, context.defaults, fetchRecentRuns, refreshAssessment]
+    [context.apiBaseUrl, context.apiKey, context.defaults, fetchRecentRuns, fetchRunDetails, openReportSurfaceOverlay, presentCompletedRun, refreshAssessment]
+  );
+
+  const handleComposerChange = useCallback(
+    (value: string) => {
+      if (uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay") {
+        setUiState((current) => ({
+          ...current,
+          recentRunsQuery: value,
+          selectedRecentRunIndex: 0
+        }));
+        return;
+      }
+
+      if (uiState.overlay === "theme-picker" && uiState.focusTarget === "overlay") {
+        return;
+      }
+
+      if (uiState.overlay === "report-surface" && uiState.focusTarget === "overlay") {
+        return;
+      }
+
+      setInput(value);
+      setHistoryIndex(-1);
+    },
+    [uiState.focusTarget, uiState.overlay]
   );
 
   const handleSubmit = useCallback(
     async (value: string) => {
+      if (uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay") {
+        const selectedRun = visibleRecentRuns[uiState.selectedRecentRunIndex];
+        if (!selectedRun) {
+          setMessage("No run selected.");
+          return;
+        }
+        await selectHistoricalRun(selectedRun.id);
+        return;
+      }
+
+      if (uiState.overlay === "theme-picker" && uiState.focusTarget === "overlay") {
+        commitThemeSelection();
+        return;
+      }
+
+      if (uiState.overlay === "report-surface" && uiState.focusTarget === "overlay") {
+        await presentCompletedRun(getCompletedReportSurfaceByIndex(uiState.selectedReportSurfaceIndex));
+        return;
+      }
+
       const trimmed = value.trim();
       if (!trimmed) return;
 
-      setHistory((current) => [trimmed, ...current].slice(0, 8));
+      setHistory((current) => [trimmed, ...current.filter((entry) => entry !== trimmed)].slice(0, 12));
+      setHistoryIndex(-1);
       setInput("");
 
       try {
@@ -521,36 +582,42 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
         }
 
         if (trimmed === "/help") {
-          setDetailMode("help");
+          setUiState((current) => openOverlay(current, "help", getThemeIndex(preferences.theme)));
           setMessage("Command reference loaded.");
           return;
         }
 
-        if (trimmed === "/status" || trimmed === "/doctor") {
-          setDetailMode(trimmed === "/status" ? "status" : "setup");
-          await refreshAssessment();
-          setMessage("Environment status refreshed.");
+        if (trimmed === "/runs") {
+          openRecentRunsOverlay();
           return;
         }
 
-        if (trimmed === "/setup") {
-          setDetailMode("setup");
-          await refreshAssessment();
-          setMessage("Setup diagnostics loaded. Run `artbot setup` for the guided wizard.");
+        if (trimmed === "/theme") {
+          openThemeOverlay();
+          return;
+        }
+
+        if (trimmed.startsWith("/theme ")) {
+          const requestedTheme = trimmed.slice("/theme ".length).trim();
+          if (requestedTheme === "artbot" || requestedTheme === "system" || requestedTheme === "matrix") {
+            persistPreferences({
+              ...preferences,
+              theme: requestedTheme
+            });
+            setMessage(`Theme saved: ${requestedTheme}`);
+          } else {
+            setMessage(`Unknown theme: ${requestedTheme}`);
+          }
+          return;
+        }
+
+        if (trimmed === "/status" || trimmed === "/doctor" || trimmed === "/setup") {
+          openSetupSidePane();
           return;
         }
 
         if (trimmed === "/auth") {
-          setDetailMode("auth");
-          await refreshAssessment();
-          setMessage("Auth profile status loaded.");
-          return;
-        }
-
-        if (trimmed === "/runs") {
-          setDetailMode("runs");
-          await fetchRecentRuns();
-          setMessage("Recent runs loaded.");
+          openAuthSidePane();
           return;
         }
 
@@ -569,6 +636,16 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
           return;
         }
 
+        if (trimmed === "/report cli") {
+          await presentCompletedRun("cli");
+          return;
+        }
+
+        if (trimmed === "/report web") {
+          await presentCompletedRun("web");
+          return;
+        }
+
         const workCommand = parseWorkCommand(trimmed);
         if (workCommand) {
           await startResearch("work", workCommand.artist, workCommand.title);
@@ -580,75 +657,217 @@ function InteractiveApp({ context, initialAssessment, onExit }: InteractiveAppPr
         setMessage(error instanceof Error ? error.message : String(error));
       }
     },
-    [exit, fetchRecentRuns, onExit, refreshAssessment, startResearch]
+    [
+      commitThemeSelection,
+      exit,
+      onExit,
+      openAuthSidePane,
+      openRecentRunsOverlay,
+      openSetupSidePane,
+      openThemeOverlay,
+      presentCompletedRun,
+      persistPreferences,
+      preferences,
+      selectHistoricalRun,
+      startResearch,
+      uiState.focusTarget,
+      uiState.overlay,
+      uiState.selectedReportSurfaceIndex,
+      uiState.selectedRecentRunIndex,
+      visibleRecentRuns
+    ]
   );
 
-  const model = useMemo(
-    () =>
-      buildModel({
-        assessment,
-        details,
-        recentRuns,
-        activeArtist,
-        input,
-        history,
-        detailMode,
-        busy,
-        message,
-        context,
-        tick,
-        runStartedAt
-      }),
-    [activeArtist, assessment, busy, context, detailMode, details, history, input, message, recentRuns, tick, runStartedAt]
-  );
+  useInput((value, key) => {
+    if (key.ctrl && value === "c") {
+      cancelPollingRef.current = true;
+      exit();
+      onExit(0);
+      return;
+    }
 
-  const messageColor = message.startsWith("✗") || message.startsWith("Failed") || message.includes("error")
-    ? "red"
-    : message.startsWith("✓")
-      ? "green"
-      : "gray";
+    if (key.ctrl && value === "k") {
+      setUiState((current) => openOverlay(current, "help", getThemeIndex(preferences.theme)));
+      return;
+    }
+
+    if (key.ctrl && value === "r") {
+      openRecentRunsOverlay();
+      return;
+    }
+
+    if (key.ctrl && value === "s") {
+      openSetupSidePane();
+      return;
+    }
+
+    if (key.ctrl && value === "t") {
+      openThemeOverlay();
+      return;
+    }
+
+    if (key.ctrl && value === "u") {
+      const nextPreferences = toggleSecondaryPane(preferences);
+      persistPreferences(nextPreferences);
+      setUiState((current) => ({
+        ...current,
+        sidePane: nextPreferences.showSecondaryPane ? current.sidePane : "none",
+        sidePaneDismissed: nextPreferences.showSecondaryPane ? false : current.sidePaneDismissed,
+        focusTarget: nextPreferences.showSecondaryPane ? current.focusTarget : "composer"
+      }));
+      setMessage(nextPreferences.showSecondaryPane ? "Secondary pane enabled." : "Secondary pane hidden.");
+      return;
+    }
+
+    if (key.escape) {
+      if (uiState.overlay !== "none") {
+        setUiState((current) => closeOverlay(current));
+        return;
+      }
+
+      if (displayedSidePane !== "none") {
+        setUiState((current) => ({
+          ...current,
+          sidePane: "none",
+          sidePaneDismissed: true,
+          focusTarget: "composer"
+        }));
+        return;
+      }
+    }
+
+    if (key.tab) {
+      setUiState((current) => {
+        if (current.overlay !== "none") {
+          return {
+            ...current,
+            focusTarget: current.focusTarget === "overlay" ? "composer" : "overlay"
+          };
+        }
+
+        if (displayedSidePane !== "none") {
+          const nextFocus =
+            current.focusTarget === "composer" ? "main" : current.focusTarget === "main" ? "side" : "composer";
+          return {
+            ...current,
+            focusTarget: nextFocus
+          };
+        }
+
+        return {
+          ...current,
+          focusTarget: current.focusTarget === "composer" ? "main" : "composer"
+        };
+      });
+      return;
+    }
+
+    if (uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay") {
+      if (key.upArrow || key.downArrow) {
+        setUiState((current) => ({
+          ...current,
+          selectedRecentRunIndex: stepSelection(
+            current.selectedRecentRunIndex,
+            key.upArrow ? -1 : 1,
+            visibleRecentRuns.length
+          )
+        }));
+      }
+      return;
+    }
+
+    if (uiState.overlay === "report-surface" && uiState.focusTarget === "overlay") {
+      if (key.upArrow || key.downArrow) {
+        setUiState((current) => ({
+          ...current,
+          selectedReportSurfaceIndex: stepSelection(
+            current.selectedReportSurfaceIndex,
+            key.upArrow ? -1 : 1,
+            COMPLETED_REPORT_SURFACE_OPTIONS.length
+          )
+        }));
+        return;
+      }
+    }
+
+    if (uiState.overlay === "theme-picker" && uiState.focusTarget === "overlay") {
+      if (key.upArrow || key.downArrow) {
+        setUiState((current) => ({
+          ...current,
+          selectedThemeIndex: stepSelection(current.selectedThemeIndex, key.upArrow ? -1 : 1, 3)
+        }));
+        return;
+      }
+
+      if (key.return) {
+        commitThemeSelection();
+        return;
+      }
+    }
+
+    if (uiState.focusTarget === "composer" && (key.upArrow || key.downArrow)) {
+      if (history.length === 0) return;
+
+      const nextIndex = key.upArrow
+        ? Math.min(history.length - 1, historyIndex < 0 ? 0 : historyIndex + 1)
+        : historyIndex <= 0
+          ? -1
+          : historyIndex - 1;
+
+      setHistoryIndex(nextIndex);
+      setInput(nextIndex === -1 ? "" : history[nextIndex] ?? "");
+    }
+  });
+
+  const composerValue =
+    uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay" ? uiState.recentRunsQuery : input;
+  const messageColor =
+    message.startsWith("✗") || message.startsWith("Failed") || message.includes("error")
+      ? theme.colors.danger
+      : message.startsWith("✓")
+        ? theme.colors.success
+        : theme.colors.muted;
 
   return (
     <Box flexDirection="column">
-      <RenderTuiNode node={ArtbotTuiShell({ model })} />
+      <ArtbotInteractiveShell
+        theme={theme}
+        assessment={assessment}
+        displayedRun={displayedRun}
+        activeArtist={displayedRun?.run?.query?.artist ?? activeArtist}
+        primaryView={primaryView}
+        sidePane={displayedSidePane}
+        overlay={uiState.overlay}
+        focusTarget={uiState.focusTarget}
+        preferences={preferences}
+        selectedReportSurfaceIndex={uiState.selectedReportSurfaceIndex}
+        recentRunsQuery={uiState.recentRunsQuery}
+        selectedRecentRunIndex={uiState.selectedRecentRunIndex}
+        selectedThemeIndex={uiState.selectedThemeIndex}
+        recentRuns={visibleRecentRuns}
+        runStartedAt={runStartedAt}
+        browserReportPath={browserReportPath}
+        terminalWidth={dimensions.columns}
+      />
 
-      {/* ── Command input (Vercel-style) ── */}
-      <Box borderStyle="round" borderColor="cyan" paddingX={1}>
-        <Text color="cyan" bold>
-          ❯
-        </Text>
-        <Box marginLeft={1} flexGrow={1}>
-          <TextInput value={input} onChange={setInput} onSubmit={handleSubmit} placeholder="/research <artist>" />
+      <Box marginTop={1} flexDirection="column">
+        <Box borderStyle="round" borderColor={theme.colors.promptBorder} paddingX={1}>
+          <Text color={theme.colors.promptAccent} bold>
+            {composerState.promptSymbol === "artbot" ? "❯" : `${composerState.promptSymbol}>`}
+          </Text>
+          <Box marginLeft={1} flexGrow={1}>
+            <TextInput value={composerValue} onChange={handleComposerChange} onSubmit={handleSubmit} placeholder={composerState.placeholder} />
+          </Box>
         </Box>
-      </Box>
 
-      {/* ── Status message + keyboard shortcuts (k9s / lazygit style) ── */}
-      <Box justifyContent="space-between">
-        {message && message !== "Slash command ready." ? (
+        <Box justifyContent="space-between">
           <Text color={messageColor} dimColor>
             {message}
           </Text>
-        ) : (
-          <Text>{" "}</Text>
-        )}
-        <Box gap={2}>
-          <Text>
-            <Text color="cyan" bold>[/r]</Text>
-            <Text color="gray"> research</Text>
-          </Text>
-          <Text>
-            <Text color="cyan" bold>[/s]</Text>
-            <Text color="gray"> setup</Text>
-          </Text>
-          <Text>
-            <Text color="cyan" bold>[/h]</Text>
-            <Text color="gray"> help</Text>
-          </Text>
-          <Text>
-            <Text color="cyan" bold>[^c]</Text>
-            <Text color="gray"> quit</Text>
-          </Text>
+          <Text color={theme.colors.muted}>{composerState.helperText}</Text>
         </Box>
+
+        <TuiKeyHintRail theme={theme} overlay={uiState.overlay} />
       </Box>
     </Box>
   );

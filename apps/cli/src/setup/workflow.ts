@@ -19,6 +19,7 @@ import {
 } from "./env.js";
 import { checkApiHealth, checkLlmHealth, normalizeLlmBaseUrl } from "./health.js";
 import type { SetupAssessment, SetupIssue, SetupWizardValues, StartedBackendServices } from "./types.js";
+import { normalizeReportSurface } from "../report/browser-report.js";
 
 function createIssue(severity: SetupIssue["severity"], code: string, message: string, detail?: string): SetupIssue {
   return { severity, code, message, detail };
@@ -158,6 +159,29 @@ export async function runSetupWizard(cwd = process.cwd()): Promise<{
   });
   if (clack.isCancel(enableLicensedIntegrations)) throw new Error("Setup cancelled.");
 
+  const reportSurface = await clack.select({
+    message: "How should completed reports be shown by default?",
+    initialValue: normalizeReportSurface(env.DEFAULT_REPORT_SURFACE?.trim()),
+    options: [
+      {
+        value: "ask" as const,
+        label: "Ask after each completed run",
+        hint: "choose CLI or browser report per run"
+      },
+      {
+        value: "cli" as const,
+        label: "Always show CLI report",
+        hint: "stay in the terminal by default"
+      },
+      {
+        value: "web" as const,
+        label: "Always open browser report",
+        hint: "generate and open the browser report automatically"
+      }
+    ]
+  });
+  if (clack.isCancel(reportSurface)) throw new Error("Setup cancelled.");
+
   const defaultLicensedIntegrations = enableLicensedIntegrations ? ["Sanatfiyat"] : [];
   const authProfiles = buildDefaultAuthProfiles({
     cwd: workspaceRoot,
@@ -170,6 +194,7 @@ export async function runSetupWizard(cwd = process.cwd()): Promise<{
     apiBaseUrl: apiBaseUrl.trim(),
     enableOptionalProbes,
     enableLicensedIntegrations,
+    reportSurface,
     defaultLicensedIntegrations,
     authProfiles
   };
@@ -239,6 +264,7 @@ export function resolveSetupWizardDefaults(env: NodeJS.ProcessEnv = process.env)
     apiBaseUrl: env.API_BASE_URL?.trim() || "http://localhost:4000",
     enableOptionalProbes,
     enableLicensedIntegrations,
+    reportSurface: normalizeReportSurface(env.DEFAULT_REPORT_SURFACE?.trim()),
     defaultLicensedIntegrations: parseCommaSeparatedEnv(env.DEFAULT_LICENSED_INTEGRATIONS),
     authProfiles: parseAuthProfilesJson(env.AUTH_PROFILES_JSON).profiles
   };

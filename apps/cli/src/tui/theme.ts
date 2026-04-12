@@ -1,57 +1,94 @@
-import type { TuiTone } from "./types.js";
+export const TUI_THEME_NAMES = ["artbot", "system", "matrix"] as const;
+export type TuiThemeName = (typeof TUI_THEME_NAMES)[number];
 
 export interface TuiTheme {
-  background: string;
-  surface: string;
-  surfaceAlt: string;
-  border: string;
-  accent: string;
-  accentSoft: string;
-  text: string;
-  mutedText: string;
-  success: string;
-  warning: string;
-  danger: string;
-  inverse: string;
+  name: TuiThemeName;
+  label: string;
+  colors: {
+    text: string;
+    muted: string;
+    accent: string;
+    border: string;
+    panelBorder: string;
+    overlayBorder: string;
+    promptBorder: string;
+    promptAccent: string;
+    success: string;
+    warning: string;
+    danger: string;
+    keycap: string;
+    selection: string;
+    subtle: string;
+  };
 }
 
-export const artbotTheme: TuiTheme = {
-  background: "#0b0f14",
-  surface: "#111822",
-  surfaceAlt: "#17212d",
-  border: "#2a3645",
-  accent: "#47d7ff",
-  accentSoft: "#193746",
-  text: "#eef4fb",
-  mutedText: "#94a3b8",
-  success: "#34d399",
-  warning: "#fbbf24",
-  danger: "#fb7185",
-  inverse: "#081018"
+const THEMES: Record<TuiThemeName, TuiTheme> = {
+  artbot: {
+    name: "artbot",
+    label: "ArtBot",
+    colors: {
+      text: "#eef4fb",
+      muted: "#94a3b8",
+      accent: "#47d7ff",
+      border: "#2a3645",
+      panelBorder: "#47d7ff",
+      overlayBorder: "#22d3ee",
+      promptBorder: "#22d3ee",
+      promptAccent: "#47d7ff",
+      success: "#34d399",
+      warning: "#fbbf24",
+      danger: "#fb7185",
+      keycap: "#22d3ee",
+      selection: "#38bdf8",
+      subtle: "#64748b"
+    }
+  },
+  system: {
+    name: "system",
+    label: "System",
+    colors: {
+      text: "white",
+      muted: "gray",
+      accent: "blue",
+      border: "gray",
+      panelBorder: "blue",
+      overlayBorder: "cyan",
+      promptBorder: "blue",
+      promptAccent: "cyan",
+      success: "green",
+      warning: "yellow",
+      danger: "red",
+      keycap: "cyan",
+      selection: "blue",
+      subtle: "gray"
+    }
+  },
+  matrix: {
+    name: "matrix",
+    label: "Matrix",
+    colors: {
+      text: "#d1fae5",
+      muted: "#4ade80",
+      accent: "#22c55e",
+      border: "#14532d",
+      panelBorder: "#22c55e",
+      overlayBorder: "#16a34a",
+      promptBorder: "#22c55e",
+      promptAccent: "#4ade80",
+      success: "#4ade80",
+      warning: "#bef264",
+      danger: "#86efac",
+      keycap: "#4ade80",
+      selection: "#22c55e",
+      subtle: "#166534"
+    }
+  }
 };
 
-export function toneToThemeKey(tone: TuiTone): keyof TuiTheme {
-  switch (tone) {
-    case "accent":
-      return "accent";
-    case "success":
-      return "success";
-    case "warning":
-      return "warning";
-    case "danger":
-      return "danger";
-    case "inverse":
-      return "inverse";
-    case "muted":
-      return "mutedText";
-    default:
-      return "text";
-  }
+export function getTuiTheme(name: TuiThemeName): TuiTheme {
+  return THEMES[name];
 }
 
-export const tuiSpacing = {
-  xs: 1,
-  sm: 2,
-  md: 3,
-  lg: 4
-} as const;
+export function getTuiThemeOptions(): TuiTheme[] {
+  return TUI_THEME_NAMES.map((name) => THEMES[name]);
+}

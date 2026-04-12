@@ -95,6 +95,7 @@ export interface SetupWizardValues {
   apiBaseUrl: string;
   enableOptionalProbes: boolean;
   enableLicensedIntegrations: boolean;
+  reportSurface: "ask" | "cli" | "web";
   defaultLicensedIntegrations: string[];
   authProfiles: AuthProfile[];
 }

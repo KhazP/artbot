@@ -291,6 +291,7 @@ export function buildSetupEnvUpdates(values: SetupWizardValues): Record<string, 
     API_BASE_URL: values.apiBaseUrl,
     ENABLE_OPTIONAL_PROBE_ADAPTERS: String(values.enableOptionalProbes),
     ENABLE_LICENSED_INTEGRATIONS: String(values.enableLicensedIntegrations),
+    DEFAULT_REPORT_SURFACE: values.reportSurface,
     DEFAULT_LICENSED_INTEGRATIONS: values.defaultLicensedIntegrations.join(","),
     DEFAULT_AUTH_PROFILE: "",
     AUTH_PROFILES_JSON: JSON.stringify(values.authProfiles)

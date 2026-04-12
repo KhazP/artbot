@@ -34,6 +34,7 @@ describe("setup env persistence", () => {
         apiBaseUrl: "http://localhost:4000",
         enableOptionalProbes: true,
         enableLicensedIntegrations: true,
+        reportSurface: "ask",
         defaultLicensedIntegrations: ["Sanatfiyat"],
         authProfiles: [
           {
@@ -59,6 +60,7 @@ describe("setup env persistence", () => {
     expect(written).toContain("AUTH_PROFILES_JSON='[");
     expect(parsedEnv.LLM_BASE_URL).toBe("http://127.0.0.1:1234/v1");
     expect(parsedEnv.LLM_API_KEY).toBe("lm-studio");
+    expect(parsedEnv.DEFAULT_REPORT_SURFACE).toBe("ask");
     expect(parsedProfiles.error).toBeNull();
     expect(parsedProfiles.profiles.map((profile) => profile.id)).toEqual(["artsy-auth", "sanatfiyat-license"]);
   });

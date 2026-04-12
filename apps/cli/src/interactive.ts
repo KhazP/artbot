@@ -1,6 +1,8 @@
 import { pathExists } from "./lib/file-system.js";
 import { runInteractiveTui } from "./interactive-app.js";
+import { normalizeReportSurface } from "./report/browser-report.js";
 import { assessLocalSetup, runSetupWizard } from "./setup/index.js";
+import { loadTuiPreferences } from "./tui/index.js";
 
 interface InteractiveContext {
   apiBaseUrl: string;
@@ -10,6 +12,7 @@ interface InteractiveContext {
 interface PipelineEnvDefaults {
   analysisMode: "comprehensive" | "balanced" | "fast";
   priceNormalization: "legacy" | "usd_dual" | "usd_nominal" | "usd_2026";
+  reportSurface: "ask" | "cli" | "web";
   authProfileId?: string;
   allowLicensed: boolean;
   licensedIntegrations: string[];
@@ -77,6 +80,7 @@ export function resolvePipelineDefaultsFromEnv(): PipelineEnvDefaults {
       (process.env.DEFAULT_ANALYSIS_MODE as PipelineEnvDefaults["analysisMode"] | undefined) ?? "comprehensive",
     priceNormalization:
       (process.env.DEFAULT_PRICE_NORMALIZATION as PipelineEnvDefaults["priceNormalization"] | undefined) ?? "usd_dual",
+    reportSurface: normalizeReportSurface(process.env.DEFAULT_REPORT_SURFACE),
     authProfileId: process.env.DEFAULT_AUTH_PROFILE?.trim() || undefined,
     allowLicensed: parseBoolean(process.env.ENABLE_LICENSED_INTEGRATIONS, false),
     licensedIntegrations,
@@ -172,6 +176,7 @@ export async function startInteractive(): Promise<number> {
 
   const ctx = resolveContext();
   const pipelineDefaults = resolvePipelineDefaultsFromEnv();
+  const initialPreferences = loadTuiPreferences();
 
   return runInteractiveTui({
     context: {
@@ -180,11 +185,13 @@ export async function startInteractive(): Promise<number> {
       defaults: {
         analysisMode: pipelineDefaults.analysisMode,
         priceNormalization: pipelineDefaults.priceNormalization,
+        reportSurface: pipelineDefaults.reportSurface,
         authProfileId: pipelineDefaults.authProfileId,
         allowLicensed: pipelineDefaults.allowLicensed,
         licensedIntegrations: pipelineDefaults.licensedIntegrations
       }
     },
-    initialAssessment
+    initialAssessment,
+    initialPreferences
   });
 }

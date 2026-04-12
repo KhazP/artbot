@@ -9,6 +9,7 @@ const repoRoot = path.resolve(packageDir, "../..");
 const packageJson = JSON.parse(await readFile(path.join(packageDir, "package.json"), "utf-8"));
 
 const workspaceAliases = {
+  "@artbot/browser-report": path.resolve(repoRoot, "packages/browser-report/src/index.ts"),
   "@artbot/auth-manager": path.resolve(repoRoot, "packages/auth-manager/src/index.ts"),
   "@artbot/browser-core": path.resolve(repoRoot, "packages/browser-core/src/index.ts"),
   "@artbot/extraction": path.resolve(repoRoot, "packages/extraction/src/index.ts"),

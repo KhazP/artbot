@@ -4,6 +4,7 @@ import { resolvePipelineDefaultsFromEnv, summarizeAttemptBlockers } from "./inte
 const envSnapshot = {
   DEFAULT_ANALYSIS_MODE: process.env.DEFAULT_ANALYSIS_MODE,
   DEFAULT_PRICE_NORMALIZATION: process.env.DEFAULT_PRICE_NORMALIZATION,
+  DEFAULT_REPORT_SURFACE: process.env.DEFAULT_REPORT_SURFACE,
   DEFAULT_AUTH_PROFILE: process.env.DEFAULT_AUTH_PROFILE,
   ENABLE_LICENSED_INTEGRATIONS: process.env.ENABLE_LICENSED_INTEGRATIONS,
   DEFAULT_LICENSED_INTEGRATIONS: process.env.DEFAULT_LICENSED_INTEGRATIONS,
@@ -19,6 +20,7 @@ const envSnapshot = {
 afterEach(() => {
   process.env.DEFAULT_ANALYSIS_MODE = envSnapshot.DEFAULT_ANALYSIS_MODE;
   process.env.DEFAULT_PRICE_NORMALIZATION = envSnapshot.DEFAULT_PRICE_NORMALIZATION;
+  process.env.DEFAULT_REPORT_SURFACE = envSnapshot.DEFAULT_REPORT_SURFACE;
   process.env.DEFAULT_AUTH_PROFILE = envSnapshot.DEFAULT_AUTH_PROFILE;
   process.env.ENABLE_LICENSED_INTEGRATIONS = envSnapshot.ENABLE_LICENSED_INTEGRATIONS;
   process.env.DEFAULT_LICENSED_INTEGRATIONS = envSnapshot.DEFAULT_LICENSED_INTEGRATIONS;
@@ -35,6 +37,7 @@ describe("interactive env defaults", () => {
   it("resolves full research defaults from environment", () => {
     process.env.DEFAULT_ANALYSIS_MODE = "comprehensive";
     process.env.DEFAULT_PRICE_NORMALIZATION = "usd_dual";
+    process.env.DEFAULT_REPORT_SURFACE = "web";
     process.env.DEFAULT_AUTH_PROFILE = "ops-default";
     process.env.ENABLE_LICENSED_INTEGRATIONS = "true";
     process.env.DEFAULT_LICENSED_INTEGRATIONS = "Sanatfiyat,askART";
@@ -49,6 +52,7 @@ describe("interactive env defaults", () => {
     const defaults = resolvePipelineDefaultsFromEnv();
     expect(defaults.analysisMode).toBe("comprehensive");
     expect(defaults.priceNormalization).toBe("usd_dual");
+    expect(defaults.reportSurface).toBe("web");
     expect(defaults.authProfileId).toBe("ops-default");
     expect(defaults.allowLicensed).toBe(true);
     expect(defaults.licensedIntegrations).toEqual(["Sanatfiyat", "askART"]);
@@ -57,6 +61,14 @@ describe("interactive env defaults", () => {
     expect(defaults.transportCurlFallback).toBe(false);
     expect(defaults.pipelineConcurrency).toEqual({ healthy: 8, degraded: 4, suspected: 2 });
     expect(defaults.pipelineCandidateTimeoutMs).toBe(120000);
+  });
+
+  it("normalizes invalid report surface values back to ask", () => {
+    process.env.DEFAULT_REPORT_SURFACE = "wep";
+
+    const defaults = resolvePipelineDefaultsFromEnv();
+
+    expect(defaults.reportSurface).toBe("ask");
   });
 });
 
