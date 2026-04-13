@@ -1,4 +1,4 @@
-import type { PriceRecord, RunSummary } from "@artbot/shared-types";
+import type { PriceRecord, RecommendedAction, RunSummary } from "@artbot/shared-types";
 import type { ValuationOutcome } from "@artbot/valuation";
 
 function fmt(value: number | null | undefined): string {
@@ -14,7 +14,8 @@ export function renderMarkdownReport(
   records: PriceRecord[],
   summary: RunSummary,
   valuation: ValuationOutcome,
-  gaps: string[]
+  gaps: string[],
+  recommendedActions: RecommendedAction[] = []
 ): string {
   const turkey = records.filter((record) => record.country === "Turkey");
   const international = records.filter((record) => record.country !== "Turkey");
@@ -33,6 +34,16 @@ export function renderMarkdownReport(
     `- Auth mode breakdown: ${JSON.stringify(summary.auth_mode_breakdown)}`,
     `- Failure class breakdown: ${JSON.stringify(summary.failure_class_breakdown ?? {})}`,
     `- Source candidate breakdown: ${JSON.stringify(summary.source_candidate_breakdown)}`,
+    ...(summary.evaluation_metrics
+      ? [
+          `- Accepted precision: ${Math.round(summary.evaluation_metrics.accepted_record_precision * 100)}%`,
+          `- Priced evidence coverage: ${Math.round(summary.evaluation_metrics.valuation_readiness_ratio * 100)}%`,
+          `- Priced source recall: ${Math.round(summary.evaluation_metrics.priced_source_recall * 100)}%`,
+          `- Source completeness: ${Math.round(summary.evaluation_metrics.source_completeness_ratio * 100)}%`,
+          `- Manual override rate: ${Math.round(summary.evaluation_metrics.manual_override_rate * 100)}%`,
+          `- Coverage target met: ${summary.evaluation_metrics.coverage_target_met ? "yes" : "no"}`
+        ]
+      : []),
     "",
     "## Valuation",
     `- Generated: ${valuation.generated}`,
@@ -48,6 +59,11 @@ export function renderMarkdownReport(
             `${index + 1}. ${comp.sourceName} | ${comp.workTitle ?? "-"} | lane=${comp.valuationLane} | score=${comp.score.toFixed(3)} | valuation_eligible=${comp.acceptedForValuation ? "yes" : "no"} | reasons=${comp.reasons.join(", ")} | TRY=${fmt(comp.normalizedPriceTry)} | native=${fmt(comp.nativePrice)} ${comp.currency ?? ""} | ${comp.sourceUrl}`
         )
       : ["- No comparable drivers available."]),
+    "",
+    "## Next Actions",
+    ...(recommendedActions.length > 0
+      ? recommendedActions.map((action) => `- [${action.severity}] ${action.title}: ${action.reason}`)
+      : ["- No operator follow-up actions were generated for this run."]),
     "",
     "## Comparable Sales",
     "| Artist | Work | Source | Country | Price Type | Lane | Valuation Eligible | Acceptance Reason | Native Price | Normalized TRY | URL |",

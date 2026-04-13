@@ -1,5 +1,16 @@
 import { z } from "zod";
-import type { ResearchRunReportData, ResearchRunReportItem, ReportComparable, ReportDistributionItem, ReportMetric, ReportRange, ReportReasonItem, ReportTone } from "./types.js";
+import type {
+  ResearchRunReportData,
+  ResearchRunReportItem,
+  ReportAction,
+  ReportComparable,
+  ReportDistributionItem,
+  ReportMetric,
+  ReportRange,
+  ReportReasonItem,
+  ReportSourcePlanItem,
+  ReportTone
+} from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -132,6 +143,15 @@ const runPayloadSchema = z.object({
     valuation_eligible_records: z.number().int().nonnegative().optional(),
     priced_source_coverage_ratio: z.number().nullable().optional(),
     priced_crawled_source_coverage_ratio: z.number().nullable().optional(),
+    evaluation_metrics: z.object({
+      accepted_record_precision: z.number(),
+      priced_source_recall: z.number(),
+      source_completeness_ratio: z.number(),
+      valuation_readiness_ratio: z.number(),
+      manual_override_rate: z.number(),
+      coverage_target: z.number(),
+      coverage_target_met: z.boolean()
+    }).optional(),
     source_status_breakdown: z.record(z.string(), z.number()).default({}),
     acceptance_reason_breakdown: z.record(z.string(), z.number()).default({}),
     failure_class_breakdown: z.record(z.string(), z.number()).optional(),
@@ -184,6 +204,24 @@ const runPayloadSchema = z.object({
   attempts: z.array(z.object({
     blocker_reason: z.string().nullable().optional()
   }).passthrough()).optional(),
+  source_plan: z.array(z.object({
+    source_name: z.string(),
+    venue_name: z.string(),
+    source_family: z.string().optional(),
+    access_mode: z.string(),
+    source_access_status: z.string(),
+    candidate_count: z.number().int().nonnegative(),
+    status: z.string(),
+    selection_state: z.string().optional(),
+    selection_reason: z.string().nullable().optional(),
+    priority_rank: z.number().int().positive().optional(),
+    skip_reason: z.string().nullable().optional()
+  })).optional(),
+  recommended_actions: z.array(z.object({
+    title: z.string(),
+    reason: z.string(),
+    severity: z.enum(["info", "warning", "critical"])
+  })).optional(),
   gaps: z.array(z.string()).optional()
 }).passthrough();
 
@@ -265,6 +303,44 @@ function buildCoverageMetrics(data: ResearchRunReportData): ReportMetric[] {
       label: "Run Status",
       value: toLabel(data.status),
       tone: toneForStatus(data.status)
+    }
+  ];
+}
+
+function buildEvaluationMetricItems(
+  input: z.infer<typeof runPayloadSchema>["summary"] | undefined
+): ReportMetric[] {
+  const metrics = input?.evaluation_metrics;
+  if (!metrics) {
+    return [];
+  }
+
+  return [
+    {
+      label: "Accepted Precision",
+      value: formatPercent(metrics.accepted_record_precision),
+      tone: metrics.accepted_record_precision >= 0.5 ? "success" : "warning"
+    },
+    {
+      label: "Priced Evidence Coverage",
+      value: formatPercent(metrics.valuation_readiness_ratio),
+      tone: metrics.coverage_target_met ? "success" : "danger",
+      hint: `Target ${Math.round(metrics.coverage_target * 100)}%`
+    },
+    {
+      label: "Priced Source Recall",
+      value: formatPercent(metrics.priced_source_recall),
+      tone: metrics.priced_source_recall >= metrics.coverage_target ? "success" : "warning"
+    },
+    {
+      label: "Source Completeness",
+      value: formatPercent(metrics.source_completeness_ratio),
+      tone: metrics.source_completeness_ratio >= 0.6 ? "success" : "warning"
+    },
+    {
+      label: "Manual Override Rate",
+      value: formatPercent(metrics.manual_override_rate),
+      tone: metrics.manual_override_rate === 0 ? "muted" : "warning"
     }
   ];
 }
@@ -375,6 +451,46 @@ function buildComparables(input: Array<Record<string, unknown>> | undefined): Re
   }));
 }
 
+function buildActions(
+  input: Array<{ title: string; reason: string; severity: "info" | "warning" | "critical" }> | undefined
+): ReportAction[] {
+  return (input ?? []).map((item) => ({
+    title: item.title,
+    reason: item.reason,
+    severity: item.severity
+  }));
+}
+
+function buildSourcePlanItems(
+  input: Array<{
+    source_name: string;
+    venue_name: string;
+    source_family?: string;
+    access_mode: string;
+    source_access_status: string;
+    candidate_count: number;
+    status: string;
+    selection_state?: string;
+    selection_reason?: string | null;
+    priority_rank?: number;
+    skip_reason?: string | null;
+  }> | undefined
+): ReportSourcePlanItem[] {
+  return (input ?? []).map((item) => ({
+    sourceName: item.source_name,
+    venueName: item.venue_name,
+    sourceFamily: item.source_family ?? "unknown",
+    accessMode: item.access_mode,
+    accessStatus: item.source_access_status,
+    candidateCount: item.candidate_count,
+    status: item.status,
+    selectionState: item.selection_state ?? item.status,
+    selectionReason: item.selection_reason ?? null,
+    priorityRank: item.priority_rank ?? 0,
+    skipReason: item.skip_reason ?? null
+  }));
+}
+
 function finalizeReport(data: Omit<ResearchRunReportData, "overviewMetrics" | "coverageMetrics" | "sourceHealthItems">): ResearchRunReportData {
   const report: ResearchRunReportData = {
     ...data,
@@ -421,6 +537,9 @@ function normalizeExternalReport(input: z.infer<typeof externalReportSchema>): R
       topComparables: []
     },
     records,
+    evaluationMetrics: [],
+    recommendedActions: [],
+    sourcePlan: [],
     reasonBreakdown: buildReasonItems(
       records.reduce<Record<string, number>>((acc, item) => {
         if (!item.acceptanceReason) return acc;
@@ -493,6 +612,9 @@ function normalizeRunPayload(input: z.infer<typeof runPayloadSchema>): ResearchR
       )
     },
     records,
+    evaluationMetrics: buildEvaluationMetricItems(summary),
+    recommendedActions: buildActions(input.recommended_actions),
+    sourcePlan: buildSourcePlanItems(input.source_plan),
     reasonBreakdown: buildReasonItems(summary?.acceptance_reason_breakdown),
     failureBreakdown: buildReasonItems(summary?.failure_class_breakdown),
     gaps: input.gaps ?? [],

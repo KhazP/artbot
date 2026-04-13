@@ -87,4 +87,56 @@ describe("normalization", () => {
     const result = dedupeRecords([a, b]);
     expect(result.uniqueRecords).toHaveLength(2);
   });
+
+  it("dedupes near-identical titles when image identity matches", () => {
+    const a = baseRecord({
+      work_title: "Abidin Dino Blue Composition",
+      image_url: "https://cdn.example.com/images/abidin-dino-blue-composition.jpg"
+    });
+    const b = baseRecord({
+      work_title: "Abidin Dino Composition in Blue",
+      source_url: "https://other.example.com/lot/123",
+      image_url: "https://media.example.org/archive/abidin-dino-blue-composition.png"
+    });
+
+    const result = dedupeRecords([a, b]);
+    expect(result.uniqueRecords).toHaveLength(1);
+    expect(result.duplicates).toHaveLength(1);
+  });
+
+  it("dedupes fuzzy title matches when dimensions align", () => {
+    const a = baseRecord({ work_title: "Blue Composition", source_url: "https://example.com/lot-a" });
+    const b = baseRecord({
+      work_title: "Composition Blue",
+      source_url: "https://example.com/lot-b",
+      lot_number: "12"
+    });
+
+    const result = dedupeRecords([a, b]);
+    expect(result.uniqueRecords).toHaveLength(1);
+    expect(result.duplicates).toHaveLength(1);
+  });
+
+  it("keeps repeated same-title works when sale dates differ", () => {
+    const a = baseRecord({
+      work_title: "Eller Serisinden",
+      source_url: "https://sanatfiyat.com/artist/artwork-detail/139254/eller-serisinden",
+      sale_or_listing_date: "2024-08-18",
+      lot_number: null,
+      venue_name: "Sanatfiyat",
+      price_amount: 18000
+    });
+    const b = baseRecord({
+      work_title: "Eller Serisinden",
+      source_url: "https://sanatfiyat.com/artist/artwork-detail/138871/eller-serisinden",
+      sale_or_listing_date: "2024-09-15",
+      lot_number: null,
+      venue_name: "Sanatfiyat",
+      price_amount: 20000
+    });
+
+    const result = dedupeRecords([a, b]);
+    expect(result.uniqueRecords).toHaveLength(2);
+    expect(result.duplicates).toHaveLength(0);
+  });
 });

@@ -6,14 +6,15 @@ import { isTransportError, parseGenericLotFields, TransportErrorKind } from "@ar
 import { logger } from "@artbot/observability";
 import { applyConfidenceModel, dedupeRecords, FxRateProvider, normalizeRecordCurrencies } from "@artbot/normalization";
 import { buildPerPaintingStats, renderMarkdownReport, writeJsonFile } from "@artbot/report-generation";
-import { buildDiscoveryConfigFromEnv, planSources, SourceRegistry, type PlannedSource } from "@artbot/source-registry";
+import { buildDiscoveryConfigFromEnv, buildSourcePlanItems, planSources, SourceRegistry, type PlannedSource } from "@artbot/source-registry";
 import { evaluateAcceptance, type SourceCandidate } from "@artbot/source-adapters";
-import { ArtbotStorage } from "@artbot/storage";
+import { ArtbotStorage, buildDefaultGcPolicyFromEnv, buildRunArtifactManifest, writeArtifactManifest } from "@artbot/storage";
 import {
   acceptanceReasonList,
   failureClassList,
   type AcceptanceReason,
   type FailureClass,
+  type HostHealthRecord,
   type PriceRecord,
   type RunEntity,
   type RunSummary,
@@ -22,6 +23,7 @@ import {
 } from "@artbot/shared-types";
 import { buildValuation, rankComparablesWithScores } from "@artbot/valuation";
 import { processArtistMarketInventoryRun } from "./artist-market-inventory.js";
+import { buildEvaluationMetrics, buildRecommendedActions } from "./run-insights.js";
 
 export interface OrchestratorOptions {
   minValuationComps?: number;
@@ -97,6 +99,38 @@ function hostFromUrl(url: string): string | null {
   }
 }
 
+function normalizeDiscoveryHost(host: string): string {
+  return host.toLowerCase().replace(/^www\./, "");
+}
+
+function inferSourcePageType(url: string): SourceCandidate["sourcePageType"] {
+  const lower = url.toLowerCase();
+  if (
+    /\/(?:cart|sepet|account|giris|login|contact|iletisim|about|hakkimizda|download-app|siparislerim|desteklerim|privacy|gizlilik|uyelik|kargo|odeme|rss|feed)\b/.test(lower)
+  ) {
+    return "other";
+  }
+  if (
+    /\/artist\/artwork-detail\//.test(lower)
+    || /\/artist\/result-detail\//.test(lower)
+    || /\/search\/result-detail\//.test(lower)
+    || /\/search\/artwork-detail\//.test(lower)
+    || /\/artist\/artist-result\//.test(lower)
+    ||
+    /(\/lot\/|\/lots\/|\/auction\/lot|\/auction-lot\/|\/item\/\d+|\/lot-|\/(?:en\/)?products\/|\/urun\/)/.test(lower)
+    || /\/hemen-al\/[^/?#]+\/\d+/i.test(lower)
+    || /\/hemen-al\/\d+\//i.test(lower)
+    || /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i.test(lower)
+  ) {
+    return "lot";
+  }
+  if (/(\/artist\/|\/artists\/)/.test(lower)) return "artist_page";
+  if (/(\/price|\/result|\/archive|\/catalog|\/arsiv|\/search|\/arama|\/hemen-al\b|\/muzayede\/\d+\/|page=)/.test(lower)) {
+    return "listing";
+  }
+  return "other";
+}
+
 function clamp(value: number, min = 0, max = 1): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -111,6 +145,405 @@ function isPricedAcceptanceReason(reason: AcceptanceReason): boolean {
 
 function isCrawledSourceStatus(status: SourceAccessStatus): boolean {
   return status !== "blocked" && status !== "auth_required";
+}
+
+function gatedContentReasonForAccessMode(mode: "anonymous" | "authorized" | "licensed"): {
+  status: SourceAccessStatus;
+  failureClass: FailureClass;
+  rejectionReason: string;
+  valuationReason: string;
+  blockerReason: string;
+} {
+  if (mode === "anonymous") {
+    return {
+      status: "auth_required",
+      failureClass: "access_blocked",
+      rejectionReason: "Login gate detected without authorized session.",
+      valuationReason: "Authentication required.",
+      blockerReason: "Authentication required."
+    };
+  }
+
+  return {
+    status: "blocked",
+    failureClass: "access_blocked",
+    rejectionReason: "Saved session did not unlock gated content; refresh the session or verify source entitlements.",
+    valuationReason: "Saved session did not unlock gated content.",
+    blockerReason: "Saved session did not unlock gated content."
+  };
+}
+
+const RENDERED_DISCOVERY_BLOCK_HOSTS = [
+  "instagram.com",
+  "facebook.com",
+  "linkedin.com",
+  "youtube.com",
+  "x.com",
+  "twitter.com",
+  "whatsapp.com"
+];
+
+const RENDERED_DISCOVERY_BLOCK_PATH_PATTERNS = [
+  /\/(?:cart|sepet)(?:[/?#.]|$)/i,
+  /\/(?:account|hesabim|uyelik|uyelik-sozlesmesi|login|register|signup|sign-in|sign-up)(?:[/?#.]|$)/i,
+  /\/giris[^/]*(?:[/?#.]|$)/i,
+  /\/[^/?#]*giris(?:-[^/?#]*)?(?:\.html|[/?#]|$)/i,
+  /\/[^/?#]*login(?:-[^/?#]*)?(?:\.html|[/?#]|$)/i,
+  /\/(?:contact|iletisim|about|hakkimizda|privacy|gizlilik|terms|kosullar|sartlar-ve-kosullar)(?:[/?#.]|$)/i,
+  /\/(?:download-app|siparislerim|desteklerim|sifremi(?:unuttum)?|odeme_bilgilendirme|kargo_bilgileri)(?:[/?#.]|$)/i,
+  /\/(?:collections\/shop|collections\/private-sales|pages\/|shop|dukkan\.html|tumurunler\.html|muzayedeler\.html)(?:[/?#]|$)/i,
+  /\/(?:rss|feed)(?:[/?#.]|$)/i
+];
+
+function discoveredUrlLooksLikeAccessCheckpoint(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const normalizedPath = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    return RENDERED_DISCOVERY_BLOCK_PATH_PATTERNS.some((pattern) => pattern.test(normalizedPath));
+  } catch {
+    return false;
+  }
+}
+
+function normalizeEntityTokens(value: string | null | undefined): string[] {
+  return (value ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9çğıöşü\s]/gi, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+}
+
+const GENERIC_DISCOVERED_URL_TOKENS = new Set([
+  "lot",
+  "lots",
+  "item",
+  "items",
+  "product",
+  "products",
+  "urun",
+  "urunler",
+  "eser",
+  "eserler",
+  "resim",
+  "tablo",
+  "art",
+  "auction",
+  "muzayede",
+  "muzayedesi",
+  "hemen",
+  "buy",
+  "now",
+  "canli",
+  "arsiv",
+  "archive",
+  "catalog",
+  "katalog",
+  "search",
+  "arama",
+  "page",
+  "sayfa"
+]);
+
+function urlReferencesQueryEntity(url: string, query: RunEntity["query"]): boolean {
+  const haystack = url
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9çğıöşü\s]/gi, " ");
+  const titleTokens = normalizeEntityTokens(query.title ?? "");
+  if (titleTokens.length > 0 && titleTokens.every((token) => haystack.includes(token))) {
+    return true;
+  }
+
+  const artistTokens = normalizeEntityTokens(query.artist);
+  return artistTokens.length > 0 && artistTokens.every((token) => haystack.includes(token));
+}
+
+function searchParamsReferenceQueryEntity(url: string, query: RunEntity["query"]): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const keys = ["q", "query", "term", "entry", "s", "search", "search_words"];
+  const values = keys
+    .flatMap((key) => parsed.searchParams.getAll(key))
+    .map((value) =>
+      value
+        .toLowerCase()
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9çğıöşü\s]/gi, " ")
+    )
+    .filter(Boolean);
+
+  if (values.length === 0) {
+    return false;
+  }
+
+  const titleTokens = normalizeEntityTokens(query.title ?? "");
+  if (titleTokens.length > 0 && values.some((value) => titleTokens.every((token) => value.includes(token)))) {
+    return true;
+  }
+
+  const artistTokens = normalizeEntityTokens(query.artist);
+  return artistTokens.length > 0 && values.some((value) => artistTokens.every((token) => value.includes(token)));
+}
+
+function looksLikeSearchUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (/\/(?:search|arama)\b/i.test(parsed.pathname)) {
+      return true;
+    }
+
+    return ["q", "query", "term", "entry", "s", "search", "search_words"].some((key) => parsed.searchParams.has(key));
+  } catch {
+    return false;
+  }
+}
+
+function discoveredUrlLooksLikeDifferentEntity(url: string, query: RunEntity["query"]): boolean {
+  let pathname = "";
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+
+  const tokens = pathname
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9çğıöşü\s]/gi, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3)
+    .filter((token) => !GENERIC_DISCOVERED_URL_TOKENS.has(token) && !/^\d+$/.test(token));
+
+  if (tokens.length < 2) {
+    return false;
+  }
+
+  const queryTokens = [...normalizeEntityTokens(query.artist), ...normalizeEntityTokens(query.title ?? "")];
+  if (queryTokens.length === 0) {
+    return false;
+  }
+
+  return !tokens.some((token) => queryTokens.some((queryToken) => token.includes(queryToken) || queryToken.includes(token)));
+}
+
+function isSanatfiyatArtworkDetailUrl(url: URL): boolean {
+  return /\/(?:artist|search)\/(?:artwork-detail|result-detail|artist-result)\//i.test(url.pathname);
+}
+
+function isSanatfiyatArtistDetailUrl(url: URL): boolean {
+  return /\/(?:search\/)?artist-detail\//i.test(url.pathname);
+}
+
+export function shouldKeepRenderedDiscoveredUrl(
+  url: string,
+  discoveredFromUrl: string,
+  adapterId: string,
+  query: RunEntity["query"]
+): boolean {
+  let parsed: URL;
+  let discoveredFrom: URL;
+  try {
+    parsed = new URL(url);
+    discoveredFrom = new URL(discoveredFromUrl);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+
+  const host = normalizeDiscoveryHost(parsed.hostname);
+  const originHost = normalizeDiscoveryHost(discoveredFrom.hostname);
+  if (host !== originHost) {
+    return false;
+  }
+
+  if (RENDERED_DISCOVERY_BLOCK_HOSTS.some((blockedHost) => host === blockedHost || host.endsWith(`.${blockedHost}`))) {
+    return false;
+  }
+
+  if (discoveredUrlLooksLikeAccessCheckpoint(url)) {
+    return false;
+  }
+
+  const normalizedPath = `${parsed.pathname}${parsed.search}`.toLowerCase();
+  if (!normalizedPath || normalizedPath === "/") {
+    return false;
+  }
+
+  if (RENDERED_DISCOVERY_BLOCK_PATH_PATTERNS.some((pattern) => pattern.test(normalizedPath))) {
+    return false;
+  }
+
+  if (adapterId === "sanatfiyat-licensed-extractor" && isSanatfiyatArtworkDetailUrl(parsed)) {
+    return (
+      urlReferencesQueryEntity(discoveredFromUrl, query)
+      || searchParamsReferenceQueryEntity(discoveredFromUrl, query)
+      || urlReferencesQueryEntity(url, query)
+    );
+  }
+
+  if (/\/(?:search\/)?artist-detail\//i.test(parsed.pathname)) {
+    return urlReferencesQueryEntity(url, query);
+  }
+
+  if (/\/artist\//i.test(parsed.pathname) && !urlReferencesQueryEntity(url, query)) {
+    return false;
+  }
+
+  if (
+    adapterId === "muzayedeapp-platform" &&
+    /\/[^/?#]*m(?:u|ü)zayedesi[^/?#]*\.html/i.test(parsed.pathname) &&
+    !urlReferencesQueryEntity(url, query)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function normalizeCandidateUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()]) {
+      const lower = key.toLowerCase();
+      if (
+        lower.startsWith("utm_")
+        || lower === "gclid"
+        || lower === "fbclid"
+        || lower === "ref"
+        || lower === "_pos"
+        || lower === "_sid"
+        || lower === "_ss"
+      ) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    if (parsed.pathname.toLowerCase().endsWith(".oembed")) {
+      return "";
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function queuePriority(candidate: SourceCandidate): number {
+  const scorePenalty = (1 - clamp(candidate.score ?? 0.5)) / 100;
+  if (candidate.sourcePageType === "lot") {
+    return 0 + scorePenalty;
+  }
+  if (candidate.provenance === "web_discovery") {
+    return 1 + scorePenalty;
+  }
+  if (candidate.provenance === "listing_expansion" || candidate.provenance === "signature_expansion") {
+    return 2 + scorePenalty;
+  }
+  if (candidate.provenance === "seed") {
+    return 3 + scorePenalty;
+  }
+  return 4 + scorePenalty;
+}
+
+export function insertDiscoveredCandidate(queue: SourceCandidate[], candidate: SourceCandidate): void {
+  const candidateRank = queuePriority(candidate);
+  const insertionIndex = queue.findIndex((entry) => queuePriority(entry) > candidateRank);
+  if (insertionIndex === -1) {
+    queue.push(candidate);
+    return;
+  }
+  queue.splice(insertionIndex, 0, candidate);
+}
+
+function toRenderedDiscoveredCandidate(
+  url: string,
+  discoveredFromUrl: string,
+  adapterId: string,
+  query: RunEntity["query"]
+): SourceCandidate | null {
+  const normalizedUrl = normalizeCandidateUrl(url);
+
+  if (!shouldKeepRenderedDiscoveredUrl(normalizedUrl, discoveredFromUrl, adapterId, query)) {
+    return null;
+  }
+
+  const sourcePageType = inferSourcePageType(normalizedUrl);
+  const entityReferenced = urlReferencesQueryEntity(normalizedUrl, query);
+  const score =
+    sourcePageType === "artist_page" && entityReferenced
+      ? 0.98
+      : sourcePageType === "lot" && entityReferenced
+        ? 0.94
+        : 0.72;
+
+  return {
+    url: normalizedUrl,
+    sourcePageType,
+    provenance: "listing_expansion",
+    score,
+    discoveredFromUrl
+  };
+}
+
+export function shouldQueueDiscoveredCandidate(candidate: SourceCandidate, query: RunEntity["query"]): boolean {
+  if (candidate.provenance === "seed") {
+    return true;
+  }
+
+  if (discoveredUrlLooksLikeAccessCheckpoint(candidate.url)) {
+    return false;
+  }
+
+  if (candidate.sourcePageType === "other") {
+    return urlReferencesQueryEntity(candidate.url, query);
+  }
+
+  if (looksLikeSearchUrl(candidate.url) && !searchParamsReferenceQueryEntity(candidate.url, query)) {
+    return false;
+  }
+
+  if (candidate.discoveredFromUrl) {
+    try {
+      const candidateUrl = new URL(candidate.url);
+      const discoveredFromUrl = new URL(candidate.discoveredFromUrl);
+      if (
+        isSanatfiyatArtworkDetailUrl(candidateUrl)
+        && isSanatfiyatArtistDetailUrl(discoveredFromUrl)
+        && (
+          urlReferencesQueryEntity(candidate.discoveredFromUrl, query)
+          || searchParamsReferenceQueryEntity(candidate.discoveredFromUrl, query)
+        )
+      ) {
+        return true;
+      }
+    } catch {
+      // Ignore malformed discovery links and fall through to default heuristics.
+    }
+  }
+
+  if (candidate.sourcePageType !== "lot") {
+    return true;
+  }
+
+  if (urlReferencesQueryEntity(candidate.url, query)) {
+    return true;
+  }
+
+  return !discoveredUrlLooksLikeDifferentEntity(candidate.url, query);
 }
 
 export function classifyFailureClass(transport: TransportMetadata | null, blockerReason?: string | null): FailureClass {
@@ -368,13 +801,19 @@ export class ResearchOrchestrator {
       concurrency: this.concurrency
     });
 
-    const plannedSources = await planSources(run.query, this.registry.list(), this.authManager);
+    const plannedSources = await planSources(run.query, this.registry.list(), this.authManager, this.storage.listHostHealth(50));
     const maxDiscoveredCandidatesPerSource = buildDiscoveryConfigFromEnv(run.query.analysisMode).maxCandidatesPerSource;
+    const sourcePlan = buildSourcePlanItems(plannedSources, maxDiscoveredCandidatesPerSource, run.query.analysisMode);
+    const selectedSourceIds = new Set(
+      sourcePlan.filter((item) => item.selection_state === "selected").map((item) => item.adapter_id)
+    );
 
     const sourceCandidateBreakdown: Record<string, number> = {};
     let discoveredCandidates = 0;
 
-    const sources: SourceWorkState[] = plannedSources.map((planned) => {
+    const runnableSources = plannedSources.filter((planned) => selectedSourceIds.has(planned.adapter.id));
+
+    const sources: SourceWorkState[] = runnableSources.map((planned) => {
       const queue = [...planned.candidates];
       const sourceName = planned.adapter.sourceName;
       sourceCandidateBreakdown[sourceName] = queue.length;
@@ -467,6 +906,13 @@ export class ResearchOrchestrator {
 
       attempts.push(outcome.attempt);
       this.storage.saveAttempt(run.id, outcome.attempt);
+      if (outcome.transportHost) {
+        this.storage.recordHostAttempt(outcome.transportHost, outcome.attempt);
+      } else if (outcome.attempt.transport_host) {
+        this.storage.recordHostAttempt(outcome.attempt.transport_host, outcome.attempt);
+      } else if (outcome.task.host) {
+        this.storage.recordHostAttempt(outcome.task.host, outcome.attempt);
+      }
 
       if (outcome.gap) {
         gaps.push(outcome.gap);
@@ -500,6 +946,9 @@ export class ResearchOrchestrator {
 
       if (!stopScheduling && outcome.discoveredCandidates.length > 0) {
         for (const discovered of outcome.discoveredCandidates) {
+          if (!shouldQueueDiscoveredCandidate(discovered, run.query)) {
+            continue;
+          }
           if (outcome.task.source.seen.has(discovered.url)) {
             continue;
           }
@@ -508,7 +957,7 @@ export class ResearchOrchestrator {
           }
 
           outcome.task.source.seen.add(discovered.url);
-          outcome.task.source.queue.push(discovered);
+          insertDiscoveredCandidate(outcome.task.source.queue, discovered);
           sourceCandidateBreakdown[outcome.task.source.sourceName] += 1;
           discoveredCandidates += 1;
         }
@@ -547,6 +996,21 @@ export class ResearchOrchestrator {
     const valuation = buildValuation(rankedRecords, this.minValuationComps, scoredComparables);
     const perPaintingStats = buildPerPaintingStats(rankedRecords);
     const valuationEligibleRecords = rankedRecords.filter((record) => record.accepted_for_valuation).length;
+    const persistedHostHealth = this.storage.listHostHealth(12);
+    const evaluationMetrics = buildEvaluationMetrics({
+      attempts,
+      sourcePlan,
+      acceptedRecords: rankedRecords.length,
+      valuationEligibleRecords
+    });
+    const recommendedActions = buildRecommendedActions({
+      sourcePlan,
+      attempts,
+      acceptedRecords: rankedRecords.length,
+      discoveredCandidates,
+      hostHealth: persistedHostHealth,
+      evaluationMetrics
+    });
     const summary = this.buildSummary(
       run.id,
       rankedRecords.length,
@@ -556,7 +1020,9 @@ export class ResearchOrchestrator {
       valuation.reason,
       discoveredCandidates,
       acceptedFromDiscovery,
-      sourceCandidateBreakdown
+      sourceCandidateBreakdown,
+      persistedHostHealth,
+      sourcePlan
     );
 
     const resultsPath = path.join(runRoot, "results.json");
@@ -582,12 +1048,24 @@ export class ResearchOrchestrator {
       records: rankedRecords,
       duplicates,
       per_painting_stats: perPaintingStats,
+      source_plan: sourcePlan,
+      recommended_actions: recommendedActions,
+      persisted_source_health: persistedHostHealth,
       attempts,
       gaps
     };
 
     writeJsonFile(resultsPath, payload);
-    fs.writeFileSync(reportPath, renderMarkdownReport(rankedRecords, summary, valuation, gaps), "utf-8");
+    fs.writeFileSync(reportPath, renderMarkdownReport(rankedRecords, summary, valuation, gaps, recommendedActions), "utf-8");
+    const artifactManifest = buildRunArtifactManifest({
+      runId: run.id,
+      runRoot,
+      reportPath,
+      resultsPath,
+      attempts,
+      policy: buildDefaultGcPolicyFromEnv()
+    });
+    writeArtifactManifest(runRoot, artifactManifest);
 
     this.storage.completeRun(run.id, reportPath, resultsPath);
 
@@ -619,6 +1097,39 @@ export class ResearchOrchestrator {
         }
       });
 
+      const shouldDiscoverRenderedArtifacts =
+        task.source.planned.adapter.crawlStrategies.includes("rendered_dom") ||
+        task.candidate.sourcePageType !== "lot" ||
+        result.attempt.acceptance_reason === "generic_shell_page";
+      const renderedArtifacts = shouldDiscoverRenderedArtifacts
+        ? await this.browserClient.discoverRenderedArtifacts({
+            traceId,
+            sourceName: task.source.planned.adapter.id,
+            url: task.candidate.url,
+            runId: run.id,
+            evidenceDir,
+            accessContext: task.source.planned.accessContext,
+            maxPages: task.candidate.sourcePageType === "listing" ? 4 : 2
+          })
+        : null;
+
+      if (!result.attempt.screenshot_path && renderedArtifacts?.screenshotPaths[0]) {
+        result.attempt.screenshot_path = renderedArtifacts.screenshotPaths[0];
+      }
+      if (!result.attempt.raw_snapshot_path && renderedArtifacts?.rawSnapshotPaths[0]) {
+        result.attempt.raw_snapshot_path = renderedArtifacts.rawSnapshotPaths[0];
+      }
+      if (result.record && !result.record.screenshot_path && renderedArtifacts?.screenshotPaths[0]) {
+        result.record.screenshot_path = renderedArtifacts.screenshotPaths[0];
+      }
+      if (result.record && !result.record.raw_snapshot_path && renderedArtifacts?.rawSnapshotPaths[0]) {
+        result.record.raw_snapshot_path = renderedArtifacts.rawSnapshotPaths[0];
+      }
+
+      const renderedCandidates = (renderedArtifacts?.discoveredUrls ?? [])
+        .map((url) => toRenderedDiscoveredCandidate(url, task.candidate.url, task.source.planned.adapter.id, run.query))
+        .filter((candidate): candidate is SourceCandidate => Boolean(candidate));
+
       const captureAcceptedValuation = process.env.CAPTURE_BROWSER_FOR_ACCEPTED_VALUATION === "true";
       const acceptedForValuation = Boolean(result.attempt.accepted_for_valuation ?? result.record?.accepted_for_valuation);
       if (result.needsBrowserVerification || (captureAcceptedValuation && acceptedForValuation)) {
@@ -647,25 +1158,26 @@ export class ResearchOrchestrator {
         result.attempt.canonical_url = browserCapture.finalUrl;
         result.attempt.model_used = browserCapture.modelUsed;
 
-        if (browserCapture.requiresAuthDetected && task.source.planned.accessContext.mode === "anonymous") {
-          result.attempt.source_access_status = "auth_required";
-          result.attempt.failure_class = "access_blocked";
+        if (browserCapture.requiresAuthDetected) {
+          const gatedReason = gatedContentReasonForAccessMode(task.source.planned.accessContext.mode);
+          result.attempt.source_access_status = gatedReason.status;
+          result.attempt.failure_class = gatedReason.failureClass;
           result.attempt.accepted = false;
           result.attempt.accepted_for_evidence = false;
           result.attempt.accepted_for_valuation = false;
           result.attempt.valuation_lane = "none";
           result.attempt.acceptance_reason = "blocked_access";
-          result.attempt.rejection_reason = "Login gate detected without authorized session.";
-          result.attempt.valuation_eligibility_reason = "Authentication required.";
-          result.attempt.blocker_reason = "Authentication required.";
+          result.attempt.rejection_reason = gatedReason.rejectionReason;
+          result.attempt.valuation_eligibility_reason = gatedReason.valuationReason;
+          result.attempt.blocker_reason = gatedReason.blockerReason;
           if (result.record) {
-            result.record.source_access_status = "auth_required";
+            result.record.source_access_status = gatedReason.status;
             result.record.accepted_for_evidence = false;
             result.record.accepted_for_valuation = false;
             result.record.valuation_lane = "none";
             result.record.acceptance_reason = "blocked_access";
-            result.record.rejection_reason = "Login gate detected without authorized session.";
-            result.record.valuation_eligibility_reason = "Authentication required.";
+            result.record.rejection_reason = gatedReason.rejectionReason;
+            result.record.valuation_eligibility_reason = gatedReason.valuationReason;
             result.record.valuation_confidence = 0;
             result.record.overall_confidence = Math.min(result.record.overall_confidence, 0.35);
           }
@@ -700,7 +1212,11 @@ export class ResearchOrchestrator {
           result.record.raw_snapshot_path = browserCapture.rawSnapshotPath;
         }
 
-        if (browserCapture.rawSnapshotPath && !browserCapture.blockedDetected && !browserCapture.requiresAuthDetected) {
+        if (
+          browserCapture.rawSnapshotPath
+          && !browserCapture.blockedDetected
+          && !browserCapture.requiresAuthDetected
+        ) {
           result.record = this.tryRecoverPriceFromBrowserSnapshot(task, run, result, browserCapture.rawSnapshotPath);
         }
       }
@@ -710,13 +1226,21 @@ export class ResearchOrchestrator {
         task,
         attempt: result.attempt,
         acceptedRecord: result.record && acceptedForEvidence ? result.record : null,
-        discoveredCandidates: result.discoveredCandidates ?? [],
+        discoveredCandidates: [...(result.discoveredCandidates ?? []), ...renderedCandidates],
         succeeded: true
       };
     } catch (error) {
       const transport = this.resolveTransportMetadata(error, task.host);
       const failedAttempt = this.buildFailedAttempt(run.id, task, error, transport);
       const gapReason = error instanceof Error ? error.message : String(error);
+
+      const recovery = transport?.kind === TransportErrorKind.TCP_TIMEOUT
+        ? await this.attemptBrowserTimeoutRecovery(task, run, traceId, evidenceDir, failedAttempt)
+        : null;
+
+      if (recovery) {
+        return recovery;
+      }
 
       return {
         task,
@@ -739,6 +1263,7 @@ export class ResearchOrchestrator {
   ): Promise<CandidateTaskOutcome> {
     let timeoutHandle: NodeJS.Timeout | null = null;
     const timeoutMs = this.candidateTimeoutMs;
+    const taskPromise = this.executeCandidateTask(task, run, traceId, evidenceDir);
     const timeoutPromise = new Promise<CandidateTaskOutcome>((resolve) => {
       timeoutHandle = setTimeout(() => {
         const timeoutError = new Error(`Candidate task timed out after ${timeoutMs}ms.`);
@@ -763,11 +1288,167 @@ export class ResearchOrchestrator {
     });
 
     try {
-      return await Promise.race([this.executeCandidateTask(task, run, traceId, evidenceDir), timeoutPromise]);
+      const firstResult = await Promise.race([
+        taskPromise.then((outcome) => ({ kind: "task" as const, outcome })),
+        timeoutPromise.then((outcome) => ({ kind: "timeout" as const, outcome }))
+      ]);
+      if (firstResult.kind === "task") {
+        return firstResult.outcome;
+      }
+
+      const timeoutOutcome = firstResult.outcome;
+      if (timeoutOutcome.transportKind !== TransportErrorKind.TCP_TIMEOUT) {
+        return timeoutOutcome;
+      }
+
+      const recoveryPromise = this.attemptBrowserTimeoutRecovery(task, run, traceId, evidenceDir, timeoutOutcome.attempt);
+      const followUpResult = await Promise.race([
+        taskPromise.then((outcome) => ({ kind: "task" as const, outcome })),
+        recoveryPromise.then((outcome) => ({ kind: "recovery" as const, outcome }))
+      ]);
+
+      if (followUpResult.kind === "task") {
+        return followUpResult.outcome;
+      }
+
+      const lateTaskOutcome = await this.awaitCandidateTaskGrace(taskPromise, Math.min(timeoutMs, 5_000));
+      return lateTaskOutcome ?? followUpResult.outcome ?? timeoutOutcome;
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
+    }
+  }
+
+  private async awaitCandidateTaskGrace(
+    taskPromise: Promise<CandidateTaskOutcome>,
+    graceMs: number
+  ): Promise<CandidateTaskOutcome | null> {
+    if (graceMs <= 0) {
+      return null;
+    }
+
+    let graceHandle: NodeJS.Timeout | null = null;
+    const gracePromise = new Promise<null>((resolve) => {
+      graceHandle = setTimeout(() => resolve(null), graceMs);
+    });
+
+    try {
+      return await Promise.race([taskPromise, gracePromise]);
+    } finally {
+      if (graceHandle) {
+        clearTimeout(graceHandle);
+      }
+    }
+  }
+
+  private async attemptBrowserTimeoutRecovery(
+    task: CandidateTask,
+    run: RunEntity,
+    traceId: string,
+    evidenceDir: string,
+    failedAttempt: SourceAttempt
+  ): Promise<CandidateTaskOutcome | null> {
+    const shouldTryBrowserRecovery =
+      task.candidate.sourcePageType !== "lot"
+      || task.source.planned.adapter.crawlStrategies.includes("rendered_dom")
+      || task.source.planned.adapter.capabilities.browser_support !== "never";
+
+    if (!shouldTryBrowserRecovery) {
+      return null;
+    }
+
+    try {
+      const renderedArtifacts = await this.browserClient.discoverRenderedArtifacts({
+        traceId,
+        sourceName: task.source.planned.adapter.id,
+        url: task.candidate.url,
+        runId: run.id,
+        evidenceDir,
+        accessContext: task.source.planned.accessContext,
+        maxPages: task.candidate.sourcePageType === "listing" ? 4 : 2
+      });
+
+      failedAttempt.screenshot_path = renderedArtifacts.screenshotPaths[0] ?? null;
+      failedAttempt.raw_snapshot_path = renderedArtifacts.rawSnapshotPaths[0] ?? null;
+      failedAttempt.canonical_url = renderedArtifacts.finalUrl;
+      failedAttempt.parser_used = "browser-timeout-recovery";
+      failedAttempt.failure_class = renderedArtifacts.blockedDetected ? "waf_challenge" : undefined;
+      failedAttempt.rejection_reason = renderedArtifacts.blockedDetected
+        ? "Access blocked or anti-bot page detected."
+        : renderedArtifacts.requiresAuthDetected
+          ? gatedContentReasonForAccessMode(task.source.planned.accessContext.mode).rejectionReason
+          : failedAttempt.rejection_reason;
+
+      if (renderedArtifacts.requiresAuthDetected) {
+        const gatedReason = gatedContentReasonForAccessMode(task.source.planned.accessContext.mode);
+        failedAttempt.source_access_status = gatedReason.status;
+        failedAttempt.failure_class = gatedReason.failureClass;
+        failedAttempt.blocker_reason = gatedReason.blockerReason;
+        failedAttempt.acceptance_reason = "blocked_access";
+      } else if (renderedArtifacts.blockedDetected) {
+        failedAttempt.source_access_status = "blocked";
+        failedAttempt.blocker_reason = "Technical blocking detected.";
+        failedAttempt.acceptance_reason = "blocked_access";
+      } else if (failedAttempt.raw_snapshot_path) {
+        try {
+          const html = fs.readFileSync(failedAttempt.raw_snapshot_path, "utf-8");
+          const parsed = parseGenericLotFields(html);
+          const recoveredSourceStatus: SourceAccessStatus = parsed.priceHidden
+            ? "price_hidden"
+            : task.source.planned.accessContext.sourceAccessStatus;
+          const acceptance = evaluateAcceptance(parsed, recoveredSourceStatus, {
+            sourceName: failedAttempt.source_name,
+            sourcePageType: task.candidate.sourcePageType,
+            candidateUrl: task.candidate.url,
+            queryArtist: run.query.artist,
+            queryTitle: run.query.title
+          });
+
+          failedAttempt.source_access_status = recoveredSourceStatus;
+          failedAttempt.accepted = acceptance.acceptedForEvidence;
+          failedAttempt.accepted_for_evidence = acceptance.acceptedForEvidence;
+          failedAttempt.accepted_for_valuation = acceptance.acceptedForValuation;
+          failedAttempt.valuation_lane = acceptance.valuationLane;
+          failedAttempt.acceptance_reason = acceptance.acceptanceReason;
+          failedAttempt.rejection_reason = acceptance.rejectionReason;
+          failedAttempt.valuation_eligibility_reason = acceptance.valuationEligibilityReason;
+          failedAttempt.failure_class = undefined;
+          failedAttempt.blocker_reason = acceptance.rejectionReason;
+          failedAttempt.extracted_fields = {
+            ...failedAttempt.extracted_fields,
+            lot_number: parsed.lotNumber,
+            estimate_low: parsed.estimateLow,
+            estimate_high: parsed.estimateHigh,
+            price_type: parsed.priceType,
+            price_amount: parsed.priceAmount,
+            currency: parsed.currency,
+            buyers_premium_included: parsed.buyersPremiumIncluded
+          };
+        } catch {
+          // Best-effort browser timeout recovery.
+        }
+      }
+
+      const renderedCandidates = (renderedArtifacts.discoveredUrls ?? [])
+        .map((url) => toRenderedDiscoveredCandidate(url, task.candidate.url, task.source.planned.adapter.id, run.query))
+        .filter((candidate): candidate is SourceCandidate => Boolean(candidate));
+
+      const recoveredResult = { attempt: failedAttempt, record: null as PriceRecord | null };
+      const recoveredRecord = failedAttempt.raw_snapshot_path && !renderedArtifacts.blockedDetected
+        ? this.tryRecoverPriceFromBrowserSnapshot(task, run, recoveredResult, failedAttempt.raw_snapshot_path)
+        : null;
+
+      return {
+        task,
+        attempt: recoveredResult.attempt,
+        acceptedRecord: recoveredRecord && recoveredResult.attempt.accepted_for_evidence ? recoveredRecord : null,
+        discoveredCandidates: renderedCandidates,
+        gap: renderedArtifacts.blockedDetected || renderedArtifacts.requiresAuthDetected ? undefined : `${task.source.sourceName}: recovered after transport timeout via browser render.`,
+        succeeded: true
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -929,8 +1610,64 @@ export class ResearchOrchestrator {
     try {
       const html = fs.readFileSync(rawSnapshotPath, "utf-8");
       const parsed = parseGenericLotFields(html);
-      const recoveredRecord = result.record ?? this.createRecoveredRecordFromSnapshot(task, run, result.attempt, parsed);
+      const nextSourceStatus: SourceAccessStatus = parsed.priceHidden
+        ? "price_hidden"
+        : result.attempt.source_access_status === "blocked" || result.attempt.source_access_status === "auth_required"
+          ? task.source.planned.accessContext.sourceAccessStatus
+          : result.attempt.source_access_status;
+      result.attempt.source_access_status = nextSourceStatus;
+      const hasPricingSignal =
+        parsed.priceHidden ||
+        parsed.priceType !== "unknown" ||
+        Boolean(parsed.currency) ||
+        isFiniteAmount(parsed.priceAmount) ||
+        isFiniteAmount(parsed.estimateLow) ||
+        isFiniteAmount(parsed.estimateHigh);
 
+      result.attempt.extracted_fields = {
+        ...result.attempt.extracted_fields,
+        lot_number: parsed.lotNumber,
+        estimate_low: parsed.estimateLow,
+        estimate_high: parsed.estimateHigh,
+        price_type: parsed.priceType,
+        price_amount: parsed.priceAmount,
+        currency: parsed.currency,
+        buyers_premium_included: parsed.buyersPremiumIncluded
+      };
+
+      let acceptance = evaluateAcceptance(parsed, nextSourceStatus, {
+        sourceName: result.attempt.source_name,
+        sourcePageType: result.record?.source_page_type ?? task.candidate.sourcePageType,
+        candidateUrl: task.candidate.url,
+        queryArtist: run.query.artist,
+        queryTitle: run.query.title
+      });
+      if (!hasPricingSignal && looksLikeSearchUrl(task.candidate.url)) {
+        acceptance = {
+          acceptedForEvidence: false,
+          acceptedForValuation: false,
+          valuationLane: "none",
+          acceptanceReason: "generic_shell_page",
+          rejectionReason: "Search/listing shell page detected; retained only for discovery expansion.",
+          valuationEligibilityReason: "Search shells are excluded from evidence and valuation."
+        };
+      }
+
+      result.attempt.accepted = acceptance.acceptedForEvidence;
+      result.attempt.accepted_for_evidence = acceptance.acceptedForEvidence;
+      result.attempt.accepted_for_valuation = acceptance.acceptedForValuation;
+      result.attempt.valuation_lane = acceptance.valuationLane;
+      result.attempt.acceptance_reason = acceptance.acceptanceReason;
+      result.attempt.rejection_reason = acceptance.rejectionReason;
+      result.attempt.valuation_eligibility_reason = acceptance.valuationEligibilityReason;
+      result.attempt.failure_class = undefined;
+      result.attempt.blocker_reason = acceptance.rejectionReason;
+
+      if (!hasPricingSignal) {
+        return null;
+      }
+
+      const recoveredRecord = result.record ?? this.createRecoveredRecordFromSnapshot(task, run, result.attempt, parsed);
       if (!recoveredRecord) {
         return null;
       }
@@ -948,34 +1685,7 @@ export class ResearchOrchestrator {
       recoveredRecord.sale_or_listing_date = parsed.saleDate ?? recoveredRecord.sale_or_listing_date;
       recoveredRecord.price_hidden = parsed.priceHidden;
       recoveredRecord.raw_snapshot_path = rawSnapshotPath;
-
-      const nextSourceStatus: SourceAccessStatus = parsed.priceHidden ? "price_hidden" : result.attempt.source_access_status;
       recoveredRecord.source_access_status = nextSourceStatus;
-      result.attempt.source_access_status = nextSourceStatus;
-
-      result.attempt.extracted_fields = {
-        ...result.attempt.extracted_fields,
-        lot_number: parsed.lotNumber,
-        estimate_low: parsed.estimateLow,
-        estimate_high: parsed.estimateHigh,
-        price_type: parsed.priceType,
-        price_amount: parsed.priceAmount,
-        currency: parsed.currency,
-        buyers_premium_included: parsed.buyersPremiumIncluded
-      };
-
-      const acceptance = evaluateAcceptance(parsed, nextSourceStatus, {
-        sourceName: result.attempt.source_name,
-        sourcePageType: recoveredRecord.source_page_type
-      });
-
-      result.attempt.accepted = acceptance.acceptedForEvidence;
-      result.attempt.accepted_for_evidence = acceptance.acceptedForEvidence;
-      result.attempt.accepted_for_valuation = acceptance.acceptedForValuation;
-      result.attempt.valuation_lane = acceptance.valuationLane;
-      result.attempt.acceptance_reason = acceptance.acceptanceReason;
-      result.attempt.rejection_reason = acceptance.rejectionReason;
-      result.attempt.valuation_eligibility_reason = acceptance.valuationEligibilityReason;
 
       recoveredRecord.accepted_for_evidence = acceptance.acceptedForEvidence;
       recoveredRecord.accepted_for_valuation = acceptance.acceptedForValuation;
@@ -1113,7 +1823,9 @@ export class ResearchOrchestrator {
     valuationReason: string,
     discoveredCandidates: number,
     acceptedFromDiscovery: number,
-    sourceCandidateBreakdown: Record<string, number>
+    sourceCandidateBreakdown: Record<string, number>,
+    persistedSourceHealth: HostHealthRecord[],
+    sourcePlan: import("@artbot/shared-types").SourcePlanItem[]
   ): RunSummary {
     const sourceStatusBreakdown: Record<SourceAccessStatus, number> = {
       public_access: 0,
@@ -1143,6 +1855,7 @@ export class ResearchOrchestrator {
       asking_price_ready: 0,
       inquiry_only_evidence: 0,
       price_hidden_evidence: 0,
+      entity_mismatch: 0,
       generic_shell_page: 0,
       missing_numeric_price: 0,
       missing_currency: 0,
@@ -1193,6 +1906,13 @@ export class ResearchOrchestrator {
       auth_mode_breakdown: authModeBreakdown,
       failure_class_breakdown: failureClassBreakdown,
       acceptance_reason_breakdown: acceptanceReasonBreakdown,
+      evaluation_metrics: buildEvaluationMetrics({
+        attempts,
+        sourcePlan,
+        acceptedRecords: acceptedEvidenceRecords,
+        valuationEligibleRecords
+      }),
+      persisted_source_health: persistedSourceHealth,
       valuation_generated: valuationGenerated,
       valuation_reason: valuationReason
     };

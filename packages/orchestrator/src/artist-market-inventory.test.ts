@@ -15,6 +15,7 @@ function makeRun(): RunEntity {
       manualLoginCheckpoint: false,
       allowLicensed: false,
       licensedIntegrations: [],
+      preferredDiscoveryProviders: [],
       crawlMode: "backfill",
       sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
     },
@@ -162,7 +163,9 @@ describe("ArtistMarketInventoryOrchestrator buildRunSummary", () => {
         memberships: ClusterMembership[];
         reviewItems: ReviewItem[];
       },
-      inventorySummary: ArtistMarketInventorySummary
+      inventorySummary: ArtistMarketInventorySummary,
+      sourcePlan: any[],
+      persistedSourceHealth: any[]
     ) => any;
 
     const summary = buildRunSummary.call(
@@ -204,7 +207,9 @@ describe("ArtistMarketInventoryOrchestrator buildRunSummary", () => {
           estimate: { count: 0, min: null, avg: null, max: null }
         },
         crawl_gaps: []
-      }
+      },
+      [],
+      []
     ) as any;
 
     expect(summary.total_records).toBe(1);

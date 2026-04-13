@@ -120,4 +120,64 @@ describe("parseGenericLotFields numeric normalization", () => {
     expect(parsed.estimateHigh).toBe(65000);
     expect(parsed.currency).toBe("USD");
   });
+
+  it("treats inquiry-only pages with Shopify placeholder pricing as inquiry_only", () => {
+    const content = `
+      <html>
+        <head>
+          <title>ABIDIN DINO - PEYZAJ</title>
+        </head>
+        <body>
+          <h1>ABIDIN DINO - PEYZAJ</h1>
+          <span>Fiyat istek üzerine verilir. Daha fazla bilgi için lütfen bize ulasin.</span>
+          <select>
+            <option>Default Title - 1.00TL</option>
+          </select>
+          <script>
+            window.ShopifyAnalytics = {
+              meta: {
+                product: {
+                  variants: [{ price: 100 }]
+                }
+              }
+            };
+          </script>
+        </body>
+      </html>
+    `;
+
+    const parsed = parseGenericLotFields(content);
+    expect(parsed.priceType).toBe("inquiry_only");
+    expect(parsed.priceAmount).toBeNull();
+    expect(parsed.estimateLow).toBeNull();
+    expect(parsed.estimateHigh).toBeNull();
+    expect(parsed.currency).toBeNull();
+    expect(parsed.priceHidden).toBe(true);
+  });
+
+  it("does not infer asking_price from site chrome currency without numeric pricing", () => {
+    const content = `
+      <html>
+        <head>
+          <title>Artist Listing</title>
+          <meta property="og:title" content="Artist Listing" />
+        </head>
+        <body>
+          <header>
+            <a href="/currency">TRY</a>
+            <a href="/currency">USD</a>
+          </header>
+          <main>
+            <h1>Artist Listing</h1>
+            <p>Biography and exhibition history only.</p>
+          </main>
+        </body>
+      </html>
+    `;
+
+    const parsed = parseGenericLotFields(content);
+    expect(parsed.priceType).toBe("unknown");
+    expect(parsed.priceAmount).toBeNull();
+    expect(parsed.currency).toBeNull();
+  });
 });

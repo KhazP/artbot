@@ -6,7 +6,18 @@ import { schema } from "@json-render/react/schema";
 import { AlertTriangle, BarChart3, CheckCircle2, CircleDollarSign, ExternalLink, GlobeLock, ShieldAlert, Sparkles } from "lucide-react";
 import { z } from "zod";
 import { normalizeResearchRunReport } from "./normalize.js";
-import type { ResearchRunReportData, ReportComparable, ReportDistributionItem, ReportMetric, ReportRange, ReportReasonItem, ResearchRunReportItem, ReportTone } from "./types.js";
+import type {
+  ResearchRunReportData,
+  ReportAction,
+  ReportComparable,
+  ReportDistributionItem,
+  ReportMetric,
+  ReportRange,
+  ReportReasonItem,
+  ReportSourcePlanItem,
+  ResearchRunReportItem,
+  ReportTone
+} from "./types.js";
 
 function toneClasses(tone: ReportTone | undefined): string {
   switch (tone) {
@@ -132,6 +143,31 @@ const diagnosticsPropsSchema = z.object({
   notes: z.array(z.string())
 });
 
+const actionSchema = z.object({
+  title: z.string(),
+  reason: z.string(),
+  severity: z.enum(["info", "warning", "critical"])
+});
+
+const sourcePlanSchema = z.object({
+  sourceName: z.string(),
+  venueName: z.string(),
+  sourceFamily: z.string(),
+  accessMode: z.string(),
+  accessStatus: z.string(),
+  candidateCount: z.number(),
+  status: z.string(),
+  selectionState: z.string(),
+  selectionReason: z.string().nullable(),
+  priorityRank: z.number(),
+  skipReason: z.string().nullable()
+});
+
+const nextActionsPropsSchema = z.object({
+  actions: z.array(actionSchema),
+  sourcePlan: z.array(sourcePlanSchema)
+});
+
 const recordsTablePropsSchema = z.object({
   runType: z.string(),
   items: z.array(recordSchema)
@@ -162,6 +198,10 @@ const catalog = (defineCatalog as (...args: any[]) => any)(schema, {
     DiagnosticsPanel: {
       props: diagnosticsPropsSchema,
       description: "Diagnostics, blockers, and gap breakdown"
+    },
+    NextActionsPanel: {
+      props: nextActionsPropsSchema,
+      description: "Operator actions and source-plan visibility"
     },
     RecordsTable: {
       props: recordsTablePropsSchema,
@@ -388,6 +428,46 @@ const { registry } = defineRegistry(catalog, {
         </div>
       </div>
     ),
+    NextActionsPanel: ({ props }: { props: { actions: ReportAction[]; sourcePlan: ReportSourcePlanItem[] } }) => (
+      <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+        <div className="space-y-3">
+          {props.actions.length > 0 ? props.actions.map((action) => (
+            <div key={action.title} className={`rounded-2xl border p-4 ${toneClasses(action.severity === "critical" ? "danger" : action.severity === "warning" ? "warning" : "accent")}`}>
+              <div className="text-sm font-medium text-white">{action.title}</div>
+              <p className="mt-2 text-sm text-zinc-300">{action.reason}</p>
+            </div>
+          )) : (
+            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950/70 p-4 text-sm text-zinc-500">
+              No operator follow-up actions were generated for this run.
+            </div>
+          )}
+        </div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+          <h3 className="mb-3 text-sm font-medium uppercase tracking-[0.22em] text-zinc-500">Source plan</h3>
+          <div className="space-y-3">
+            {props.sourcePlan.length > 0 ? props.sourcePlan.slice(0, 8).map((item) => (
+              <div key={`${item.sourceName}-${item.venueName}`} className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-medium text-white">#{item.priorityRank} · {item.sourceName}</div>
+                    <div className="mt-1 text-xs text-zinc-500">{item.venueName} · {item.sourceFamily} · {item.accessMode.replace(/_/g, " ")}</div>
+                  </div>
+                  <div className={`rounded-full border px-2 py-1 text-xs ${toneClasses(item.selectionState === "blocked" ? "danger" : item.selectionState === "deprioritized" ? "warning" : "success")}`}>
+                    {item.selectionState}
+                  </div>
+                </div>
+                <div className="mt-2 text-sm text-zinc-300">
+                  {item.candidateCount} candidates · {item.accessStatus.replace(/_/g, " ")}
+                </div>
+                {item.selectionReason ? <div className="mt-2 text-xs text-sky-200">{item.selectionReason}</div> : item.skipReason ? <div className="mt-2 text-xs text-amber-200">{item.skipReason}</div> : null}
+              </div>
+            )) : (
+              <div className="text-sm text-zinc-500">No source plan data was included in the payload.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    ),
     RecordsTable: ({ props }: { props: { runType: string; items: ResearchRunReportItem[] } }) => (
       <div className="overflow-hidden rounded-2xl border border-zinc-800">
         <div className="overflow-x-auto">
@@ -489,7 +569,7 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
   const metrics = add("MetricGrid", { items: input.overviewMetrics });
   const sourceHealth = add("SourceHealthPanel", {
     items: input.sourceHealthItems,
-    coverage: input.coverageMetrics
+    coverage: [...input.coverageMetrics, ...input.evaluationMetrics]
   });
   const overview = add("Section", {
     title: "Overview",
@@ -507,6 +587,15 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
     title: "Valuation",
     subtitle: "Valuation outcome, range outputs, and highest-ranked comparable records."
   }, [valuation]);
+
+  const nextActions = add("NextActionsPanel", {
+    actions: input.recommendedActions,
+    sourcePlan: input.sourcePlan
+  });
+  const nextActionsSection = add("Section", {
+    title: "Next Actions",
+    subtitle: "Operator follow-up tasks and the source plan used for this run."
+  }, [nextActions]);
 
   const records = add("RecordsTable", {
     runType: input.runType,
@@ -535,7 +624,7 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
     runType: input.runType,
     analysisMode: input.analysisMode,
     createdAt: input.createdAt
-  }, [overview, valuationSection, recordsSection, diagnosticsSection]);
+  }, [overview, valuationSection, nextActionsSection, recordsSection, diagnosticsSection]);
 
   return {
     root,

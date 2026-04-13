@@ -91,6 +91,15 @@ export interface ReportSummary {
   source_status_breakdown?: Record<string, number>;
   acceptance_reason_breakdown?: Record<string, number>;
   valuation_reason?: string;
+  evaluation_metrics?: {
+    accepted_record_precision: number;
+    priced_source_recall: number;
+    source_completeness_ratio: number;
+    valuation_readiness_ratio: number;
+    manual_override_rate: number;
+    coverage_target: number;
+    coverage_target_met: boolean;
+  };
 }
 
 export interface ReportData {
@@ -235,9 +244,11 @@ function renderMarketOverview(data: ReportData): string {
     ["Evidence Records", String(s.evidence_records ?? 0)],
     ["Valuation Eligible", String(s.valuation_eligible_records ?? 0)],
     [
-      "Priced Coverage (Crawled)",
+      "Priced Evidence Coverage",
       (() => {
-        const ratio = s.priced_crawled_source_coverage_ratio ?? s.priced_source_coverage_ratio;
+        const ratio = s.evaluation_metrics?.valuation_readiness_ratio
+          ?? s.priced_crawled_source_coverage_ratio
+          ?? s.priced_source_coverage_ratio;
         if (ratio == null) return "n/a";
         const pct = Math.round(ratio * 100);
         const formatted = `${pct}%`;
@@ -246,8 +257,12 @@ function renderMarketOverview(data: ReportData): string {
     ],
   ];
 
+  if (s.priced_crawled_source_coverage_ratio != null) {
+    stats.push(["Priced Source Coverage (Crawled)", `${Math.round(s.priced_crawled_source_coverage_ratio * 100)}%`]);
+  }
+
   if (s.priced_crawled_source_coverage_ratio != null && s.priced_source_coverage_ratio != null) {
-    stats.push(["Priced Coverage (Attempted)", `${Math.round(s.priced_source_coverage_ratio * 100)}%`]);
+    stats.push(["Priced Source Coverage (Attempted)", `${Math.round(s.priced_source_coverage_ratio * 100)}%`]);
   }
 
   if (s.discovered_candidates) {
@@ -630,6 +645,7 @@ function renderBlockerSummary(data: ReportData): string {
     missing_estimate_range: "Estimate range incomplete",
     unknown_price_type: "Unknown price type",
     blocked_access: "Source blocked / unreachable",
+    entity_mismatch: "Entity mismatch rejected",
     generic_shell_page: "Generic shell/search page rejected",
     price_hidden_evidence: "Price hidden (logged in required)",
   };

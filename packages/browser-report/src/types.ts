@@ -34,6 +34,26 @@ export interface ReportComparable {
   valueLabel: string;
 }
 
+export interface ReportAction {
+  title: string;
+  reason: string;
+  severity: "info" | "warning" | "critical";
+}
+
+export interface ReportSourcePlanItem {
+  sourceName: string;
+  venueName: string;
+  sourceFamily: string;
+  accessMode: string;
+  accessStatus: string;
+  candidateCount: number;
+  status: string;
+  selectionState: string;
+  selectionReason: string | null;
+  priorityRank: number;
+  skipReason: string | null;
+}
+
 export interface ResearchRunReportItem {
   id: string;
   title: string;
@@ -83,8 +103,11 @@ export interface ResearchRunReportData {
   sourceHealthItems: ReportDistributionItem[];
   overviewMetrics: ReportMetric[];
   coverageMetrics: ReportMetric[];
+  evaluationMetrics: ReportMetric[];
   valuation: ResearchRunValuation;
   records: ResearchRunReportItem[];
+  recommendedActions: ReportAction[];
+  sourcePlan: ReportSourcePlanItem[];
   reasonBreakdown: ReportReasonItem[];
   failureBreakdown: ReportReasonItem[];
   gaps: string[];

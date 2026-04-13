@@ -97,6 +97,12 @@ function inferCurrency(text: string): string | null {
   return null;
 }
 
+function containsInquiryOnlyIndicators(text: string): boolean {
+  return /price on request|inquire|iletişime geçiniz|fiyat sorunuz|fiyat istek üzerine verilir|daha fazla bilgi için lütfen bize ulaşın/i.test(
+    text
+  );
+}
+
 function normalizeCurrencyToken(token: string | null): string | null {
   if (!token) return null;
   const normalized = token.trim().toUpperCase();
@@ -156,21 +162,51 @@ function sanitizeTitle(value: string | null | undefined): string | null {
   return cleaned;
 }
 
+function isGenericTitle(value: string | null | undefined): boolean {
+  const normalized = sanitizeTitle(value)?.toLowerCase() ?? "";
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    /\bkatalog\b/i,
+    /\blisting\b/i,
+    /\blot detail\b/i,
+    /\bsonu[cç]\b/i,
+    /\barchive\b/i,
+    /\bar[şs]iv\b/i,
+    /\bhemen al\b/i,
+    /^portakal\b/i,
+    /^bayrak m[üu]zayede\b/i,
+    /^sanatfiyat\b/i,
+    /^invaluable\b/i,
+    /^liveauctioneers\b/i,
+    /^muzayede app\b/i,
+    /^clar\b/i
+  ].some((pattern) => pattern.test(normalized));
+}
+
 function extractTitle(content: string): string | null {
   if (/<[a-z][\s\S]*>/i.test(content)) {
     const $ = load(content);
     const candidates = [
       $("meta[property='og:title']").attr("content"),
       $("meta[name='twitter:title']").attr("content"),
-      $("title").first().text(),
-      $("h1").first().text()
+      $("h1").first().text(),
+      $("h2").first().text(),
+      $("title").first().text()
     ];
+    let genericFallback: string | null = null;
     for (const candidate of candidates) {
       const title = sanitizeTitle(candidate);
       if (title) {
-        return title;
+        if (!isGenericTitle(title)) {
+          return title;
+        }
+        genericFallback ??= title;
       }
     }
+    return genericFallback;
   }
 
   const textTitle = content.match(/(?:title|eser adı|work title)\s*[:\-]\s*([^\n|]{3,150})/i)?.[1];
@@ -489,7 +525,7 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
   const jsonLd = parseJsonLd(content);
   const scriptPayload = extractScriptPayloadFields(content);
 
-  const lotMatch = text.match(/(?:\blot\b|lot no|lot nr|lot#|lot numarası)\s*[:#]?\s*([a-z0-9-]+)/i);
+  const lotMatch = text.match(/(?:lot no|lot nr|lot#|lot numarası|\blot\b)\s*[:#]?\s*([a-z0-9-]+)/i);
   const estMatch = text.match(
     /(?:estimate|estimated|estimate range|tahmini|ekspertiz)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)\s*(?:-|to|–|—)\s*([\d.,\s₺$€A-Za-z]+)/i
   );
@@ -503,7 +539,7 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
     /(?:asking price|buy now|hemen al|price|fiyat)\s*[:\-]?\s*([\d.,\s₺$€A-Za-z]+)/i
   );
 
-  const inquiryOnly = /price on request|inquire|iletişime geçiniz|fiyat sorunuz/i.test(text);
+  const inquiryOnly = containsInquiryOnlyIndicators(text);
 
   let priceType: PriceType = jsonLd.priceType !== "unknown" ? jsonLd.priceType : scriptPayload.priceType;
   let priceAmount: number | null = jsonLd.priceAmount ?? scriptPayload.priceAmount;
@@ -553,7 +589,19 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
 
   const saleDateMatch = text.match(/(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}-\d{2}-\d{2})/);
   const currencyMatches = extractCurrencyAmounts(text);
-  let currency = inferCurrency(text) ?? jsonLd.currency ?? scriptPayload.currency ?? currencyMatches[0]?.currency ?? null;
+  const hasExplicitPriceSignal =
+    Boolean(estMatch) ||
+    Boolean(realizedMatch) ||
+    Boolean(askMatch) ||
+    priceAmount !== null ||
+    estimateLow !== null ||
+    estimateHigh !== null;
+  let currency: string | null =
+    jsonLd.currency ??
+    scriptPayload.currency ??
+    currencyMatches[0]?.currency ??
+    (hasExplicitPriceSignal ? inferCurrency(text) : null) ??
+    null;
   const currencyAmounts = currencyMatches
     .filter((entry) => !currency || entry.currency === currency)
     .map((entry) => entry.amount)
@@ -597,6 +645,21 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
       currency = currencyMatches[0]?.currency ?? null;
     }
   }
+
+  if (inquiryOnly || (priceAmount !== null && priceAmount <= 1 && containsInquiryOnlyIndicators(text))) {
+    priceType = "inquiry_only";
+    priceAmount = null;
+    estimateLow = null;
+    estimateHigh = null;
+    currency = null;
+  }
+
+  const hasResolvedNumericSignal = priceAmount !== null || estimateLow !== null || estimateHigh !== null;
+  if (!hasResolvedNumericSignal && priceType !== "inquiry_only") {
+    priceType = "unknown";
+    currency = null;
+  }
+
   const artistMatch = text.match(/(?:artist|sanatçı|sanatci)\s*[:\-]\s*([^|]{3,120})/i);
   const mediumMatch = text.match(/(?:medium|teknik|material)\s*[:\-]\s*([^|]{3,120})/i);
   const dimensionsMatch = text.match(

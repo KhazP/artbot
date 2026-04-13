@@ -35,8 +35,9 @@ import {
   type SourceHost
 } from "@artbot/shared-types";
 import { type SourceCandidate, type SourceAdapter } from "@artbot/source-adapters";
-import { planSources, SourceRegistry, type PlannedSource } from "@artbot/source-registry";
-import { ArtbotStorage, artistKeyFromName } from "@artbot/storage";
+import { buildDiscoveryConfigFromEnv, buildSourcePlanItems, planSources, SourceRegistry, type PlannedSource } from "@artbot/source-registry";
+import { ArtbotStorage, artistKeyFromName, buildDefaultGcPolicyFromEnv, buildRunArtifactManifest, writeArtifactManifest } from "@artbot/storage";
+import { buildEvaluationMetrics, buildRecommendedActions } from "./run-insights.js";
 
 interface TargetImageFeatures {
   sha256: string;
@@ -283,12 +284,20 @@ export class ArtistMarketInventoryOrchestrator {
 
     const targetFeatures = await this.loadTargetImageFeatures(run.query.imagePath);
     const plannedSources = await this.planInventorySources(run);
+    const sourcePlan = buildSourcePlanItems(
+      plannedSources,
+      buildDiscoveryConfigFromEnv(run.query.analysisMode).maxCandidatesPerSource,
+      run.query.analysisMode
+    );
+    const selectedSourceIds = new Set(
+      sourcePlan.filter((item) => item.selection_state === "selected").map((item) => item.adapter_id)
+    );
     const sourceRuntime = new Map<string, SourceRuntimeStats>();
     const sourceContexts = new Map<string, { planned: PlannedSource; host: string }>();
     const gaps: string[] = [];
     let discoveredHosts = 0;
 
-    for (const planned of plannedSources) {
+    for (const planned of plannedSources.filter((entry) => selectedSourceIds.has(entry.adapter.id))) {
       const seedHost = hostFromUrl(planned.candidates[0]?.url ?? "");
       if (!seedHost) {
         continue;
@@ -497,7 +506,17 @@ export class ArtistMarketInventoryOrchestrator {
       gaps,
       sourceRuntime
     );
-    const summary = this.buildRunSummary(run, attempts, currentRunRecords, clustered, inventorySummary);
+    const persistedHostHealth = this.storage.listHostHealth(12);
+    const summary = this.buildRunSummary(run, attempts, currentRunRecords, clustered, inventorySummary, sourcePlan, persistedHostHealth);
+    const evaluationMetrics = summary.evaluation_metrics;
+    const recommendedActions = buildRecommendedActions({
+      sourcePlan,
+      attempts,
+      acceptedRecords: summary.accepted_records,
+      discoveredCandidates: summary.discovered_candidates,
+      hostHealth: persistedHostHealth,
+      evaluationMetrics
+    });
 
     this.storage.replaceClustersForArtist(artistKey, clustered.clusters, clustered.memberships, clustered.reviewItems);
     for (const record of clustered.inventory) {
@@ -542,6 +561,9 @@ export class ArtistMarketInventoryOrchestrator {
     writeJsonFile(resultsPath, {
       run,
       summary,
+      source_plan: sourcePlan,
+      recommended_actions: recommendedActions,
+      persisted_source_health: persistedHostHealth,
       inventory_summary: inventorySummary,
       inventory: clustered.inventory,
       clusters: clustered.clusters,
@@ -560,13 +582,24 @@ export class ArtistMarketInventoryOrchestrator {
       }
     });
 
+    const artifactManifest = buildRunArtifactManifest({
+      runId: run.id,
+      runRoot,
+      reportPath,
+      resultsPath,
+      attempts,
+      extraPaths: [inventoryPath, clustersPath, reviewQueuePath, inventoryCsvPath, clustersCsvPath, reviewCsvPath],
+      policy: buildDefaultGcPolicyFromEnv()
+    });
+    writeArtifactManifest(runRoot, artifactManifest);
+
     this.storage.completeRun(run.id, reportPath, resultsPath);
   }
 
   private async planInventorySources(run: RunEntity): Promise<PlannedSource[]> {
     const allowedClasses = new Set(run.query.sourceClasses ?? ["auction_house", "gallery", "dealer", "marketplace", "database"]);
     const adapters = this.registry.list().filter((adapter) => allowedClasses.has(adapter.venueType));
-    return planSources(run.query, adapters, this.authManager);
+    return planSources(run.query, adapters, this.authManager, this.storage.listHostHealth(50));
   }
 
   private toSourceHost(planned: PlannedSource, host: string, mode: SourceHost["host_status"] = "seeded"): Omit<SourceHost, "id" | "created_at" | "updated_at"> {
@@ -1099,7 +1132,9 @@ export class ArtistMarketInventoryOrchestrator {
     attempts: SourceAttempt[],
     _currentRunRecords: PriceRecord[],
     clustered: ClusterBuildResult,
-    inventorySummary: ArtistMarketInventorySummary
+    inventorySummary: ArtistMarketInventorySummary,
+    sourcePlan: import("@artbot/shared-types").SourcePlanItem[],
+    persistedSourceHealth: import("@artbot/shared-types").HostHealthRecord[]
   ): RunSummary {
     const inventoryPriceBreakdown = inventorySummary.price_type_breakdown;
     const currentRunInventory = clustered.inventory.filter((record) => record.run_id === run.id);
@@ -1132,18 +1167,38 @@ export class ArtistMarketInventoryOrchestrator {
       acceptanceReasonBreakdown[attempt.acceptance_reason] += 1;
     }
 
+    const attemptedSources = new Set(attempts.map((attempt) => attempt.source_name));
+    const crawledSources = new Set(
+      attempts.filter((attempt) => attempt.source_access_status !== "blocked" && attempt.source_access_status !== "auth_required").map((attempt) => attempt.source_name)
+    );
+    const pricedSources = new Set(
+      attempts
+        .filter(
+          (attempt) =>
+            attempt.acceptance_reason === "valuation_ready"
+            || attempt.acceptance_reason === "estimate_range_ready"
+            || attempt.acceptance_reason === "asking_price_ready"
+        )
+        .map((attempt) => attempt.source_name)
+    );
+    const currentRunValuationEligible = currentRunInventory.filter((record) => record.payload.accepted_for_valuation).length;
+    const pricedSourceCoverageRatio =
+      attemptedSources.size === 0 ? 0 : Number((pricedSources.size / attemptedSources.size).toFixed(4));
+    const pricedCrawledSourceCoverageRatio =
+      crawledSources.size === 0 ? 0 : Number((pricedSources.size / crawledSources.size).toFixed(4));
+
     return {
       run_id: run.id,
       total_records: currentRunInventory.length,
       total_attempts: attempts.length,
       evidence_records: currentRunInventory.length,
-      valuation_eligible_records: currentRunInventory.filter((record) => record.payload.accepted_for_valuation).length,
+      valuation_eligible_records: currentRunValuationEligible,
       accepted_records: currentRunInventory.length,
       rejected_candidates: attempts.filter((attempt) => !(attempt.accepted_for_evidence ?? attempt.accepted)).length,
       discovered_candidates: attempts.filter((attempt) => (attempt.discovery_provenance ?? "seed") !== "seed").length,
       accepted_from_discovery: currentRunInventory.filter((record) => isDiscoveryBackedRecord(record.payload)).length,
-      priced_source_coverage_ratio: undefined,
-      priced_crawled_source_coverage_ratio: undefined,
+      priced_source_coverage_ratio: pricedSourceCoverageRatio,
+      priced_crawled_source_coverage_ratio: pricedCrawledSourceCoverageRatio,
       price_type_breakdown: {
         realized:
           (inventoryPriceBreakdown.realized_price ?? 0) +
@@ -1165,6 +1220,14 @@ export class ArtistMarketInventoryOrchestrator {
       auth_mode_breakdown: authModeBreakdown,
       failure_class_breakdown: failureClassBreakdown,
       acceptance_reason_breakdown: acceptanceReasonBreakdown,
+      evaluation_metrics: buildEvaluationMetrics({
+        attempts,
+        sourcePlan,
+        acceptedRecords: currentRunInventory.length,
+        valuationEligibleRecords: currentRunValuationEligible,
+        manualOverrideCount: clustered.reviewItems.filter((item) => item.status !== "pending").length
+      }),
+      persisted_source_health: persistedSourceHealth,
       valuation_generated: false,
       valuation_reason: "Deep inventory run reports separated price stats instead of a blended valuation range."
     };

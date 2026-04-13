@@ -244,7 +244,12 @@ function PrimaryPane(props: {
   const records = run?.records ?? [];
   const attempts = run?.attempts ?? [];
   const elapsed = props.runStartedAt ? formatElapsed(Math.floor((Date.now() - props.runStartedAt) / 1000)) : undefined;
-  const coverage = Math.round((summary?.priced_crawled_source_coverage_ratio ?? summary?.priced_source_coverage_ratio ?? 0) * 100);
+  const coverage = Math.round(
+    (summary?.evaluation_metrics?.valuation_readiness_ratio
+      ?? summary?.priced_crawled_source_coverage_ratio
+      ?? summary?.priced_source_coverage_ratio
+      ?? 0) * 100
+  );
   const tone = props.primaryView === "completed" ? "success" : props.primaryView === "failed" ? "danger" : "accent";
 
   return (
@@ -342,13 +347,18 @@ function SidePanePanel(props: {
         accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
       >
         {(props.assessment?.sessionStates ?? []).map((session) => {
-          const tone = session.exists ? (session.expired ? props.theme.colors.warning : props.theme.colors.success) : props.theme.colors.danger;
+          const tone = session.riskyReason
+            ? props.theme.colors.warning
+            : session.exists
+              ? (session.expired ? props.theme.colors.warning : props.theme.colors.success)
+              : props.theme.colors.danger;
           return (
             <Box key={session.profileId} flexDirection="column" marginBottom={1}>
               <Text color={tone}>
-                {session.profileId}: {session.exists ? (session.expired ? "expired" : "ready") : "missing"}
+                {session.profileId}: {session.exists ? (session.expired ? "expired" : "ready") : "missing"} · {session.encryptedAtRest ? "encrypted" : "plaintext"}
               </Text>
               <Text color={props.theme.colors.muted}>{session.storageStatePath}</Text>
+              {session.riskyReason ? <Text color={props.theme.colors.warning}>{session.riskyReason}</Text> : null}
             </Box>
           );
         })}
