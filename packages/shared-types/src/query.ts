@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { crawlModeSchema, sourceClassSchema } from "./inventory.js";
+import { discoveryProviderSchema } from "./operations.js";
 
 export const researchQuerySchema = z.object({
   artist: z.string().min(1),
@@ -30,6 +31,7 @@ export const researchQuerySchema = z.object({
   manualLoginCheckpoint: z.boolean().default(false),
   allowLicensed: z.boolean().default(false),
   licensedIntegrations: z.array(z.string()).default([]),
+  preferredDiscoveryProviders: z.array(discoveryProviderSchema).default([]),
   crawlMode: crawlModeSchema.default("backfill"),
   sourceClasses: z
     .array(sourceClassSchema)

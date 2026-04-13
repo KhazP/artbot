@@ -4,12 +4,17 @@ export interface AuthProfile {
   id: string;
   mode: Exclude<AccessMode, "anonymous">;
   sourcePatterns: string[];
+  sourceScope?: string[];
   cookieFile?: string;
   usernameEnv?: string;
   passwordEnv?: string;
   apiKeyEnv?: string;
   storageStatePath?: string;
   sessionTtlMinutes?: number;
+  expiresAt?: string;
+  sensitivity?: "standard" | "sensitive" | "licensed";
+  encryptionMode?: "none" | "aes-256-gcm";
+  encryptionKeyEnv?: string;
 }
 
 export interface CredentialRefs {
@@ -41,4 +46,11 @@ export interface ResolveAccessInput {
   manualLoginCheckpoint?: boolean;
   cookieFile?: string;
   licensedIntegrations?: string[];
+}
+
+export interface MaterializedSessionState {
+  browserPath?: string;
+  targetPath?: string;
+  encryptedAtRest: boolean;
+  cleanup: () => void;
 }

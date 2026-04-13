@@ -41,12 +41,18 @@ importers:
 
   apps/api:
     dependencies:
+      '@artbot/auth-manager':
+        specifier: workspace:*
+        version: link:../../packages/auth-manager
       '@artbot/orchestrator':
         specifier: workspace:*
         version: link:../../packages/orchestrator
       '@artbot/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@artbot/source-registry':
+        specifier: workspace:*
+        version: link:../../packages/source-registry
       '@artbot/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -135,12 +141,24 @@ importers:
         specifier: ^3.24.2
         version: 3.25.76
     devDependencies:
+      '@artbot/auth-manager':
+        specifier: workspace:*
+        version: link:../../packages/auth-manager
       '@artbot/browser-report':
         specifier: workspace:*
         version: link:../../packages/browser-report
+      '@artbot/extraction':
+        specifier: workspace:*
+        version: link:../../packages/extraction
       '@artbot/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@artbot/source-adapters':
+        specifier: workspace:*
+        version: link:../../packages/source-adapters
+      '@artbot/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@types/figlet':
         specifier: ^1.7.0
         version: 1.7.0

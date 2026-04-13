@@ -11,8 +11,10 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@artbot/auth-manager": "workspace:*",
     "@artbot/orchestrator": "workspace:*",
     "@artbot/shared-types": "workspace:*",
+    "@artbot/source-registry": "workspace:*",
     "@artbot/storage": "workspace:*",
     "@fastify/cors": "^11.0.1",
     "dotenv": "^16.4.7",

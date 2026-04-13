@@ -11,6 +11,7 @@ import type {
   FrontierItem,
   FrontierStatus,
   InventoryRecord,
+  HostHealthRecord,
   PriceRecord,
   PriceSemanticLane,
   ResearchQuery,
@@ -50,6 +51,22 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function isSqliteBusyError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const sqliteError = error as Error & { errcode?: number; errstr?: string };
+  return sqliteError.errcode === 5 || /database is locked/i.test(sqliteError.message) || /database is locked/i.test(sqliteError.errstr ?? "");
+}
+
+function sleepSync(ms: number): void {
+  const until = Date.now() + Math.max(0, ms);
+  while (Date.now() < until) {
+    // Busy wait only on short SQLite contention backoff windows.
+  }
+}
+
 function stablePairKey(left: string, right: string): string {
   return [left, right].sort().join("::");
 }
@@ -81,7 +98,41 @@ export class ArtbotStorage {
 
     this.db = new DatabaseSync(databasePath);
     this.runsRoot = runsRoot;
+    try {
+      this.db.exec("PRAGMA busy_timeout = 5000;");
+    } catch {
+      // Ignore best-effort busy timeout setup failures during process bootstrap.
+    }
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        this.db.exec(`
+          PRAGMA journal_mode = WAL;
+          PRAGMA synchronous = NORMAL;
+        `);
+        break;
+      } catch (error) {
+        if (!isSqliteBusyError(error) || attempt === 3) {
+          break;
+        }
+        sleepSync(75 * (attempt + 1));
+      }
+    }
     this.init();
+  }
+
+  private withBusyRetry<T>(operation: () => T, retries = 4): T {
+    let attempt = 0;
+    while (true) {
+      try {
+        return operation();
+      } catch (error) {
+        if (!isSqliteBusyError(error) || attempt >= retries) {
+          throw error;
+        }
+        attempt += 1;
+        sleepSync(75 * attempt);
+      }
+    }
   }
 
   private init(): void {
@@ -129,6 +180,12 @@ export class ArtbotStorage {
         host TEXT NOT NULL UNIQUE,
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS host_health (
+        host TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
 
@@ -221,19 +278,21 @@ export class ArtbotStorage {
     const now = new Date().toISOString();
     const id = uuidv4();
 
-    this.db
-      .prepare(
-        `INSERT INTO runs (id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at)
-         VALUES (@id, @run_type, @query_json, @status, NULL, NULL, NULL, @created_at, @updated_at)`
-      )
-      .run({
-        id,
-        run_type: runType,
-        query_json: JSON.stringify(query),
-        status: "pending",
-        created_at: now,
-        updated_at: now
-      });
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `INSERT INTO runs (id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at)
+           VALUES (@id, @run_type, @query_json, @status, NULL, NULL, NULL, @created_at, @updated_at)`
+        )
+        .run({
+          id,
+          run_type: runType,
+          query_json: JSON.stringify(query),
+          status: "pending",
+          created_at: now,
+          updated_at: now
+        })
+    );
 
     return {
       id,
@@ -304,22 +363,24 @@ export class ArtbotStorage {
     const now = new Date();
     const nowIso = now.toISOString();
     const leaseExpiresAt = new Date(now.getTime() + Math.max(1, leaseMs)).toISOString();
-    const result = this.db
-      .prepare(
-        `UPDATE runs
-         SET status = 'running',
-             updated_at = ?,
-             lease_owner = ?,
-             lease_expires_at = ?,
-             heartbeat_at = ?,
-             error = NULL
-         WHERE id = ?
-           AND (
-             status = 'pending'
-             OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
-           )`
-      )
-      .run(nowIso, workerId, leaseExpiresAt, nowIso, runId, nowIso);
+    const result = this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET status = 'running',
+               updated_at = ?,
+               lease_owner = ?,
+               lease_expires_at = ?,
+               heartbeat_at = ?,
+               error = NULL
+           WHERE id = ?
+             AND (
+               status = 'pending'
+               OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+             )`
+        )
+        .run(nowIso, workerId, leaseExpiresAt, nowIso, runId, nowIso)
+    );
 
     return result.changes > 0;
   }
@@ -329,17 +390,19 @@ export class ArtbotStorage {
     const nowIso = now.toISOString();
     const leaseExpiresAt = new Date(now.getTime() + Math.max(1, leaseMs)).toISOString();
 
-    const result = this.db
-      .prepare(
-        `UPDATE runs
-         SET updated_at = ?,
-             heartbeat_at = ?,
-             lease_expires_at = ?
-         WHERE id = ?
-           AND status = 'running'
-           AND lease_owner = ?`
-      )
-      .run(nowIso, nowIso, leaseExpiresAt, runId, workerId);
+    const result = this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET updated_at = ?,
+               heartbeat_at = ?,
+               lease_expires_at = ?
+           WHERE id = ?
+             AND status = 'running'
+             AND lease_owner = ?`
+        )
+        .run(nowIso, nowIso, leaseExpiresAt, runId, workerId)
+    );
 
     return result.changes > 0;
   }
@@ -391,47 +454,55 @@ export class ArtbotStorage {
 
   public completeRun(runId: string, reportPath: string, resultsPath: string): void {
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `UPDATE runs
-         SET status = 'completed',
-             report_path = ?,
-             results_path = ?,
-             updated_at = ?,
-             lease_owner = NULL,
-             lease_expires_at = NULL,
-             heartbeat_at = NULL
-         WHERE id = ?`
-      )
-      .run(reportPath, resultsPath, now, runId);
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET status = 'completed',
+               report_path = ?,
+               results_path = ?,
+               updated_at = ?,
+               lease_owner = NULL,
+               lease_expires_at = NULL,
+               heartbeat_at = NULL
+           WHERE id = ?`
+        )
+        .run(reportPath, resultsPath, now, runId)
+    );
   }
 
   public failRun(runId: string, error: string): void {
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `UPDATE runs
-         SET status = 'failed',
-             error = ?,
-             updated_at = ?,
-             lease_owner = NULL,
-             lease_expires_at = NULL,
-             heartbeat_at = NULL
-         WHERE id = ?`
-      )
-      .run(error, now, runId);
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET status = 'failed',
+               error = ?,
+               updated_at = ?,
+               lease_owner = NULL,
+               lease_expires_at = NULL,
+               heartbeat_at = NULL
+           WHERE id = ?`
+        )
+        .run(error, now, runId)
+    );
   }
 
   public saveRecord(runId: string, record: PriceRecord): void {
-    this.db
-      .prepare(`INSERT INTO records (id, run_id, payload_json, created_at) VALUES (?, ?, ?, ?)`)
-      .run(uuidv4(), runId, JSON.stringify(record), new Date().toISOString());
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(`INSERT INTO records (id, run_id, payload_json, created_at) VALUES (?, ?, ?, ?)`)
+        .run(uuidv4(), runId, JSON.stringify(record), new Date().toISOString())
+    );
   }
 
   public saveAttempt(runId: string, attempt: SourceAttempt): void {
-    this.db
-      .prepare(`INSERT INTO source_attempts (id, run_id, payload_json, created_at) VALUES (?, ?, ?, ?)`)
-      .run(uuidv4(), runId, JSON.stringify(attempt), new Date().toISOString());
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(`INSERT INTO source_attempts (id, run_id, payload_json, created_at) VALUES (?, ?, ?, ?)`)
+        .run(uuidv4(), runId, JSON.stringify(attempt), new Date().toISOString())
+    );
   }
 
   public upsertSourceHost(
@@ -476,6 +547,54 @@ export class ArtbotStorage {
       payload_json: string;
     }>;
     return parsePayloadRows<SourceHost>(rows);
+  }
+
+  public recordHostAttempt(host: string, attempt: SourceAttempt): HostHealthRecord {
+    const existing = this.getHostHealth(host);
+    const success = Boolean(attempt.accepted_for_evidence ?? attempt.accepted) && !attempt.failure_class;
+    const now = nowIso();
+    const next: HostHealthRecord = {
+      host,
+      total_attempts: (existing?.total_attempts ?? 0) + 1,
+      success_count: (existing?.success_count ?? 0) + (success ? 1 : 0),
+      blocked_count: (existing?.blocked_count ?? 0) + (attempt.source_access_status === "blocked" ? 1 : 0),
+      auth_required_count: (existing?.auth_required_count ?? 0) + (attempt.source_access_status === "auth_required" ? 1 : 0),
+      failure_count:
+        (existing?.failure_count ?? 0) +
+        (attempt.failure_class || attempt.source_access_status === "blocked" ? 1 : 0),
+      consecutive_failures: success ? 0 : (existing?.consecutive_failures ?? 0) + 1,
+      reliability_score: 0,
+      last_status: attempt.source_access_status,
+      last_failure_class: attempt.failure_class ?? null,
+      last_attempt_at: attempt.fetched_at,
+      updated_at: now
+    };
+    next.reliability_score = Number((next.success_count / Math.max(1, next.total_attempts)).toFixed(4));
+
+    this.db
+      .prepare(
+        `INSERT INTO host_health (host, payload_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(host)
+         DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+      )
+      .run(host, JSON.stringify(next), now);
+
+    return next;
+  }
+
+  public getHostHealth(host: string): HostHealthRecord | null {
+    const row = this.db.prepare(`SELECT payload_json FROM host_health WHERE host = ?`).get(host) as
+      | { payload_json: string }
+      | undefined;
+    return row ? (JSON.parse(row.payload_json) as HostHealthRecord) : null;
+  }
+
+  public listHostHealth(limit = 50): HostHealthRecord[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM host_health ORDER BY updated_at DESC LIMIT ?`)
+      .all(limit) as Array<{ payload_json: string }>;
+    return parsePayloadRows<HostHealthRecord>(rows);
   }
 
   public enqueueFrontierItem(
@@ -912,6 +1031,10 @@ export class ArtbotStorage {
     fs.mkdirSync(path.join(target, "images"), { recursive: true });
     fs.mkdirSync(path.join(target, "exports"), { recursive: true });
     return target;
+  }
+
+  public getRunsRoot(): string {
+    return this.runsRoot;
   }
 
   public getRunDetails(runId: string): RunDetails | null {

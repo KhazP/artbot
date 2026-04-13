@@ -6,6 +6,7 @@ import type {
   SourceAdapter,
   SourceCandidate
 } from "../types.js";
+import { deriveDefaultSourceCapabilities as buildDefaultCapabilities } from "../types.js";
 import {
   buildBlockedResult,
   buildRecordFromParsed,
@@ -30,6 +31,7 @@ interface GenericAdapterOptions {
   requiresLicense?: boolean;
   supportedAccessModes?: SourceAdapter["supportedAccessModes"];
   crawlStrategies?: SourceAdapter["crawlStrategies"];
+  capabilities?: SourceAdapter["capabilities"];
 }
 
 export class GenericSourceAdapter implements SourceAdapter {
@@ -45,6 +47,7 @@ export class GenericSourceAdapter implements SourceAdapter {
   public readonly requiresLicense: boolean;
   public readonly supportedAccessModes: SourceAdapter["supportedAccessModes"];
   public readonly crawlStrategies: SourceAdapter["crawlStrategies"];
+  public readonly capabilities: SourceAdapter["capabilities"];
   private readonly baseUrl: string;
   private readonly searchPath: string;
 
@@ -63,6 +66,13 @@ export class GenericSourceAdapter implements SourceAdapter {
     this.requiresLicense = Boolean(options.requiresLicense);
     this.supportedAccessModes = options.supportedAccessModes ?? ["anonymous", "authorized", "licensed"];
     this.crawlStrategies = options.crawlStrategies ?? ["search", "listing_to_lot"];
+    this.capabilities = options.capabilities ?? buildDefaultCapabilities({
+      id: this.id,
+      supportedAccessModes: this.supportedAccessModes,
+      requiresAuth: this.requiresAuth,
+      sourcePageType: this.sourcePageType,
+      crawlStrategies: this.crawlStrategies
+    });
   }
 
   public async discoverCandidates(query: AdapterExtractionContext["query"]): Promise<SourceCandidate[]> {
@@ -95,7 +105,10 @@ export class GenericSourceAdapter implements SourceAdapter {
     const sourceStatus = parsed.priceHidden ? "price_hidden" : decision.sourceAccessStatus;
     const acceptance = evaluateAcceptance(parsed, sourceStatus, {
       sourceName: this.sourceName,
-      sourcePageType: candidate.sourcePageType
+      sourcePageType: candidate.sourcePageType,
+      candidateUrl: candidate.url,
+      queryArtist: context.query.artist,
+      queryTitle: context.query.title
     });
 
     const record = buildRecordFromParsed(

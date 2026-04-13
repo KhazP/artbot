@@ -1,4 +1,4 @@
-import type { ResearchQuery, SourcePageType } from "@artbot/shared-types";
+import type { DiscoveryProviderDiagnostics, DiscoveryProviderName, ResearchQuery, SourcePageType } from "@artbot/shared-types";
 import type { SourceCandidate } from "@artbot/source-adapters";
 
 export interface DiscoveryConfig {
@@ -10,8 +10,11 @@ export interface DiscoveryConfig {
   maxUrlsPerDiscoveredDomain: number;
   maxTotalCandidatesPerRun: number;
   webDiscoveryEnabled: boolean;
-  webDiscoveryProvider: "brave" | "none";
+  webDiscoveryProvider: DiscoveryProviderName;
+  webDiscoverySecondaryProvider?: DiscoveryProviderName;
   webDiscoveryApiKey?: string;
+  webDiscoverySecondaryApiKey?: string;
+  webDiscoveryDiagnostics?: DiscoveryProviderDiagnostics[];
   webDiscoveryAllowHostRegex?: string;
   webDiscoveryBlockHostTokens: string[];
   webDiscoveryPreferredHostTokens?: string[];
@@ -36,6 +39,16 @@ interface BraveSearchPayload {
   web?: {
     results?: BraveSearchResult[];
   };
+}
+
+interface TavilySearchPayload {
+  results?: Array<{ url?: string }>;
+}
+
+interface DiscoveryProviderClient {
+  name: Exclude<DiscoveryProviderName, "none">;
+  configured(config: DiscoveryConfig): boolean;
+  search(variant: string, config: DiscoveryConfig, fetchImpl: typeof fetch): Promise<string[]>;
 }
 
 const PROFILE_DEFAULTS: Record<ResearchQuery["analysisMode"], DiscoveryProfileDefaults> = {
@@ -120,6 +133,24 @@ const DEFAULT_DISCOVERY_LOW_QUALITY_HOST_TOKENS = [
   "tumblr"
 ];
 
+const TURKEY_PRIORITY_SITE_HOSTS = [
+  "rportakal.com",
+  "clarmuzayede.com",
+  "artam.com",
+  "muzayede.app",
+  "sanatfiyat.com",
+  "bayrakmuzayede.com"
+];
+
+const INTERNATIONAL_PRIORITY_SITE_HOSTS = [
+  "liveauctioneers.com",
+  "invaluable.com",
+  "sothebys.com",
+  "phillips.com",
+  "christies.com",
+  "bonhams.com"
+];
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -135,6 +166,16 @@ function toPositiveInt(rawValue: string | undefined, fallback: number): number {
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return value.trim().toLowerCase() === "true";
+}
+
+function decodeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&#x27;/g, "'")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 function parseCsv(value: string | undefined, fallback: string[]): string[] {
@@ -164,9 +205,20 @@ function normalizeUrl(candidateUrl: string): string | null {
     parsed.hash = "";
     for (const key of [...parsed.searchParams.keys()]) {
       const lower = key.toLowerCase();
-      if (lower.startsWith("utm_") || lower === "gclid" || lower === "fbclid" || lower === "ref") {
+      if (
+        lower.startsWith("utm_")
+        || lower === "gclid"
+        || lower === "fbclid"
+        || lower === "ref"
+        || lower === "_pos"
+        || lower === "_sid"
+        || lower === "_ss"
+      ) {
         parsed.searchParams.delete(key);
       }
+    }
+    if (parsed.pathname.toLowerCase().endsWith(".oembed")) {
+      return null;
     }
     return parsed.toString();
   } catch {
@@ -208,7 +260,12 @@ function isHostAllowed(host: string, config: DiscoveryConfig): boolean {
 
 function inferSourcePageType(url: string): SourcePageType {
   const lower = url.toLowerCase();
-  if (/(\/lot\/|\/lots\/|\/auction\/lot|\/lot-)/.test(lower)) return "lot";
+  if (
+    /(\/lot\/|\/lots\/|\/auction\/lot|\/lot-|\/(?:en\/)?products\/|\/hemen-al\/|\/muzayede-arsivi\/|\/urun\/)/.test(lower)
+    || /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i.test(lower)
+  ) {
+    return "lot";
+  }
   if (/(\/artist\/|\/artists\/)/.test(lower)) return "artist_page";
   if (/(\/price|\/result|\/archive|\/catalog|\/arsiv|\/search|\/arama)/.test(lower)) return "listing";
   return "other";
@@ -238,12 +295,25 @@ function transliterateTurkish(value: string): string {
 export function buildDiscoveryConfigFromEnv(analysisMode?: ResearchQuery["analysisMode"]): DiscoveryConfig {
   const profile = PROFILE_DEFAULTS[analysisMode ?? "balanced"] ?? PROFILE_DEFAULTS.balanced;
   const providerRaw = (process.env.WEB_DISCOVERY_PROVIDER ?? "none").trim().toLowerCase();
-  const provider = providerRaw === "brave" ? "brave" : "none";
-  const apiKey = process.env.BRAVE_SEARCH_API_KEY?.trim();
+  const secondaryProviderRaw = (process.env.WEB_DISCOVERY_SECONDARY_PROVIDER ?? "none").trim().toLowerCase();
+  const provider = providerRaw === "brave" || providerRaw === "tavily" ? providerRaw : "none";
+  const secondaryProvider =
+    secondaryProviderRaw === "brave" || secondaryProviderRaw === "tavily" ? secondaryProviderRaw : "none";
+  const apiKey =
+    provider === "brave"
+      ? process.env.BRAVE_SEARCH_API_KEY?.trim()
+      : provider === "tavily"
+        ? process.env.TAVILY_API_KEY?.trim()
+        : undefined;
+  const secondaryApiKey =
+    secondaryProvider === "brave"
+      ? process.env.BRAVE_SEARCH_API_KEY?.trim()
+      : secondaryProvider === "tavily"
+        ? process.env.TAVILY_API_KEY?.trim()
+        : undefined;
   const analysisModeResolved = analysisMode ?? "balanced";
   const explicitWebDiscoveryEnabled = parseBoolean(process.env.WEB_DISCOVERY_ENABLED, analysisModeResolved === "comprehensive");
-  const webDiscoveryEnabled =
-    explicitWebDiscoveryEnabled && analysisModeResolved === "comprehensive" && provider === "brave" && Boolean(apiKey);
+  const webDiscoveryEnabled = explicitWebDiscoveryEnabled && analysisModeResolved === "comprehensive";
 
   return {
     enabled: process.env.DISCOVERY_ENABLED !== "false",
@@ -261,7 +331,9 @@ export function buildDiscoveryConfigFromEnv(analysisMode?: ResearchQuery["analys
     maxTotalCandidatesPerRun: toPositiveInt(process.env.WEB_DISCOVERY_MAX_TOTAL_CANDIDATES, profile.maxTotalCandidatesPerRun),
     webDiscoveryEnabled,
     webDiscoveryProvider: provider,
+    webDiscoverySecondaryProvider: secondaryProvider,
     webDiscoveryApiKey: apiKey || undefined,
+    webDiscoverySecondaryApiKey: secondaryApiKey || undefined,
     webDiscoveryAllowHostRegex: process.env.WEB_DISCOVERY_ALLOW_HOST_REGEX?.trim() || undefined,
     webDiscoveryBlockHostTokens: parseCsv(process.env.WEB_DISCOVERY_BLOCK_HOST_TOKENS, DEFAULT_DISCOVERY_BLOCK_HOST_TOKENS),
     webDiscoveryPreferredHostTokens: parseCsv(
@@ -274,6 +346,66 @@ export function buildDiscoveryConfigFromEnv(analysisMode?: ResearchQuery["analys
     ),
     webDiscoveryMinHostQualityScore: toNumber(process.env.WEB_DISCOVERY_MIN_HOST_QUALITY_SCORE, 0.12)
   };
+}
+
+const BRAVE_PROVIDER: DiscoveryProviderClient = {
+  name: "brave",
+  configured: (config) => Boolean(config.webDiscoveryApiKey),
+  async search(variant, config, fetchImpl) {
+    const endpoint = new URL("https://api.search.brave.com/res/v1/web/search");
+    endpoint.searchParams.set("q", variant);
+    endpoint.searchParams.set("count", "20");
+    endpoint.searchParams.set("safesearch", "moderate");
+
+    const response = await fetchImpl(endpoint.toString(), {
+      headers: {
+        Accept: "application/json",
+        "X-Subscription-Token": config.webDiscoveryApiKey ?? ""
+      }
+    });
+    if (!response.ok) {
+      return [];
+    }
+    const payload = (await response.json()) as BraveSearchPayload;
+    return (payload.web?.results ?? []).map((entry) => entry.url ?? "").filter(Boolean);
+  }
+};
+
+const TAVILY_PROVIDER: DiscoveryProviderClient = {
+  name: "tavily",
+  configured: (config) => Boolean(config.webDiscoveryApiKey),
+  async search(variant, config, fetchImpl) {
+    const response = await fetchImpl("https://api.tavily.com/search", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        api_key: config.webDiscoveryApiKey,
+        query: variant,
+        search_depth: "advanced",
+        include_answer: false,
+        include_images: false,
+        max_results: 20
+      })
+    });
+    if (!response.ok) {
+      return [];
+    }
+    const payload = (await response.json()) as TavilySearchPayload;
+    return (payload.results ?? []).map((entry) => entry.url ?? "").filter(Boolean);
+  }
+};
+
+function resolveDiscoveryProviders(config: DiscoveryConfig): DiscoveryProviderClient[] {
+  const byName: Record<Exclude<DiscoveryProviderName, "none">, DiscoveryProviderClient> = {
+    brave: BRAVE_PROVIDER,
+    tavily: TAVILY_PROVIDER
+  };
+
+  return [config.webDiscoveryProvider, config.webDiscoverySecondaryProvider]
+    .filter((name): name is Exclude<DiscoveryProviderName, "none"> => Boolean(name && name !== "none"))
+    .map((name) => byName[name]);
 }
 
 export function buildQueryVariants(query: ResearchQuery, maxVariants: number): string[] {
@@ -328,10 +460,40 @@ export function buildQueryVariants(query: ResearchQuery, maxVariants: number): s
   return variants.slice(0, Math.max(1, maxVariants));
 }
 
+function buildWebDiscoveryQueryVariants(query: ResearchQuery, maxVariants: number): string[] {
+  const base = buildQueryVariants(query, maxVariants);
+  const scopedQuery = [query.artist.trim(), query.title?.trim()].filter(Boolean).join(" ").trim() || query.artist.trim();
+  const siteHosts = [
+    ...(query.turkeyFirst ? TURKEY_PRIORITY_SITE_HOSTS.slice(0, 4) : []),
+    ...(query.scope !== "turkey_only" ? INTERNATIONAL_PRIORITY_SITE_HOSTS.slice(0, 4) : [])
+  ];
+  const siteScoped = siteHosts.map((host) => `site:${host} "${scopedQuery}"`);
+  if (siteScoped.length === 0) {
+    return base;
+  }
+
+  const variants: string[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of [...siteScoped, ...base]) {
+    const trimmed = candidate.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    variants.push(trimmed);
+    if (variants.length >= Math.max(1, maxVariants)) {
+      break;
+    }
+  }
+
+  return variants;
+}
+
 function withVariant(url: string, variant: string): string | null {
   try {
     const parsed = new URL(url);
-    const keys = ["q", "query", "term", "entry", "s", "search"];
+    const keys = ["q", "query", "term", "entry", "s", "search", "search_words"];
     const key = keys.find((candidateKey) => parsed.searchParams.has(candidateKey));
     if (!key) {
       return null;
@@ -374,6 +536,25 @@ export function scoreWithTurkeyPriority(candidate: SourceCandidate, query: Resea
   const isTurkeyLike = TURKEY_DOMAIN_HINTS.some((hint) => host.includes(hint));
   const boosted = isTurkeyLike ? candidate.score + 0.09 : candidate.score - 0.03;
   return Math.max(0, Math.min(1, boosted));
+}
+
+function candidatePriority(candidate: SourceCandidate): number {
+  if (candidate.sourcePageType === "lot") {
+    return 0;
+  }
+  if (candidate.provenance === "web_discovery") {
+    return 1;
+  }
+  if (candidate.provenance === "listing_expansion" || candidate.provenance === "signature_expansion") {
+    return 2;
+  }
+  if (candidate.provenance === "seed") {
+    return 3;
+  }
+  if (candidate.provenance === "query_variant") {
+    return 4;
+  }
+  return 5;
 }
 
 export function expandCandidatesLight(
@@ -421,7 +602,16 @@ export function expandCandidatesLight(
     score: scoreWithTurkeyPriority(candidate, query)
   }));
 
-  return rescored.sort((a, b) => b.score - a.score).slice(0, config.maxCandidatesPerSource);
+  return rescored
+    .sort((a, b) => {
+      const aPriority = candidatePriority(a);
+      const bPriority = candidatePriority(b);
+      if (aPriority !== bPriority) {
+        return aPriority - bPriority;
+      }
+      return b.score - a.score;
+    })
+    .slice(0, config.maxCandidatesPerSource);
 }
 
 export async function discoverWebCandidates(
@@ -433,11 +623,8 @@ export async function discoverWebCandidates(
     return [];
   }
 
-  if (config.webDiscoveryProvider !== "brave" || !config.webDiscoveryApiKey) {
-    return [];
-  }
-
-  const variants = buildQueryVariants(query, Math.min(config.maxQueryVariants, 8));
+  const providers = resolveDiscoveryProviders(config);
+  const variants = buildWebDiscoveryQueryVariants(query, Math.min(config.maxQueryVariants, 8));
   const perDomainUrls = new Map<string, SourceCandidate[]>();
   const seenUrls = new Set<string>();
   const preferredHostTokens = config.webDiscoveryPreferredHostTokens ?? DEFAULT_DISCOVERY_PREFERRED_HOST_TOKENS;
@@ -464,75 +651,174 @@ export async function discoverWebCandidates(
     return score;
   };
 
-  for (const variant of variants) {
-    const endpoint = new URL("https://api.search.brave.com/res/v1/web/search");
-    endpoint.searchParams.set("q", variant);
-    endpoint.searchParams.set("count", "20");
-    endpoint.searchParams.set("safesearch", "moderate");
+  const diagnostics: DiscoveryProviderDiagnostics[] = [];
 
-    let payload: BraveSearchPayload | null = null;
-    try {
-      const response = await fetchImpl(endpoint.toString(), {
-        headers: {
-          Accept: "application/json",
-          "X-Subscription-Token": config.webDiscoveryApiKey
-        }
+  const pushCandidate = (normalizedUrl: string, index: number, quality: number): void => {
+    const host = hostFromUrl(normalizedUrl);
+    if (!host || !isHostAllowed(host, config)) {
+      return;
+    }
+    if (quality < minHostQualityScore) {
+      return;
+    }
+
+    const currentDomainCandidates = perDomainUrls.get(host) ?? [];
+    if (currentDomainCandidates.length >= config.maxUrlsPerDiscoveredDomain) {
+      return;
+    }
+
+    seenUrls.add(normalizedUrl);
+    const sourcePageType = inferSourcePageType(normalizedUrl);
+    const baseScore = Math.max(0.42, 0.92 - index * 0.03);
+    currentDomainCandidates.push({
+      url: normalizedUrl,
+      sourcePageType,
+      provenance: "web_discovery",
+      score: scoreWithTurkeyPriority(
+        {
+          url: normalizedUrl,
+          sourcePageType,
+          provenance: "web_discovery",
+          score: Math.max(0, Math.min(1, baseScore + Math.min(0.12, quality * 0.2)))
+        },
+        query
+      ),
+      discoveredFromUrl: null
+    });
+    perDomainUrls.set(host, currentDomainCandidates);
+  };
+
+  for (const provider of providers) {
+    const providerConfig =
+      provider.name === config.webDiscoveryProvider
+        ? config
+        : {
+            ...config,
+            webDiscoveryProvider: provider.name,
+            webDiscoveryApiKey: config.webDiscoverySecondaryApiKey ?? config.webDiscoveryApiKey
+          };
+
+    if (!provider.configured(providerConfig)) {
+      diagnostics.push({
+        provider: provider.name,
+        enabled: false,
+        reason: "Missing API key.",
+        requests_used: 0,
+        results_returned: 0
       });
-      if (!response.ok) {
-        continue;
-      }
-      payload = (await response.json()) as BraveSearchPayload;
-    } catch {
       continue;
     }
 
-    const results = payload.web?.results ?? [];
-    for (let index = 0; index < results.length; index += 1) {
-      const rawUrl = results[index]?.url;
-      if (!rawUrl) continue;
-      const normalizedUrl = normalizeUrl(rawUrl);
-      if (!normalizedUrl || seenUrls.has(normalizedUrl) || isAssetLikePath(normalizedUrl)) {
+    let requestsUsed = 0;
+    let resultsReturned = 0;
+
+    for (const variant of variants) {
+      let results: string[] = [];
+      try {
+        results = await provider.search(variant, providerConfig, fetchImpl);
+        requestsUsed += 1;
+      } catch {
         continue;
       }
 
-      const host = hostFromUrl(normalizedUrl);
-      if (!host || !isHostAllowed(host, config)) {
-        continue;
+      resultsReturned += results.length;
+      for (let index = 0; index < results.length; index += 1) {
+        const rawUrl = results[index];
+        if (!rawUrl) continue;
+        const normalizedUrl = normalizeUrl(rawUrl);
+        if (!normalizedUrl || seenUrls.has(normalizedUrl) || isAssetLikePath(normalizedUrl)) {
+          continue;
+        }
+
+        const host = hostFromUrl(normalizedUrl);
+        if (!host) {
+          continue;
+        }
+
+        pushCandidate(normalizedUrl, index, hostQualityScore(host));
       }
-      const quality = hostQualityScore(host);
-      if (quality < minHostQualityScore) {
+    }
+
+    diagnostics.push({
+      provider: provider.name,
+      enabled: true,
+      reason: null,
+      requests_used: requestsUsed,
+      results_returned: resultsReturned
+    });
+  }
+
+  if (perDomainUrls.size === 0 && variants.length > 0) {
+    for (const variant of variants) {
+      let html = "";
+      try {
+        const endpoint = new URL("https://html.duckduckgo.com/html/");
+        endpoint.searchParams.set("q", variant);
+        const response = await fetchImpl(endpoint.toString(), {
+          headers: {
+            Accept: "text/html,application/xhtml+xml",
+            "User-Agent": "Mozilla/5.0 (compatible; ArtBot/1.0; +https://artbot.local)"
+          }
+        });
+        if (!response.ok) {
+          continue;
+        }
+        html = await response.text();
+      } catch {
         continue;
       }
 
-      const currentDomainCandidates = perDomainUrls.get(host) ?? [];
-      if (currentDomainCandidates.length >= config.maxUrlsPerDiscoveredDomain) {
-        continue;
+      const resultUrls: string[] = [];
+      const linkRegex = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"/gi;
+      let match: RegExpExecArray | null;
+      while ((match = linkRegex.exec(html)) !== null) {
+        const rawHref = decodeHtmlAttribute(match[1] ?? "");
+        if (!rawHref) {
+          continue;
+        }
+
+        let decodedHref = rawHref;
+        try {
+          const parsed = new URL(rawHref, "https://html.duckduckgo.com");
+          const redirected = parsed.searchParams.get("uddg");
+          if (redirected) {
+            decodedHref = decodeURIComponent(redirected);
+          } else if (parsed.hostname === "duckduckgo.com" || parsed.hostname === "html.duckduckgo.com") {
+            continue;
+          }
+        } catch {
+          // Ignore malformed search result urls.
+        }
+
+        resultUrls.push(decodedHref);
       }
 
-      seenUrls.add(normalizedUrl);
-      const baseScore = Math.max(0.42, 0.92 - index * 0.03);
-      const candidate: SourceCandidate = {
-        url: normalizedUrl,
-        sourcePageType: inferSourcePageType(normalizedUrl),
-        provenance: "web_discovery",
-        score: scoreWithTurkeyPriority(
-          {
-            url: normalizedUrl,
-            sourcePageType: inferSourcePageType(normalizedUrl),
-            provenance: "web_discovery",
-            score: Math.max(0, Math.min(1, baseScore + Math.min(0.12, quality * 0.2)))
-          },
-          query
-        ),
-        discoveredFromUrl: null
-      };
-      currentDomainCandidates.push(candidate);
-      perDomainUrls.set(host, currentDomainCandidates);
+      for (let index = 0; index < resultUrls.length; index += 1) {
+        const normalizedUrl = normalizeUrl(resultUrls[index] ?? "");
+        if (!normalizedUrl || seenUrls.has(normalizedUrl) || isAssetLikePath(normalizedUrl)) {
+          continue;
+        }
+
+        const host = hostFromUrl(normalizedUrl);
+        if (!host) {
+          continue;
+        }
+
+        pushCandidate(normalizedUrl, index, hostQualityScore(host));
+      }
+
+      if (
+        perDomainUrls.size >= config.maxDiscoveredDomainsPerRun
+        || seenUrls.size >= config.maxTotalCandidatesPerRun
+      ) {
+        break;
+      }
     }
   }
 
   const discoveredHosts = [...perDomainUrls.keys()].slice(0, config.maxDiscoveredDomainsPerRun);
   const flattened = discoveredHosts.flatMap((host) => perDomainUrls.get(host) ?? []);
+  config.webDiscoveryDiagnostics = diagnostics;
 
   return flattened
     .sort((a, b) => b.score - a.score)

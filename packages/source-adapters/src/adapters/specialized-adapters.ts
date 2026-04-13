@@ -1,6 +1,7 @@
 import { extractWithGeminiSchema, fetchCheapestFirst, parseGenericLotFields, type GenericParsedFields } from "@artbot/extraction";
 import type { SourceAccessStatus, SourceAttempt } from "@artbot/shared-types";
 import type { AdapterExtractionContext, AdapterExtractionResult, SourceAdapter, SourceCandidate } from "../types.js";
+import { deriveDefaultSourceCapabilities } from "../types.js";
 import {
   buildBlockedResult,
   buildRecordFromParsed,
@@ -31,6 +32,7 @@ interface DeterministicAdapterOptions {
   requiresLicense?: boolean;
   supportedAccessModes?: SourceAdapter["supportedAccessModes"];
   crawlStrategies?: SourceAdapter["crawlStrategies"];
+  capabilities?: SourceAdapter["capabilities"];
 }
 
 function hasAnySignature(content: string, indicators: string[]): boolean {
@@ -150,8 +152,276 @@ function detectOutageReason(content: string, sourceUrl: string): string | null {
   return null;
 }
 
+function normalizeEntityText(value: string | null | undefined): string {
+  return (value ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9çğıöşü\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractLeadingArtistFromTitle(title: string | null | undefined): string | null {
+  const raw = (title ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  if (!/\s+[|:-]\s+/.test(raw)) {
+    return null;
+  }
+
+  const segment = raw.split(/\s+[|:-]\s+/)[0]?.trim() ?? raw;
+  const normalized = normalizeEntityText(segment);
+  return normalized.length >= 4 ? normalized : null;
+}
+
+function normalizeArtistTokens(value: string): string[] {
+  return normalizeEntityText(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+}
+
+function titleIndicatesDifferentArtist(parsedTitle: string | null | undefined, queryArtist: string): boolean {
+  const leadingArtist = extractLeadingArtistFromTitle(parsedTitle);
+  if (!leadingArtist) {
+    return false;
+  }
+
+  const normalizedQueryArtist = normalizeEntityText(queryArtist);
+  if (!normalizedQueryArtist) {
+    return false;
+  }
+
+  if (leadingArtist === normalizedQueryArtist) {
+    return false;
+  }
+
+  const queryTokens = normalizeArtistTokens(queryArtist);
+  if (queryTokens.some((token) => leadingArtist.includes(token))) {
+    return false;
+  }
+
+  return queryTokens.length > 0;
+}
+
+function looksLikeSearchShell(candidateUrl: string, extractedUrl: string, html: string): boolean {
+  const combined = `${html}`.toLowerCase();
+  const urlLooksLikeSearch = /\/search\b|\/arama(?:\.html)?\b|[?&](?:q|query|term|search|search_words)=/i.test(
+    `${candidateUrl} ${extractedUrl}`
+  );
+  const pageLooksLikeSearch = [
+    /results found/i,
+    /arama:/i,
+    /için\s+\d+\s+sonuç\s+bulundu/i,
+    /pagetype":"search"/i,
+    /name=["']search_words["']/i,
+    /class=["'][^"']*search-input/i,
+    /tbfiltersearch/i,
+    /btn-search/i
+  ].some((pattern) => pattern.test(combined));
+
+  return urlLooksLikeSearch && pageLooksLikeSearch;
+}
+
+function matchesRequestedEntityInContent(
+  content: string,
+  query: AdapterExtractionContext["query"]
+): boolean {
+  const normalizedContent = normalizeEntityText(content);
+  const normalizedArtist = normalizeEntityText(query.artist);
+  const normalizedTitle = normalizeEntityText(query.title ?? "");
+
+  if (normalizedTitle && normalizedContent.includes(normalizedTitle)) {
+    return true;
+  }
+
+  if (!normalizedArtist) {
+    return true;
+  }
+
+  return normalizedContent.includes(normalizedArtist);
+}
+
+function looksLikeEntityMismatch(candidateUrl: string, content: string, query: AdapterExtractionContext["query"]): boolean {
+  if (matchesRequestedEntityInContent(content, query)) {
+    return false;
+  }
+
+  let pathname = "";
+  try {
+    pathname = new URL(candidateUrl).pathname.toLowerCase();
+  } catch {
+    return false;
+  }
+
+  const lastSegment = pathname.split("/").filter(Boolean).pop() ?? "";
+  const normalizedSegment = normalizeEntityText(lastSegment.replace(/\.(html|php|aspx?)$/i, ""));
+  if (!normalizedSegment) {
+    return false;
+  }
+
+  const strippedSegment = normalizedSegment
+    .replace(/\b(?:lot|item|product|products|urun|ürün|eser|resim|catalog|katalog|auction|muzayede|hemen al)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (strippedSegment.length < 6 || !/[a-z]/i.test(strippedSegment)) {
+    return false;
+  }
+
+  const normalizedArtist = normalizeEntityText(query.artist);
+  const normalizedTitle = normalizeEntityText(query.title ?? "");
+  if (normalizedArtist && (strippedSegment.includes(normalizedArtist) || normalizedArtist.includes(strippedSegment))) {
+    return false;
+  }
+  if (normalizedTitle && (strippedSegment.includes(normalizedTitle) || normalizedTitle.includes(strippedSegment))) {
+    return false;
+  }
+
+  return true;
+}
+
+function inferCandidatePageType(
+  url: string,
+  fallback: SourceCandidate["sourcePageType"] = "lot"
+): SourceCandidate["sourcePageType"] {
+  const lower = url.toLowerCase();
+  if (
+    /\/(?:cart|sepet|account|giris|login|contact|iletisim|about|hakkimizda|download-app|siparislerim|desteklerim|privacy|gizlilik|uyelik|kargo|odeme|rss|feed)\b/.test(lower)
+  ) {
+    return "other";
+  }
+  if (/\/(?:en\/)?products\//.test(lower)) return "lot";
+  if (
+    /\/(?:artist|search)\/(?:artwork-detail|result-detail|artist-result)\//.test(lower) ||
+    /\/urun\//.test(lower) ||
+    /\/lot\//.test(lower) ||
+    /\/eser\//.test(lower) ||
+    /\/item\/\d+/.test(lower) ||
+    /\/hemen-al\/[^/?#]+\/\d+/.test(lower) ||
+    /\/hemen-al\/\d+\//.test(lower)
+  ) {
+    return "lot";
+  }
+  if (/\/muzayede\/\d+\//.test(lower) || /\/canli-muzayede\/\d+\//.test(lower)) {
+    return "listing";
+  }
+  if (/\/archive|\/arsiv|\/catalog|\/search|\/arama|\/hemen-al\b|\?search=/.test(lower)) {
+    return "listing";
+  }
+  return fallback;
+}
+
 function hasNumericValue(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function normalizeEmbeddedNumber(value: string): number | null {
+  const cleaned = value.replace(/[^0-9,.\-]/g, "").trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  const commaCount = (cleaned.match(/,/g) ?? []).length;
+  const dotCount = (cleaned.match(/\./g) ?? []).length;
+  let normalized = cleaned;
+
+  if (commaCount > 0 && dotCount > 0) {
+    const decimalIsComma = cleaned.lastIndexOf(",") > cleaned.lastIndexOf(".");
+    normalized = decimalIsComma
+      ? cleaned.replace(/\./g, "").replace(/,/g, ".")
+      : cleaned.replace(/,/g, "");
+  } else if (commaCount > 1) {
+    normalized = cleaned.replace(/,/g, "");
+  } else if (dotCount > 1) {
+    normalized = cleaned.replace(/\./g, "");
+  } else if (commaCount === 1) {
+    const [integer, fraction = ""] = cleaned.split(",");
+    normalized = fraction.length === 3 ? `${integer}${fraction}` : `${integer}.${fraction}`;
+  } else if (dotCount === 1) {
+    const [integer, fraction = ""] = cleaned.split(".");
+    normalized = fraction.length === 3 ? `${integer}${fraction}` : `${integer}.${fraction}`;
+  }
+
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseEmbeddedCurrencyCell(value: string): { amount: number | null; currency: string | null } {
+  const amount = normalizeEmbeddedNumber(value);
+  const upper = value.toUpperCase();
+  if (upper.includes("TL") || upper.includes("TRY") || value.includes("₺")) {
+    return { amount, currency: "TRY" };
+  }
+  if (upper.includes("USD") || value.includes("$")) {
+    return { amount, currency: "USD" };
+  }
+  if (upper.includes("EUR") || value.includes("€")) {
+    return { amount, currency: "EUR" };
+  }
+  return { amount, currency: null };
+}
+
+function parseSanatfiyatTrendTable(html: string): GenericParsedFields | null {
+  if (!/Eser Fiyat Trend Analizi/i.test(html) || !/A[çc][iı]l[iı][şs] Fiyat[iı]/i.test(html)) {
+    return null;
+  }
+
+  const rowMatch = html.match(
+    /<tbody[\s\S]*?<tr>\s*<td[^>]*>([^<]+)<\/td>\s*<td[^>]*>([^<]+)<\/td>\s*<td[^>]*>([^<]+)<\/td>\s*<td[^>]*>([^<]+)<\/td>\s*<td[^>]*>([^<]+)<\/td>\s*<td[^>]*>([^<]+)<\/td>/i
+  );
+  if (!rowMatch) {
+    return null;
+  }
+
+  const saleDate = rowMatch[1]?.trim() || null;
+  const opening = parseEmbeddedCurrencyCell(rowMatch[2] ?? "");
+  const hammerTry = parseEmbeddedCurrencyCell(rowMatch[4] ?? "");
+  const hammerUsd = parseEmbeddedCurrencyCell(rowMatch[5] ?? "");
+  const hammerEur = parseEmbeddedCurrencyCell(rowMatch[6] ?? "");
+
+  let priceType: GenericParsedFields["priceType"] = "unknown";
+  let priceAmount: number | null = null;
+  let currency: string | null = null;
+
+  if (hasNumericValue(hammerTry.amount) && hammerTry.amount > 0) {
+    priceType = "hammer_price";
+    priceAmount = hammerTry.amount;
+    currency = hammerTry.currency ?? "TRY";
+  } else if (hasNumericValue(hammerUsd.amount) && hammerUsd.amount > 0) {
+    priceType = "hammer_price";
+    priceAmount = hammerUsd.amount;
+    currency = hammerUsd.currency ?? "USD";
+  } else if (hasNumericValue(hammerEur.amount) && hammerEur.amount > 0) {
+    priceType = "hammer_price";
+    priceAmount = hammerEur.amount;
+    currency = hammerEur.currency ?? "EUR";
+  } else if (hasNumericValue(opening.amount) && opening.amount > 0) {
+    // Sanatfiyat trend rows often expose only the opening bid when the hammer columns are zero.
+    priceType = "asking_price";
+    priceAmount = opening.amount;
+    currency = opening.currency ?? "TRY";
+  }
+
+  return {
+    title: null,
+    artistName: null,
+    medium: null,
+    dimensionsText: null,
+    year: null,
+    imageUrl: null,
+    lotNumber: null,
+    estimateLow: null,
+    estimateHigh: null,
+    priceAmount,
+    priceType,
+    currency,
+    saleDate,
+    priceHidden: false,
+    buyersPremiumIncluded: null
+  };
 }
 
 function sourceSpecificKeywordsForAdapter(adapterId: string): string[] {
@@ -177,6 +447,13 @@ function sourceSpecificKeywordsForAdapter(adapterId: string): string[] {
 }
 
 function parseSourceSpecificPatch(adapterId: string, html: string, markdown: string): GenericParsedFields | null {
+  if (adapterId === "sanatfiyat-licensed-extractor") {
+    const trendPatch = parseSanatfiyatTrendTable(html);
+    if (trendPatch) {
+      return trendPatch;
+    }
+  }
+
   const keywords = sourceSpecificKeywordsForAdapter(adapterId);
   if (keywords.length === 0) {
     return null;
@@ -217,7 +494,11 @@ function parseSourceSpecificPatch(adapterId: string, html: string, markdown: str
   return hasSignal ? parsed : null;
 }
 
-function mergeSourceSpecificParsed(base: GenericParsedFields, patch: GenericParsedFields | null): GenericParsedFields {
+function mergeSourceSpecificParsed(
+  base: GenericParsedFields,
+  patch: GenericParsedFields | null,
+  preferPatchPrice = false
+): GenericParsedFields {
   if (!patch) {
     return base;
   }
@@ -233,18 +514,27 @@ function mergeSourceSpecificParsed(base: GenericParsedFields, patch: GenericPars
     lotNumber: base.lotNumber ?? patch.lotNumber,
     estimateLow: base.estimateLow ?? patch.estimateLow,
     estimateHigh: base.estimateHigh ?? patch.estimateHigh,
-    priceAmount: hasNumericValue(base.priceAmount) ? base.priceAmount : patch.priceAmount,
-    currency: base.currency ?? patch.currency,
-    saleDate: base.saleDate ?? patch.saleDate,
+    priceAmount:
+      preferPatchPrice && hasNumericValue(patch.priceAmount)
+        ? patch.priceAmount
+        : hasNumericValue(base.priceAmount)
+          ? base.priceAmount
+          : patch.priceAmount,
+    currency: preferPatchPrice && patch.currency ? patch.currency : base.currency ?? patch.currency,
+    saleDate: preferPatchPrice && patch.saleDate ? patch.saleDate : base.saleDate ?? patch.saleDate,
     priceType:
-      base.priceType === "unknown" ||
-      (base.priceType === "asking_price" &&
-        (patch.priceType === "realized_price" || patch.priceType === "hammer_price" || patch.priceType === "estimate"))
+      preferPatchPrice && patch.priceType !== "unknown"
         ? patch.priceType
-        : base.priceType,
+        : base.priceType === "unknown" ||
+            (base.priceType === "asking_price" &&
+              (patch.priceType === "realized_price" || patch.priceType === "hammer_price" || patch.priceType === "estimate"))
+          ? patch.priceType
+          : base.priceType,
     priceHidden: base.priceHidden || patch.priceHidden,
     buyersPremiumIncluded:
-      base.buyersPremiumIncluded !== null && base.buyersPremiumIncluded !== undefined
+      preferPatchPrice && patch.buyersPremiumIncluded !== null && patch.buyersPremiumIncluded !== undefined
+        ? patch.buyersPremiumIncluded
+        : base.buyersPremiumIncluded !== null && base.buyersPremiumIncluded !== undefined
         ? base.buyersPremiumIncluded
         : patch.buyersPremiumIncluded
   };
@@ -254,22 +544,34 @@ function mergeSourceSpecificParsed(base: GenericParsedFields, patch: GenericPars
 
 function sourceSpecificLinkMatchersForAdapter(adapterId: string): RegExp[] {
   if (adapterId === "bayrak-muzayede-listing" || adapterId === "bayrak-muzayede-lot") {
-    return [/\/lot\//i, /\/eser\//i, /\/urun\//i];
+    return [/\/lot\//i, /\/eser\//i, /\/urun\//i, /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i];
   }
   if (adapterId === "muzayedeapp-platform") {
-    return [/\/lot\//i, /\/eser\//i, /\/urun\//i];
+    return [
+      /\/lot\//i,
+      /\/eser\//i,
+      /\/urun\//i,
+      /\/tumurunler\.html/i,
+      /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i
+    ];
   }
   if (adapterId === "clar-buy-now") {
-    return [/\/urun\//i, /\/lot\//i];
+    return [/\/urun\//i, /\/lot\//i, /\/hemen-al\/[^/?#]+\/\d+/i, /\/hemen-al\/\d+\//i];
   }
   if (adapterId === "portakal-catalog") {
-    return [/\/lot\//i, /\/auction\//i, /\/catalog\//i];
+    return [/\/lot\//i, /\/auction\//i, /\/catalog\//i, /\/(?:en\/)?products\//i];
   }
   if (adapterId === "invaluable-lot-detail-adapter") {
     return [/\/auction-lot\//i, /\/lot\//i, /\/item\//i];
   }
   if (adapterId === "liveauctioneers-public-lot-adapter") {
     return [/\/item\/\d+/i, /\/lot\//i, /\/catalog\/\d+/i];
+  }
+  if (adapterId === "sanatfiyat-licensed-extractor") {
+    return [
+      /\/(?:artist|search)\/artist-detail\//i,
+      /\/(?:artist|search)\/(?:artwork-detail|result-detail|artist-result)\//i
+    ];
   }
   return [];
 }
@@ -286,22 +588,56 @@ function extractCandidatesFromSelectors(
 
   const candidates: SourceCandidate[] = [];
   const seen = new Set<string>();
+  const normalizeSelectorHref = (href: string): string | null => {
+    let parsed: URL;
+    try {
+      parsed = new URL(href, pageUrl);
+    } catch {
+      return null;
+    }
+
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()]) {
+      const lower = key.toLowerCase();
+      if (
+        lower.startsWith("utm_")
+        || lower === "gclid"
+        || lower === "fbclid"
+        || lower === "ref"
+        || lower === "_pos"
+        || lower === "_sid"
+        || lower === "_ss"
+      ) {
+        parsed.searchParams.delete(key);
+      }
+    }
+
+    const pathname = parsed.pathname.toLowerCase();
+    if (
+      pathname.endsWith(".oembed")
+      || /\.(?:xml|rss|jpg|jpeg|png|gif|webp|svg|css|js|pdf|zip|mp3|mp4|ico)$/i.test(pathname)
+    ) {
+      return null;
+    }
+
+    return parsed.toString();
+  };
   const hrefRegex = /href\s*=\s*["']([^"']+)["']/gi;
   let match: RegExpExecArray | null;
   while ((match = hrefRegex.exec(html)) !== null) {
     const href = match[1];
     if (!href) continue;
-    let resolved: string;
-    try {
-      resolved = new URL(href, pageUrl).toString();
-    } catch {
-      continue;
-    }
+    const resolved = normalizeSelectorHref(href);
+    if (!resolved) continue;
     if (!hrefMatchers.some((matcher) => matcher.test(resolved)) || seen.has(resolved)) {
       continue;
     }
     seen.add(resolved);
-    candidates.push(toCandidate(resolved, "lot", "listing_expansion", 0.79, pageUrl));
+    candidates.push(toCandidate(resolved, inferCandidatePageType(resolved), "listing_expansion", 0.79, pageUrl));
   }
 
   return candidates;
@@ -320,6 +656,7 @@ export class DeterministicVenueAdapter implements SourceAdapter {
   public readonly requiresLicense: boolean;
   public readonly supportedAccessModes: SourceAdapter["supportedAccessModes"];
   public readonly crawlStrategies: SourceAdapter["crawlStrategies"];
+  public readonly capabilities: SourceAdapter["capabilities"];
 
   private readonly baseUrl: string;
   private readonly searchPaths: string[];
@@ -347,6 +684,13 @@ export class DeterministicVenueAdapter implements SourceAdapter {
     this.requiresLicense = Boolean(options.requiresLicense);
     this.supportedAccessModes = options.supportedAccessModes ?? ["anonymous", "authorized", "licensed"];
     this.crawlStrategies = options.crawlStrategies ?? ["search", "listing_to_lot"];
+    this.capabilities = options.capabilities ?? deriveDefaultSourceCapabilities({
+      id: this.id,
+      supportedAccessModes: this.supportedAccessModes,
+      requiresAuth: this.requiresAuth,
+      sourcePageType: this.sourcePageType,
+      crawlStrategies: this.crawlStrategies
+    });
   }
 
   public async discoverCandidates(query: AdapterExtractionContext["query"]): Promise<SourceCandidate[]> {
@@ -370,7 +714,8 @@ export class DeterministicVenueAdapter implements SourceAdapter {
 
     const combinedContent = `${extracted.markdown} ${extracted.html}`;
     let parsed = parseGenericLotFields(combinedContent, extracted.url);
-    parsed = mergeSourceSpecificParsed(parsed, parseSourceSpecificPatch(this.id, extracted.html, extracted.markdown));
+    const sourceSpecificPatch = parseSourceSpecificPatch(this.id, extracted.html, extracted.markdown);
+    parsed = mergeSourceSpecificParsed(parsed, sourceSpecificPatch, this.id === "sanatfiyat-licensed-extractor");
 
     let modelUsed: string | null = null;
     if (parsed.priceType === "unknown" && combinedContent.length > 120) {
@@ -423,9 +768,20 @@ export class DeterministicVenueAdapter implements SourceAdapter {
         allowedHosts.add(host);
       }
     }
+    for (const origin of venueOrigins) {
+      const host = hostForUrl(origin);
+      if (host) {
+        allowedHosts.add(host);
+      }
+    }
     const discoveredCandidates = outageReason
       ? []
-      : [...lotCandidates, ...selectorCandidates, ...venueRouteCandidates].filter((candidate, index, array) => {
+      : [...lotCandidates, ...selectorCandidates, ...venueRouteCandidates]
+        .map((discovered) => ({
+          ...discovered,
+          sourcePageType: inferCandidatePageType(discovered.url, discovered.sourcePageType)
+        }))
+        .filter((candidate, index, array) => {
         return isAllowedVenueUrl(candidate.url, allowedHosts) && array.findIndex((entry) => entry.url === candidate.url) === index;
       });
 
@@ -434,10 +790,41 @@ export class DeterministicVenueAdapter implements SourceAdapter {
       : outageReason
         ? "blocked"
         : decision.sourceAccessStatus;
-    const acceptance = evaluateAcceptance(parsed, effectiveSourceStatus, {
+    let acceptance = evaluateAcceptance(parsed, effectiveSourceStatus, {
       sourceName: this.sourceName,
-      sourcePageType: candidate.sourcePageType
+      sourcePageType: candidate.sourcePageType,
+      candidateUrl: candidate.url,
+      queryArtist: context.query.artist,
+      queryTitle: context.query.title
     });
+    if (effectiveSourceStatus !== "blocked" && looksLikeSearchShell(candidate.url, extracted.url, extracted.html)) {
+      acceptance = {
+        acceptedForEvidence: false,
+        acceptedForValuation: false,
+        valuationLane: "none",
+        acceptanceReason: "generic_shell_page",
+        rejectionReason: "Search/listing shell page detected; retained only for discovery expansion.",
+        valuationEligibilityReason: "Search shells are excluded from evidence and valuation."
+      };
+    } else if (
+      effectiveSourceStatus !== "blocked"
+      && (
+        titleIndicatesDifferentArtist(parsed.title, context.query.artist)
+        || (
+          candidate.sourcePageType !== "price_db"
+          && looksLikeEntityMismatch(candidate.url, combinedContent, context.query)
+        )
+      )
+    ) {
+      acceptance = {
+        acceptedForEvidence: false,
+        acceptedForValuation: false,
+        valuationLane: "none",
+        acceptanceReason: "entity_mismatch",
+        rejectionReason: "Extracted record did not match the requested artist or work.",
+        valuationEligibilityReason: "Entity mismatch records are excluded from evidence and valuation."
+      };
+    }
     const record = buildRecordFromParsed(this, candidate, context, parsed, rawSnapshotPath, acceptance);
     record.source_access_status = effectiveSourceStatus;
 
@@ -521,19 +908,21 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: null,
       baseUrl: "https://muzayede.app",
-      searchPaths: ["/arama?q=", "/search?q="],
+      searchPaths: ["/arama.html?search_words=", "/search?q="],
       lotUrlMatchers: [
         /\/lot\//i,
         /\/eser\//i,
         /\/urun\//i,
         /\/lots?\//i,
+        /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i,
         /\/[^/?#]*m(?:u|ü)zayedesi[^/?#]*\.html(?:\?.*)?$/i,
         /\/[^/?#]*mezat[^/?#]*\.html(?:\?.*)?$/i
       ],
       signatureIndicators: ["powered by müzayede app", "powered by muzayede app", "muzayede.app"],
-      venueRouteTemplates: ["/arama?q={q}", "/search?q={q}", "/muzayede?q={q}", "/arsiv?q={q}"],
+      venueRouteTemplates: ["/arama.html?search_words={q}", "/search?q={q}", "/muzayede?q={q}", "/arsiv?q={q}"],
       turkeyVenueHostPatterns: [
         /\.tr$/i,
+        /artmezat/i,
         /bayrakmuzayede/i,
         /clarmuzayede/i,
         /turelart/i,
@@ -552,8 +941,8 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.bayrakmuzayede.com",
-      searchPaths: ["/arama?q=", "/search?q="],
-      lotUrlMatchers: [/\/lot\//i, /\/eser\//i, /\/urun\//i]
+      searchPaths: ["/arama.html?search_words=", "/search?q="],
+      lotUrlMatchers: [/\/lot\//i, /\/eser\//i, /\/urun\//i, /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i]
     }),
     new DeterministicVenueAdapter({
       id: "bayrak-muzayede-lot",
@@ -565,8 +954,8 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.bayrakmuzayede.com",
-      searchPaths: ["/lot?q=", "/eser?q="],
-      lotUrlMatchers: [/\/lot\//i, /\/eser\//i, /\/urun\//i]
+      searchPaths: ["/arama.html?search_words=", "/lot?q=", "/eser?q="],
+      lotUrlMatchers: [/\/lot\//i, /\/eser\//i, /\/urun\//i, /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i]
     }),
     new DeterministicVenueAdapter({
       id: "turel-art-listing",
@@ -605,7 +994,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       city: "Istanbul",
       baseUrl: "https://www.rportakal.com",
       searchPaths: ["/search?q=", "/en/search?q="],
-      lotUrlMatchers: [/\/lot\//i, /\/auction\//i, /\/catalog\//i]
+      lotUrlMatchers: [/\/lot\//i, /\/auction\//i, /\/catalog\//i, /\/(?:en\/)?products\//i]
     }),
     new DeterministicVenueAdapter({
       id: "clar-buy-now",
@@ -617,8 +1006,15 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.clarmuzayede.com",
-      searchPaths: ["/buy-now?q=", "/hemen-al?q="],
-      lotUrlMatchers: [/\/lot\//i, /\/urun\//i, /\/buy-now\//i]
+      searchPaths: ["/hemen-al?search=", "/hemen-al?q="],
+      lotUrlMatchers: [
+        /\/lot\//i,
+        /\/urun\//i,
+        /\/buy-now\//i,
+        /\/hemen-al\/[^/?#]+\/\d+/i,
+        /\/hemen-al\/\d+\//i
+      ],
+      crawlStrategies: ["search", "listing_to_lot", "rendered_dom"]
     }),
     new DeterministicVenueAdapter({
       id: "clar-archive",
@@ -630,8 +1026,16 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.clarmuzayede.com",
-      searchPaths: ["/auction-archive?q=", "/arsiv?q="],
-      lotUrlMatchers: [/\/lot\//i, /\/archive\//i, /\/auction\//i]
+      searchPaths: ["/muzayede-arsivi?search=", "/auction-archive?q=", "/arsiv?q="],
+      lotUrlMatchers: [
+        /\/lot\//i,
+        /\/archive\//i,
+        /\/auction\//i,
+        /\/muzayede-arsivi\/[^/?#]+\/\d+/i,
+        /\/muzayede\/\d+\//i,
+        /\/canli-muzayede\/\d+\//i
+      ],
+      crawlStrategies: ["search", "listing_to_lot", "rendered_dom"]
     }),
     new DeterministicVenueAdapter({
       id: "invaluable-lot-detail-adapter",

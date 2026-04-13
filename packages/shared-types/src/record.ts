@@ -73,6 +73,7 @@ export const priceRecordSchema = z.object({
     "asking_price_ready",
     "inquiry_only_evidence",
     "price_hidden_evidence",
+    "entity_mismatch",
     "generic_shell_page",
     "missing_numeric_price",
     "missing_currency",

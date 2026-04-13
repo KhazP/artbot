@@ -250,6 +250,48 @@ describe("GenericSourceAdapter access handling", () => {
     expect(result.needsBrowserVerification).toBe(false);
   });
 
+  it("rejects listing pages without record-level entity evidence", async () => {
+    mocks.parseGenericLotFieldsMock.mockImplementation(() => ({
+      title: "Portakal Sanat ve Kultur Evi",
+      artistName: null,
+      medium: null,
+      dimensionsText: null,
+      year: null,
+      imageUrl: null,
+      lotNumber: null,
+      estimateLow: null,
+      estimateHigh: null,
+      priceAmount: 145000000,
+      priceType: "realized_price",
+      currency: "TRY",
+      saleDate: "2026-02-02",
+      priceHidden: false,
+      buyersPremiumIncluded: null
+    }));
+
+    const adapter = new GenericSourceAdapter({
+      id: "public-source",
+      sourceName: "Portakal Online Catalog",
+      venueName: "Portakal Art and Culture House",
+      venueType: "auction_house",
+      sourcePageType: "listing",
+      tier: 1,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://example.com",
+      searchPath: "/q="
+    });
+
+    const result = await adapter.extract(
+      { url: "https://example.com/collections/shop", sourcePageType: "listing", provenance: "seed", score: 0.9 },
+      context("anonymous", "public_access")
+    );
+
+    expect(result.attempt.accepted).toBe(false);
+    expect(result.attempt.acceptance_reason).toBe("generic_shell_page");
+    expect(result.record).toBeNull();
+  });
+
   it("extracts in licensed mode for licensed source", async () => {
     const adapter = new GenericSourceAdapter({
       id: "licensed-source",

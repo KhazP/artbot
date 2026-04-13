@@ -60,6 +60,25 @@ describe("discovery", () => {
     }
   });
 
+  it("keeps comprehensive web discovery eligible before provider override is applied", () => {
+    const originalProvider = process.env.WEB_DISCOVERY_PROVIDER;
+    const originalEnabled = process.env.WEB_DISCOVERY_ENABLED;
+    try {
+      delete process.env.WEB_DISCOVERY_PROVIDER;
+      delete process.env.WEB_DISCOVERY_ENABLED;
+
+      const comprehensive = buildDiscoveryConfigFromEnv("comprehensive");
+      const balanced = buildDiscoveryConfigFromEnv("balanced");
+
+      expect(comprehensive.webDiscoveryEnabled).toBe(true);
+      expect(comprehensive.webDiscoveryProvider).toBe("none");
+      expect(balanced.webDiscoveryEnabled).toBe(false);
+    } finally {
+      process.env.WEB_DISCOVERY_PROVIDER = originalProvider;
+      process.env.WEB_DISCOVERY_ENABLED = originalEnabled;
+    }
+  });
+
   it("expands, dedupes and caps candidates", () => {
     const expanded = expandCandidatesLight(
       [
@@ -125,6 +144,78 @@ describe("discovery", () => {
     expect(expanded[0].score).toBeGreaterThanOrEqual(expanded[1].score);
   });
 
+  it("expands urls that use search_words query params", () => {
+    const expanded = expandCandidatesLight(
+      [
+        {
+          url: "https://www.bayrakmuzayede.com/arama.html?search_words=foo",
+          sourcePageType: "listing",
+          provenance: "seed",
+          score: 0.84
+        }
+      ],
+      query,
+      {
+        enabled: true,
+        maxCandidatesPerSource: 4,
+        maxQueryVariants: 3,
+        domainThrottlePerSource: 4,
+        maxDiscoveredDomainsPerRun: 3,
+        maxUrlsPerDiscoveredDomain: 2,
+        maxTotalCandidatesPerRun: 20,
+        webDiscoveryEnabled: false,
+        webDiscoveryProvider: "none",
+        webDiscoveryBlockHostTokens: [],
+      }
+    );
+
+    expect(
+      expanded.some(
+        (candidate) =>
+          candidate.provenance === "query_variant"
+          && candidate.discoveredFromUrl === "https://www.bayrakmuzayede.com/arama.html?search_words=foo"
+          && candidate.url.includes("search_words=")
+      )
+    ).toBe(true);
+  });
+
+  it("prioritizes discovered lot-detail pages ahead of additional query variants", () => {
+    const expanded = expandCandidatesLight(
+      [
+        {
+          url: "https://www.rportakal.com/search?q=Abidin%20Dino",
+          sourcePageType: "listing",
+          provenance: "seed",
+          score: 0.9
+        },
+        {
+          url: "https://www.rportakal.com/products/abidin-dino-work",
+          sourcePageType: "lot",
+          provenance: "listing_expansion",
+          score: 0.72,
+          discoveredFromUrl: "https://www.rportakal.com/search?q=Abidin%20Dino"
+        }
+      ],
+      query,
+      {
+        enabled: true,
+        maxCandidatesPerSource: 5,
+        maxQueryVariants: 3,
+        domainThrottlePerSource: 8,
+        maxDiscoveredDomainsPerRun: 3,
+        maxUrlsPerDiscoveredDomain: 2,
+        maxTotalCandidatesPerRun: 20,
+        webDiscoveryEnabled: false,
+        webDiscoveryProvider: "none",
+        webDiscoveryBlockHostTokens: [],
+      }
+    );
+
+    expect(expanded[0]?.url).toBe("https://www.rportakal.com/products/abidin-dino-work");
+    expect(expanded[1]?.provenance).toBe("seed");
+    expect(expanded.some((candidate) => candidate.provenance === "query_variant")).toBe(true);
+  });
+
   it("discovers web candidates with host filtering and per-domain caps", async () => {
     const config = {
       enabled: true,
@@ -159,5 +250,94 @@ describe("discovery", () => {
     expect(candidates.length).toBe(1);
     expect(candidates[0].url).toContain("example-auction.com/lot/123");
     expect(candidates[0].provenance).toBe("web_discovery");
+  });
+
+  it("falls back to unauthenticated web discovery when providers are selected but api keys are missing", async () => {
+    const config = {
+      enabled: true,
+      maxCandidatesPerSource: 10,
+      maxQueryVariants: 1,
+      domainThrottlePerSource: 5,
+      maxDiscoveredDomainsPerRun: 10,
+      maxUrlsPerDiscoveredDomain: 2,
+      maxTotalCandidatesPerRun: 20,
+      webDiscoveryEnabled: true,
+      webDiscoveryProvider: "brave" as const,
+      webDiscoverySecondaryProvider: "tavily" as const,
+      webDiscoveryBlockHostTokens: [],
+    };
+
+    const mockFetch: typeof fetch = (async (input: string | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("duckduckgo.com/html")) {
+        return {
+          ok: true,
+          text: async () => `
+            <html>
+              <body>
+                <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rportakal.com%2Fen%2Fproducts%2Fabidin-dino-works">Result</a>
+              </body>
+            </html>
+          `
+        } as Response;
+      }
+
+      throw new Error(`unexpected provider fetch ${url}`);
+    }) as typeof fetch;
+
+    const candidates = await discoverWebCandidates({ ...query, analysisMode: "comprehensive" }, config, mockFetch);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.url).toBe("https://www.rportakal.com/en/products/abidin-dino-works");
+    expect(candidates[0]?.provenance).toBe("web_discovery");
+  });
+
+  it("keeps scanning duckduckgo fallback variants until multiple hosts are discovered", async () => {
+    const config = {
+      enabled: true,
+      maxCandidatesPerSource: 10,
+      maxQueryVariants: 3,
+      domainThrottlePerSource: 5,
+      maxDiscoveredDomainsPerRun: 3,
+      maxUrlsPerDiscoveredDomain: 2,
+      maxTotalCandidatesPerRun: 20,
+      webDiscoveryEnabled: true,
+      webDiscoveryProvider: "brave" as const,
+      webDiscoverySecondaryProvider: "tavily" as const,
+      webDiscoveryBlockHostTokens: [],
+    };
+
+    let fallbackCall = 0;
+    const mockFetch: typeof fetch = (async (input: string | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("duckduckgo.com/html")) {
+        fallbackCall += 1;
+        const href =
+          fallbackCall === 1
+            ? "https://www.rportakal.com/en/products/abidin-dino-works"
+            : fallbackCall === 2
+              ? "https://www.sothebys.com/en/buy/auction/2021/modern-art-online/abidin-dino"
+              : "https://www.phillips.com/detail/abidin-dino/12345";
+        return {
+          ok: true,
+          text: async () => `
+            <html>
+              <body>
+                <a class="result__a" href="https://duckduckgo.com/l/?uddg=${encodeURIComponent(href)}">Result</a>
+              </body>
+            </html>
+          `
+        } as Response;
+      }
+
+      throw new Error(`unexpected provider fetch ${url}`);
+    }) as typeof fetch;
+
+    const candidates = await discoverWebCandidates({ ...query, analysisMode: "comprehensive" }, config, mockFetch);
+    expect(candidates.map((candidate) => new URL(candidate.url).hostname)).toEqual([
+      "www.rportakal.com",
+      "www.sothebys.com",
+      "www.phillips.com"
+    ]);
+    expect(fallbackCall).toBeGreaterThan(1);
   });
 });

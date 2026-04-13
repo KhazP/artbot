@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AccessMode, AcceptanceReason, SourceAccessStatus, ValuationLane } from "./enums.js";
+import { hostHealthRecordSchema } from "./operations.js";
 
 export const sourceAttemptSchema = z.object({
   run_id: z.string(),
@@ -61,6 +62,7 @@ export const sourceAttemptSchema = z.object({
     "asking_price_ready",
     "inquiry_only_evidence",
     "price_hidden_evidence",
+    "entity_mismatch",
     "generic_shell_page",
     "missing_numeric_price",
     "missing_currency",
@@ -78,6 +80,10 @@ export interface AccessContext {
   mode: AccessMode;
   profileId?: string;
   cookieFile?: string;
+  sourceScope?: string[];
+  sessionExpiresAt?: string;
+  sensitivity?: "standard" | "sensitive" | "licensed";
+  encryptedAtRest?: boolean;
   manualLoginCheckpoint?: boolean;
   allowLicensed?: boolean;
   licensedIntegrations: string[];
@@ -94,3 +100,6 @@ export interface AttemptAcceptanceDetails {
   rejectionReason: string | null;
   valuationEligibilityReason: string | null;
 }
+
+export const persistedHostHealthSchema = z.array(hostHealthRecordSchema);
+export type PersistedHostHealth = z.infer<typeof persistedHostHealthSchema>;

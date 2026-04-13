@@ -34,6 +34,7 @@ function makeQuery(artist: string, title?: string) {
     manualLoginCheckpoint: false,
     allowLicensed: false,
     licensedIntegrations: [],
+    preferredDiscoveryProviders: [],
     crawlMode: "backfill" as const,
     sourceClasses
   };

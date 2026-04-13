@@ -79,6 +79,25 @@ describe("AuthManager", () => {
     expect(sessionPath).toBe("/tmp/askart-state.json");
   });
 
+  it("loads cookies from the configured profile cookie file when only profileId is provided", () => {
+    const tmpDir = path.resolve("/tmp", "artbot-auth-profile-cookie-test");
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const cookiePath = path.join(tmpDir, "sanatfiyat-cookies.json");
+    fs.writeFileSync(cookiePath, JSON.stringify([{ name: "sid", value: "licensed" }]), "utf-8");
+
+    const manager = new AuthManager([
+      {
+        id: "sanatfiyat-license",
+        mode: "licensed",
+        sourcePatterns: ["sanatfiyat"],
+        cookieFile: cookiePath
+      }
+    ]);
+
+    const cookieContent = manager.loadCookies("sanatfiyat-license");
+    expect(cookieContent).toContain("licensed");
+  });
+
   it("detects expired sessions using profile ttl", () => {
     const manager = new AuthManager([
       {
@@ -134,5 +153,49 @@ describe("AuthManager", () => {
     });
 
     expect(reusable.refresh).toBe(false);
+  });
+
+  it("materializes and persists encrypted session state", () => {
+    const tmpDir = path.resolve("/tmp", "artbot-encrypted-session-test");
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const statePath = path.join(tmpDir, "state.json.enc");
+    process.env.AUTH_STATE_ENCRYPTION_KEY = "test-secret";
+
+    const manager = new AuthManager([
+      {
+        id: "encrypted-profile",
+        mode: "authorized",
+        sourcePatterns: ["example"],
+        storageStatePath: statePath,
+        sensitivity: "sensitive",
+        encryptionMode: "aes-256-gcm"
+      }
+    ]);
+
+    const plaintextPath = path.join(tmpDir, "plain.json");
+    fs.writeFileSync(plaintextPath, JSON.stringify({ cookies: [{ name: "sid" }] }), "utf-8");
+    manager.persistSessionState("encrypted-profile", plaintextPath);
+
+    const encryptedContent = fs.readFileSync(statePath, "utf-8");
+    expect(encryptedContent).not.toContain("\"cookies\"");
+
+    const materialized = manager.materializeSessionState("encrypted-profile");
+    expect(materialized.encryptedAtRest).toBe(true);
+    expect(materialized.browserPath).toBeTruthy();
+    expect(fs.readFileSync(materialized.browserPath!, "utf-8")).toContain("\"cookies\"");
+    materialized.cleanup();
+  });
+
+  it("parses quoted AUTH_PROFILES_JSON from dotenv-style environments", () => {
+    process.env.AUTH_PROFILES_JSON =
+      '\'[{"id":"quoted-profile","mode":"licensed","sourcePatterns":["sanatfiyat"],"storageStatePath":"/tmp/quoted-state.json"}]\'';
+
+    const manager = new AuthManager();
+    const [profile] = manager.listProfiles();
+
+    expect(profile?.id).toBe("quoted-profile");
+    expect(profile?.mode).toBe("licensed");
+
+    delete process.env.AUTH_PROFILES_JSON;
   });
 });

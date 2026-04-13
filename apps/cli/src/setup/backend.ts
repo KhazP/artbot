@@ -162,13 +162,18 @@ function resolveBundledEnv(apiBaseUrl: string): NodeJS.ProcessEnv {
 
 export function resolveWorkspaceBackendEnv(
   apiBaseUrl: string,
-  baseEnv: NodeJS.ProcessEnv = process.env
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd()
 ): NodeJS.ProcessEnv {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   return {
     ...baseEnv,
+    DATABASE_PATH: path.join(workspaceRoot, "var", "data", "artbot.db"),
+    RUNS_ROOT: path.join(workspaceRoot, "var", "runs"),
     PORT: resolvePortFromApiBaseUrl(apiBaseUrl),
     HOST: "127.0.0.1",
-    API_BASE_URL: apiBaseUrl
+    API_BASE_URL: apiBaseUrl,
+    INIT_CWD: workspaceRoot
   };
 }
 
@@ -374,7 +379,7 @@ export async function startLocalBackendServices(
 
   if (status.mode === "workspace") {
     const workspaceRoot = resolveWorkspaceRoot(cwd);
-    const workspaceEnv = resolveWorkspaceBackendEnv(apiBaseUrl);
+    const workspaceEnv = resolveWorkspaceBackendEnv(apiBaseUrl, process.env, workspaceRoot);
     ensureWorkspaceRuntimeBuilt(workspaceRoot);
     apiPid = spawnDetachedProcess({
       command: resolvePnpmExecutable(),

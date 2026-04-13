@@ -63,7 +63,7 @@ function summarizeCompletedRun(details: PipelineDetails | null): { accepted: num
   if (!summary) return null;
   return {
     accepted: summary.accepted_records ?? 0,
-    coverage: Math.round((summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio ?? 0) * 100)
+    coverage: Math.round((summary.evaluation_metrics?.valuation_readiness_ratio ?? summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio ?? 0) * 100)
   };
 }
 
@@ -438,25 +438,46 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         };
         if (context.apiKey) headers["x-api-key"] = context.apiKey;
 
+        const query = {
+          artist,
+          title,
+          scope: "turkey_plus_international",
+          turkeyFirst: true,
+          analysisMode: context.defaults.analysisMode,
+          priceNormalization: context.defaults.priceNormalization,
+          authProfileId: context.defaults.authProfileId,
+          manualLoginCheckpoint: false,
+          allowLicensed: context.defaults.allowLicensed,
+          licensedIntegrations: context.defaults.licensedIntegrations
+        };
         const endpoint =
           kind === "artist_market_inventory" ? "/crawl/artist-market" : `/research/${kind}`;
+        const planEndpoint =
+          kind === "artist_market_inventory" ? "/crawl/artist-market/plan" : `/research/${kind}/plan`;
+        const planResponse = await fetch(`${context.apiBaseUrl}${planEndpoint}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ query })
+        });
+
+        if (planResponse.ok) {
+          const preview = (await planResponse.json()) as {
+            source_plan?: Array<{ source_name: string; selection_state: string }>;
+            totals?: Record<string, number>;
+          };
+          const selected = (preview.source_plan ?? [])
+            .filter((item) => item.selection_state === "selected")
+            .slice(0, 4)
+            .map((item) => item.source_name);
+          const totals = preview.totals ?? {};
+          const summary = `Plan: ${totals.selected ?? 0} selected, ${totals.deprioritized ?? 0} deprioritized, ${totals.skipped ?? 0} skipped, ${totals.blocked ?? 0} blocked.`;
+          setMessage(selected.length > 0 ? `${summary} Starting with ${selected.join(", ")}.` : summary);
+        }
+
         const response = await fetch(`${context.apiBaseUrl}${endpoint}`, {
           method: "POST",
           headers,
-          body: JSON.stringify({
-            query: {
-              artist,
-              title,
-              scope: "turkey_plus_international",
-              turkeyFirst: true,
-              analysisMode: context.defaults.analysisMode,
-              priceNormalization: context.defaults.priceNormalization,
-              authProfileId: context.defaults.authProfileId,
-              manualLoginCheckpoint: false,
-              allowLicensed: context.defaults.allowLicensed,
-              licensedIntegrations: context.defaults.licensedIntegrations
-            }
-          })
+          body: JSON.stringify({ query })
         });
 
         if (!response.ok) {

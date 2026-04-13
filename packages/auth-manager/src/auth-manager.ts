@@ -1,14 +1,43 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { AccessContext } from "@artbot/shared-types";
 import { logger } from "@artbot/observability";
 import type {
   AuthProfile,
   CredentialRefs,
+  MaterializedSessionState,
   ResolveAccessInput,
   SessionRefreshDecision,
   SessionRefreshInput
 } from "./types.js";
+
+function buildAuthProfilesParseCandidates(rawValue: string): string[] {
+  const trimmed = rawValue.trim();
+  const candidates = [trimmed];
+  const pushCandidate = (candidate: string) => {
+    if (candidate.length > 0 && !candidates.includes(candidate)) {
+      candidates.push(candidate);
+    }
+  };
+
+  if (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\""))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    pushCandidate(trimmed.slice(1, -1));
+  }
+
+  for (const candidate of [...candidates]) {
+    const repaired = candidate.replace(/\\"/g, "\"");
+    if (repaired !== candidate) {
+      pushCandidate(repaired);
+    }
+  }
+
+  return candidates;
+}
 
 function parseProfilesFromEnv(): AuthProfile[] {
   const json = process.env.AUTH_PROFILES_JSON;
@@ -16,19 +45,27 @@ function parseProfilesFromEnv(): AuthProfile[] {
     return [];
   }
 
-  try {
-    const parsed = JSON.parse(json) as AuthProfile[];
-    if (!Array.isArray(parsed)) {
-      return [];
+  for (const candidate of buildAuthProfilesParseCandidates(json)) {
+    try {
+      let parsed: unknown = candidate;
+      for (let depth = 0; depth < 3 && typeof parsed === "string"; depth += 1) {
+        parsed = JSON.parse(parsed) as unknown;
+      }
+
+      if (Array.isArray(parsed)) {
+        return parsed as AuthProfile[];
+      }
+    } catch {
+      continue;
     }
-    return parsed;
-  } catch {
-    return [];
   }
+
+  return [];
 }
 
 function profileMatchesSource(profile: AuthProfile, sourceName: string, sourceUrl: string): boolean {
-  return profile.sourcePatterns.some((pattern) => {
+  const patterns = profile.sourceScope?.length ? profile.sourceScope : profile.sourcePatterns;
+  return patterns.some((pattern) => {
     try {
       const regex = new RegExp(pattern, "i");
       return regex.test(sourceName) || regex.test(sourceUrl);
@@ -36,6 +73,45 @@ function profileMatchesSource(profile: AuthProfile, sourceName: string, sourceUr
       return false;
     }
   });
+}
+
+function deriveEncryptionKey(secret: string): Buffer {
+  return createHash("sha256").update(secret).digest();
+}
+
+function isEncryptedProfile(profile: AuthProfile | undefined): boolean {
+  return profile?.encryptionMode === "aes-256-gcm";
+}
+
+function encryptPayload(secret: string, plaintext: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", deriveEncryptionKey(secret), iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf-8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return JSON.stringify({
+    algorithm: "aes-256-gcm",
+    iv: iv.toString("base64"),
+    tag: tag.toString("base64"),
+    data: encrypted.toString("base64")
+  });
+}
+
+function decryptPayload(secret: string, payload: string): string {
+  const parsed = JSON.parse(payload) as {
+    algorithm?: string;
+    iv?: string;
+    tag?: string;
+    data?: string;
+  };
+
+  if (parsed.algorithm !== "aes-256-gcm" || !parsed.iv || !parsed.tag || !parsed.data) {
+    throw new Error("Encrypted auth payload is malformed.");
+  }
+
+  const decipher = createDecipheriv("aes-256-gcm", deriveEncryptionKey(secret), Buffer.from(parsed.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(parsed.tag, "base64"));
+  const decrypted = Buffer.concat([decipher.update(Buffer.from(parsed.data, "base64")), decipher.final()]);
+  return decrypted.toString("utf-8");
 }
 
 export class AuthManager {
@@ -55,8 +131,14 @@ export class AuthManager {
     if (input.sourceRequiresLicense) {
       const hasLicensedPath = Boolean(input.allowLicensed) && licensedIntegrations.includes(input.sourceName);
       if (hasLicensedPath) {
+        const licensedProfile = this.selectProfile(input.requestedProfileId, input.sourceName, input.sourceUrl);
         return {
           mode: "licensed",
+          profileId: licensedProfile?.id,
+          sourceScope: licensedProfile?.sourceScope,
+          sessionExpiresAt: licensedProfile?.expiresAt,
+          sensitivity: licensedProfile?.sensitivity ?? "licensed",
+          encryptedAtRest: isEncryptedProfile(licensedProfile),
           licensedIntegrations,
           sourceAccessStatus: "licensed_access",
           allowLicensed: true,
@@ -94,6 +176,10 @@ export class AuthManager {
         mode: selectedProfile.mode,
         profileId: selectedProfile.id,
         cookieFile: input.cookieFile ?? selectedProfile.cookieFile,
+        sourceScope: selectedProfile.sourceScope,
+        sessionExpiresAt: selectedProfile.expiresAt,
+        sensitivity: selectedProfile.sensitivity ?? (selectedProfile.mode === "licensed" ? "licensed" : "sensitive"),
+        encryptedAtRest: isEncryptedProfile(selectedProfile),
         manualLoginCheckpoint: input.manualLoginCheckpoint,
         allowLicensed: Boolean(input.allowLicensed),
         licensedIntegrations,
@@ -106,6 +192,10 @@ export class AuthManager {
       return {
         mode: "licensed",
         profileId: selectedProfile.id,
+        sourceScope: selectedProfile.sourceScope,
+        sessionExpiresAt: selectedProfile.expiresAt,
+        sensitivity: selectedProfile.sensitivity ?? "licensed",
+        encryptedAtRest: isEncryptedProfile(selectedProfile),
         allowLicensed: Boolean(input.allowLicensed),
         licensedIntegrations,
         sourceAccessStatus: "licensed_access",
@@ -118,6 +208,10 @@ export class AuthManager {
         mode: "authorized",
         profileId: selectedProfile.id,
         cookieFile: input.cookieFile ?? selectedProfile.cookieFile,
+        sourceScope: selectedProfile.sourceScope,
+        sessionExpiresAt: selectedProfile.expiresAt,
+        sensitivity: selectedProfile.sensitivity ?? "sensitive",
+        encryptedAtRest: isEncryptedProfile(selectedProfile),
         manualLoginCheckpoint: input.manualLoginCheckpoint,
         allowLicensed: Boolean(input.allowLicensed),
         licensedIntegrations,
@@ -162,17 +256,33 @@ export class AuthManager {
     return path.resolve("playwright", ".auth", `${profile.id}.json`);
   }
 
-  public loadCookies(cookieFile?: string): string | null {
-    if (!cookieFile) {
+  public loadCookies(profileId?: string, cookieFile?: string): string | null {
+    const profile = this.getProfileById(profileId);
+    const directCookiePath = profileId && (profileId.includes(path.sep) || path.isAbsolute(profileId)) ? profileId : undefined;
+    const resolvedCookieFile = cookieFile ?? profile?.cookieFile ?? directCookiePath;
+    const resolvedProfileId = profileId;
+    if (!resolvedCookieFile) {
       return null;
     }
 
     try {
-      const content = fs.readFileSync(cookieFile, "utf-8");
-      return content;
+      const content = fs.readFileSync(resolvedCookieFile, "utf-8");
+      if (!isEncryptedProfile(profile)) {
+        return content;
+      }
+
+      const secret = this.resolveEncryptionSecret(profile);
+      if (!secret) {
+        logger.warn("Encrypted auth profile missing encryption secret.", {
+          profileId: resolvedProfileId,
+          encryptionKeyEnv: profile?.encryptionKeyEnv
+        });
+        return null;
+      }
+      return decryptPayload(secret, content);
     } catch (error) {
       logger.warn("Failed to read cookie file.", {
-        cookieFile,
+        cookieFile: resolvedCookieFile,
         error: error instanceof Error ? error.message : String(error)
       });
       return null;
@@ -188,6 +298,90 @@ export class AuthManager {
     const folder = path.dirname(target);
     fs.mkdirSync(folder, { recursive: true });
     return target;
+  }
+
+  public materializeSessionState(profileId?: string): MaterializedSessionState {
+    const targetPath = this.ensureSessionDir(profileId);
+    const profile = this.getProfileById(profileId);
+    if (!targetPath || !profile || !isEncryptedProfile(profile)) {
+      return {
+        browserPath: targetPath,
+        targetPath,
+        encryptedAtRest: false,
+        cleanup: () => {}
+      };
+    }
+
+    const browserPath = path.join(os.tmpdir(), `artbot-session-${profile.id}-${Date.now()}.json`);
+    if (fs.existsSync(targetPath)) {
+      const secret = this.resolveEncryptionSecret(profile);
+      if (secret) {
+        const encryptedPayload = fs.readFileSync(targetPath, "utf-8");
+        fs.writeFileSync(browserPath, decryptPayload(secret, encryptedPayload), "utf-8");
+      }
+    }
+
+    return {
+      browserPath,
+      targetPath,
+      encryptedAtRest: true,
+      cleanup: () => {
+        if (fs.existsSync(browserPath)) {
+          fs.rmSync(browserPath, { force: true });
+        }
+      }
+    };
+  }
+
+  public persistSessionState(profileId: string | undefined, sessionPath: string | undefined): void {
+    if (!profileId || !sessionPath || !fs.existsSync(sessionPath)) {
+      return;
+    }
+
+    const profile = this.getProfileById(profileId);
+    const targetPath = this.ensureSessionDir(profileId);
+    if (!profile || !targetPath) {
+      return;
+    }
+
+    if (!isEncryptedProfile(profile)) {
+      if (sessionPath !== targetPath) {
+        fs.copyFileSync(sessionPath, targetPath);
+      }
+      return;
+    }
+
+    const secret = this.resolveEncryptionSecret(profile);
+    if (!secret) {
+      logger.warn("Skipping encrypted session persist because encryption secret is missing.", {
+        profileId,
+        encryptionKeyEnv: profile.encryptionKeyEnv
+      });
+      return;
+    }
+
+    const plaintext = fs.readFileSync(sessionPath, "utf-8");
+    fs.writeFileSync(targetPath, encryptPayload(secret, plaintext), "utf-8");
+  }
+
+  public isProfileRisky(profileId?: string): string | null {
+    const profile = this.getProfileById(profileId);
+    if (!profile) {
+      return null;
+    }
+    if ((profile.sensitivity === "sensitive" || profile.sensitivity === "licensed") && !isEncryptedProfile(profile)) {
+      return "Sensitive profile is not encrypted at rest.";
+    }
+    if (isEncryptedProfile(profile) && !this.resolveEncryptionSecret(profile)) {
+      return "Encrypted profile is missing its encryption key.";
+    }
+    if (profile.expiresAt) {
+      const expiresAt = new Date(profile.expiresAt);
+      if (!Number.isNaN(expiresAt.valueOf()) && expiresAt.getTime() <= Date.now()) {
+        return "Profile expiry date has passed.";
+      }
+    }
+    return null;
   }
 
   public isSessionExpired(profileId: string | undefined, lastRefreshedAtIso: string | undefined, now = new Date()): boolean {
@@ -262,5 +456,15 @@ export class AuthManager {
       return undefined;
     }
     return this.profiles.find((entry) => entry.id === profileId);
+  }
+
+  private resolveEncryptionSecret(profile: AuthProfile | undefined): string | null {
+    if (!profile || !isEncryptedProfile(profile)) {
+      return null;
+    }
+
+    const envName = profile.encryptionKeyEnv ?? "AUTH_STATE_ENCRYPTION_KEY";
+    const value = process.env[envName];
+    return typeof value === "string" && value.length > 0 ? value : null;
   }
 }

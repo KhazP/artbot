@@ -57,6 +57,8 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const NAVIGATION_SETTLE_MS = 1_500;
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -65,10 +67,95 @@ function slugify(value: string): string {
     .slice(0, 48);
 }
 
-function containsAuthIndicators(content: string): boolean {
-  const indicators = ["sign in", "log in", "oturum aç", "giriş yap", "member login", "subscribe to view"]; 
+function normalizeRenderedDiscoveryUrl(value: string | null | undefined, baseUrl: string): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (
+    !trimmed
+    || trimmed.startsWith("javascript:")
+    || trimmed.startsWith("mailto:")
+    || trimmed.startsWith("tel:")
+    || trimmed.startsWith("#")
+  ) {
+    return null;
+  }
+  try {
+    const url = new URL(trimmed, baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    url.hash = "";
+    for (const key of [...url.searchParams.keys()]) {
+      const lower = key.toLowerCase();
+      if (
+        lower.startsWith("utm_")
+        || lower === "gclid"
+        || lower === "fbclid"
+        || lower === "ref"
+        || lower === "_pos"
+        || lower === "_sid"
+        || lower === "_ss"
+      ) {
+        url.searchParams.delete(key);
+      }
+    }
+    const pathname = url.pathname.toLowerCase();
+    if (
+      pathname.endsWith(".oembed")
+      || /\.(?:css|js|json|xml|pdf|zip|mp3|mp4|ico)$/i.test(pathname)
+    ) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function extractInlineScriptDiscoveredUrls(content: string, baseUrl: string): string[] {
+  const urls = new Set<string>();
+  const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  const httpUrlRegex = /https?:\/\/[^\s"'`<>\\]+/gi;
+  let scriptMatch: RegExpExecArray | null = scriptRegex.exec(content);
+  while (scriptMatch) {
+    const scriptContent = scriptMatch[1] ?? "";
+    const matches = scriptContent.match(httpUrlRegex) ?? [];
+    for (const match of matches) {
+      const normalized = normalizeRenderedDiscoveryUrl(match, baseUrl);
+      if (normalized) {
+        urls.add(normalized);
+      }
+    }
+    scriptMatch = scriptRegex.exec(content);
+  }
+  return [...urls];
+}
+
+export function containsAuthIndicators(content: string): boolean {
   const lower = content.toLowerCase();
-  return indicators.some((token) => lower.includes(token));
+
+  const hardGateIndicators = [
+    "subscribe to view",
+    "only members can view",
+    "authentication required",
+    "please log in to continue",
+    "özel içerik sadece",
+    "üyelik paketlerimizi görmek",
+    "sadece sanatfiyat.com üyeleri tarafından görüntülenebilmektedir",
+    "yetersiz kredi",
+    "insufficient credit"
+  ];
+  if (hardGateIndicators.some((token) => lower.includes(token))) {
+    return true;
+  }
+
+  const hasPasswordField =
+    /<input\b[^>]+type=["']password["']/i.test(content)
+    || /<input\b[^>]+name=["']password["']/i.test(content);
+  const hasAuthPrompt =
+    /\b(?:sign in|log in|login|member login|oturum aç|giriş yap|giris yap)\b/i.test(content);
+
+  return hasPasswordField && hasAuthPrompt;
 }
 
 export function containsBlockedIndicators(content: string): boolean {
@@ -92,7 +179,7 @@ export function containsBlockedIndicators(content: string): boolean {
   }
 
   // Do not treat standalone "captcha" mentions as a block. Many normal pages include reCAPTCHA scripts.
-  if (lower.includes("captcha") && /(blocked|forbidden|cloudflare|challenge|verify you are human)/i.test(lower)) {
+  if (lower.includes("captcha") && /(blocked|forbidden|verify you are human|security check)/i.test(lower)) {
     return true;
   }
 
@@ -132,6 +219,17 @@ export function didRenderedPaginationAdvance(
 export class BrowserClient {
   constructor(private readonly authManager: AuthManager) {}
 
+  private async navigateWithRecovery(
+    page: Page,
+    url: string,
+    timeoutMs: number
+  ): Promise<void> {
+    await page.goto(url, { waitUntil: "commit", timeout: timeoutMs });
+    await page.waitForLoadState("domcontentloaded", { timeout: Math.min(timeoutMs, 8_000) }).catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => undefined);
+    await wait(NAVIGATION_SETTLE_MS);
+  }
+
   public async capture(input: BrowserCaptureInput): Promise<BrowserCaptureResult> {
     if (this.shouldUseStagehand()) {
       const stagehandResult = await this.captureWithStagehand(input);
@@ -164,10 +262,16 @@ export class BrowserClient {
       sessionPath
     });
 
-    if (sessionPath && refreshDecision.refresh && fs.existsSync(sessionPath)) {
+    if (
+      sessionPath
+      && refreshDecision.refresh
+      && refreshDecision.reason === "Authentication gate detected; force session refresh."
+      && fs.existsSync(sessionPath)
+    ) {
       fs.rmSync(sessionPath, { force: true });
     }
 
+    const materializedSession = this.authManager.materializeSessionState(input.accessContext.profileId);
     const browser = await chromium.launch({ headless: true });
     let context: BrowserContext | null = null;
     let traceStarted = false;
@@ -175,10 +279,10 @@ export class BrowserClient {
     try {
       context = await this.newContext(
         browser,
-        sessionPath,
+        materializedSession.browserPath,
         input.captureHeavyEvidence ? harPath : undefined
       );
-      await this.injectCookies(context, input.accessContext.cookieFile);
+      await this.injectCookies(context, input.accessContext.profileId, input.accessContext.cookieFile);
 
       if (input.captureHeavyEvidence) {
         await context.tracing.start({
@@ -202,7 +306,7 @@ export class BrowserClient {
         sessionRefreshReason: refreshDecision.reason
       });
 
-      await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      await this.navigateWithRecovery(page, input.url, timeoutMs);
 
       const captureAuthCheckpoints =
         input.accessContext.mode !== "anonymous" || Boolean(input.accessContext.manualLoginCheckpoint);
@@ -223,8 +327,9 @@ export class BrowserClient {
       const html = await page.content();
       fs.writeFileSync(rawSnapshotPath, html, "utf-8");
 
-      if (sessionPath) {
-        await context.storageState({ path: sessionPath });
+      if (materializedSession.browserPath) {
+        await context.storageState({ path: materializedSession.browserPath });
+        this.authManager.persistSessionState(input.accessContext.profileId, materializedSession.browserPath);
       }
 
       if (input.captureHeavyEvidence) {
@@ -249,6 +354,7 @@ export class BrowserClient {
         modelUsed: null
       };
     } finally {
+      materializedSession.cleanup();
       if (context) {
         if (input.captureHeavyEvidence && traceStarted) {
           try {
@@ -336,20 +442,26 @@ export class BrowserClient {
       sessionPath
     });
 
-    if (sessionPath && refreshDecision.refresh && fs.existsSync(sessionPath)) {
+    if (
+      sessionPath
+      && refreshDecision.refresh
+      && refreshDecision.reason === "Authentication gate detected; force session refresh."
+      && fs.existsSync(sessionPath)
+    ) {
       fs.rmSync(sessionPath, { force: true });
     }
 
+    const materializedSession = this.authManager.materializeSessionState(input.accessContext.profileId);
     const browser = await chromium.launch({ headless: true });
     let context: BrowserContext | null = null;
 
     try {
-      context = await this.newContext(browser, sessionPath);
-      await this.injectCookies(context, input.accessContext.cookieFile);
+      context = await this.newContext(browser, materializedSession.browserPath);
+      await this.injectCookies(context, input.accessContext.profileId, input.accessContext.cookieFile);
 
       const page = await context.newPage();
       page.setDefaultTimeout(timeoutMs);
-      await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      await this.navigateWithRecovery(page, input.url, timeoutMs);
 
       const discoveredUrls = new Set<string>();
       const discoveredImageUrls = new Set<string>();
@@ -381,16 +493,49 @@ export class BrowserClient {
         fs.writeFileSync(rawSnapshotPath, html, "utf-8");
         screenshotPaths.push(screenshotPath);
         rawSnapshotPaths.push(rawSnapshotPath);
+        const inlineScriptUrls = extractInlineScriptDiscoveredUrls(html, page.url());
 
         const pageArtifacts = await page.evaluate(() => {
           const normalize = (value: string | null | undefined): string | null => {
             if (!value) return null;
             const trimmed = value.trim();
-            if (!trimmed || trimmed.startsWith("javascript:") || trimmed.startsWith("mailto:")) {
+            if (
+              !trimmed
+              || trimmed.startsWith("javascript:")
+              || trimmed.startsWith("mailto:")
+              || trimmed.startsWith("tel:")
+              || trimmed.startsWith("#")
+            ) {
               return null;
             }
             try {
-              return new URL(trimmed, window.location.href).toString();
+              const url = new URL(trimmed, window.location.href);
+              if (url.protocol !== "http:" && url.protocol !== "https:") {
+                return null;
+              }
+              url.hash = "";
+              for (const key of [...url.searchParams.keys()]) {
+                const lower = key.toLowerCase();
+                if (
+                  lower.startsWith("utm_")
+                  || lower === "gclid"
+                  || lower === "fbclid"
+                  || lower === "ref"
+                  || lower === "_pos"
+                  || lower === "_sid"
+                  || lower === "_ss"
+                ) {
+                  url.searchParams.delete(key);
+                }
+              }
+              const pathname = url.pathname.toLowerCase();
+              if (
+                pathname.endsWith(".oembed")
+                || /\.(?:css|js|json|xml|pdf|zip|mp3|mp4|ico)$/i.test(pathname)
+              ) {
+                return null;
+              }
+              return url.toString();
             } catch {
               return null;
             }
@@ -416,6 +561,10 @@ export class BrowserClient {
           if (discoveredUrls.size >= maxLinks) break;
           discoveredUrls.add(url);
         }
+        for (const url of inlineScriptUrls) {
+          if (discoveredUrls.size >= maxLinks) break;
+          discoveredUrls.add(url);
+        }
         for (const imageUrl of pageArtifacts.images) {
           discoveredImageUrls.add(imageUrl);
         }
@@ -426,8 +575,9 @@ export class BrowserClient {
         }
       }
 
-      if (sessionPath) {
-        await context.storageState({ path: sessionPath });
+      if (materializedSession.browserPath) {
+        await context.storageState({ path: materializedSession.browserPath });
+        this.authManager.persistSessionState(input.accessContext.profileId, materializedSession.browserPath);
       }
 
       return {
@@ -441,6 +591,7 @@ export class BrowserClient {
         blockedDetected
       };
     } finally {
+      materializedSession.cleanup();
       if (context) {
         try {
           await context.close();
@@ -490,8 +641,8 @@ export class BrowserClient {
     return browser.newContext(contextOptions);
   }
 
-  private async injectCookies(context: BrowserContext, cookieFile?: string): Promise<void> {
-    const raw = this.authManager.loadCookies(cookieFile);
+  private async injectCookies(context: BrowserContext, profileId?: string, cookieFile?: string): Promise<void> {
+    const raw = this.authManager.loadCookies(profileId, cookieFile);
     if (!raw) {
       return;
     }
@@ -562,7 +713,7 @@ export class BrowserClient {
         return null;
       }
 
-      await stagehand.page.goto(input.url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      await stagehand.page.goto(input.url, { waitUntil: "commit", timeout: timeoutMs });
       await stagehand.page.screenshot({ path: screenshotPath, fullPage: true });
       const html = await stagehand.page.content();
       fs.writeFileSync(rawSnapshotPath, html, "utf-8");

@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import Table from "cli-table3";
 import { Command, CommanderError } from "commander";
@@ -8,6 +10,7 @@ import ora from "ora";
 import picocolors from "picocolors";
 import { ZodError } from "zod";
 import type {
+  AcceptanceReason,
   PriceRecord,
   RunEntity,
   RunDetailsResponsePayload,
@@ -16,6 +19,10 @@ import type {
   SourceAttempt
 } from "@artbot/shared-types";
 import { researchQuerySchema } from "@artbot/shared-types";
+import { AuthManager } from "@artbot/auth-manager";
+import { parseGenericLotFields } from "@artbot/extraction";
+import { evaluateAcceptance } from "@artbot/source-adapters";
+import { runArtifactGc } from "@artbot/storage";
 import {
   assessLocalSetup,
   buildAuthCaptureCommand,
@@ -74,12 +81,14 @@ interface CommonOptions {
   manualLogin?: boolean;
   allowLicensed?: boolean;
   licensedIntegrations?: string;
+  discoveryProviders?: string;
   heightCm?: string;
   widthCm?: string;
   depthCm?: string;
   wait?: boolean;
   waitInterval?: string;
   refresh?: boolean;
+  previewOnly?: boolean;
 }
 
 interface RunsListOptions {
@@ -99,6 +108,20 @@ interface AuthCaptureOptions {
   profileId: string;
 }
 
+interface ReplayAttemptOptions {
+  runId: string;
+  source?: string;
+  index?: string;
+}
+
+interface ArtifactGcOptions {
+  runsRoot?: string;
+}
+
+interface CanaryRunOptions {
+  fixturesRoot?: string;
+}
+
 interface GlobalOptions {
   json: boolean;
   apiBaseUrl: string;
@@ -108,6 +131,22 @@ interface GlobalOptions {
 }
 
 export type RunDetailsResponse = RunDetailsResponsePayload;
+
+interface SourcePlanPreviewResponse {
+  source_plan: Array<{
+    source_name: string;
+    venue_name: string;
+    source_family: string;
+    source_access_status: string;
+    candidate_count: number;
+    selection_state: string;
+    selection_reason: string | null;
+    skip_reason: string | null;
+    priority_rank: number;
+  }>;
+  candidate_cap: number;
+  totals: Record<string, number>;
+}
 
 interface RunsListResponse {
   runs: RunEntity[];
@@ -286,6 +325,12 @@ function buildQuery(options: CommonOptions, requireTitle: boolean) {
           .map((entry) => entry.trim())
           .filter(Boolean)
       : [],
+    preferredDiscoveryProviders: options.discoveryProviders
+      ? options.discoveryProviders
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      : [],
     crawlMode: options.refresh ? "refresh" : "backfill"
   };
 
@@ -362,8 +407,8 @@ export function renderSummaryTable(summary: RunSummary): string {
     head: ["Metric", "Value"]
   });
 
-  const crawledCoverage =
-    summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio;
+  const pricedEvidenceCoverage = summary.evaluation_metrics?.valuation_readiness_ratio;
+  const crawledCoverage = summary.priced_crawled_source_coverage_ratio ?? summary.priced_source_coverage_ratio;
 
   table.push(
     ["Accepted", summary.accepted_records],
@@ -371,15 +416,29 @@ export function renderSummaryTable(summary: RunSummary): string {
     ["Discovered Candidates", summary.discovered_candidates],
     ["Accepted from Discovery", summary.accepted_from_discovery],
     [
-      "Priced Coverage (Crawled)",
-      crawledCoverage != null ? `${Math.round(crawledCoverage * 100)}%` : "n/a"
+      "Priced Evidence Coverage",
+      pricedEvidenceCoverage != null ? `${Math.round(pricedEvidenceCoverage * 100)}%` : "n/a"
     ],
     ["Valuation Generated", summary.valuation_generated ? "yes" : "no"],
     ["Valuation Reason", summary.valuation_reason]
   );
 
+  if (summary.evaluation_metrics) {
+    table.push(
+      ["Accepted Precision", `${Math.round(summary.evaluation_metrics.accepted_record_precision * 100)}%`],
+      ["Priced Source Recall", `${Math.round(summary.evaluation_metrics.priced_source_recall * 100)}%`],
+      ["Source Completeness", `${Math.round(summary.evaluation_metrics.source_completeness_ratio * 100)}%`],
+      ["Manual Override Rate", `${Math.round(summary.evaluation_metrics.manual_override_rate * 100)}%`],
+      ["Coverage Target Met", summary.evaluation_metrics.coverage_target_met ? "yes" : "no"]
+    );
+  }
+
+  if (crawledCoverage != null) {
+    table.push(["Priced Source Coverage (Crawled)", `${Math.round(crawledCoverage * 100)}%`]);
+  }
+
   if (summary.priced_crawled_source_coverage_ratio != null && summary.priced_source_coverage_ratio != null) {
-    table.push(["Priced Coverage (Attempted)", `${Math.round(summary.priced_source_coverage_ratio * 100)}%`]);
+    table.push(["Priced Source Coverage (Attempted)", `${Math.round(summary.priced_source_coverage_ratio * 100)}%`]);
   }
 
   return table.toString();
@@ -392,6 +451,27 @@ export function renderBreakdownTable(title: string, values: Record<string, numbe
 
   for (const [key, value] of Object.entries(values)) {
     table.push([key, value]);
+  }
+
+  return table.toString();
+}
+
+export function renderSourcePlanTable(preview: SourcePlanPreviewResponse, limit = 12): string {
+  const table = new Table({
+    head: ["#", "Source", "Family", "State", "Access", "Candidates", "Reason"],
+    wordWrap: true
+  });
+
+  for (const item of preview.source_plan.slice(0, limit)) {
+    table.push([
+      item.priority_rank,
+      item.source_name,
+      item.source_family,
+      item.selection_state,
+      item.source_access_status,
+      `${item.candidate_count}/${preview.candidate_cap}`,
+      item.selection_reason ?? item.skip_reason ?? "-"
+    ]);
   }
 
   return table.toString();
@@ -502,7 +582,7 @@ function renderSetupIssues(assessment: SetupAssessment): string {
 
 function renderAuthProfilesTable(assessment: SetupAssessment): string {
   const table = new Table({
-    head: ["Profile", "Mode", "Matched Sources", "Storage State"]
+    head: ["Profile", "Mode", "Matched Sources", "Storage State", "Risk"]
   });
 
   const relevantById = new Map(assessment.relevantProfiles.map((entry) => [entry.profile.id, entry.matchedSources]));
@@ -514,7 +594,10 @@ function renderAuthProfilesTable(assessment: SetupAssessment): string {
       profile.id,
       profile.mode,
       (relevantById.get(profile.id) ?? []).join(", ") || "—",
-      session ? `${session.exists ? (session.expired ? "expired" : "ready") : "missing"} · ${session.storageStatePath}` : "—"
+      session
+        ? `${session.exists ? (session.expired ? "expired" : "ready") : "missing"} · ${session.encryptedAtRest ? "encrypted" : "plaintext"} · ${session.storageStatePath}`
+        : "—",
+      session?.riskyReason ?? "—"
     ]);
   }
 
@@ -535,6 +618,24 @@ function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: 
     logInfo(globals, ctx, "Top comparable records:");
     logInfo(globals, ctx, renderRecordsTable(details.records));
   }
+  if (details.recommended_actions && details.recommended_actions.length > 0) {
+    logInfo(globals, ctx, "");
+    logInfo(globals, ctx, "Recommended actions:");
+    for (const action of details.recommended_actions.slice(0, 5)) {
+      logInfo(globals, ctx, `- [${action.severity}] ${action.title}: ${action.reason}`);
+    }
+  }
+  if (details.source_plan && details.source_plan.length > 0) {
+    logInfo(globals, ctx, "");
+    logInfo(globals, ctx, "Source plan:");
+    for (const item of details.source_plan.slice(0, 8)) {
+      logInfo(
+        globals,
+        ctx,
+        `- ${item.source_name}: ${item.selection_state} · ${item.source_access_status} · ${item.candidate_count} candidates${item.selection_reason ? ` · ${item.selection_reason}` : item.skip_reason ? ` · ${item.skip_reason}` : ""}`
+      );
+    }
+  }
   if (details.run.runType === "artist_market_inventory") {
     logInfo(globals, ctx, "");
     logInfo(
@@ -552,6 +653,115 @@ function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: 
         `Price stats: realized ${realizedStats.count}, asking ${askingStats.count}, estimate ${estimateStats.count}`
       );
     }
+  }
+}
+
+function resolveRunsRootLocal(): string {
+  loadWorkspaceEnv();
+  return process.env.RUNS_ROOT ?? path.resolve(process.cwd(), "var/runs");
+}
+
+function summarizeReplayAcceptance(reason: AcceptanceReason): string {
+  return reason.replace(/_/g, " ");
+}
+
+async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const details = await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`);
+  const candidates = details.attempts.filter((attempt) => attempt.raw_snapshot_path);
+  const selected =
+    (options.source
+      ? candidates.find((attempt) => attempt.source_name.toLowerCase().includes(options.source!.toLowerCase()))
+      : undefined)
+    ?? candidates[toPositiveInt(options.index, 1) - 1]
+    ?? candidates[0];
+
+  if (!selected?.raw_snapshot_path) {
+    throw new InputValidationError(`No replayable raw snapshot found for run ${options.runId}.`);
+  }
+
+  const html = readFileSync(selected.raw_snapshot_path, "utf-8");
+  const parsed = parseGenericLotFields(html, selected.source_url);
+  const acceptance = evaluateAcceptance(parsed, parsed.priceHidden ? "price_hidden" : selected.source_access_status, {
+    sourceName: selected.source_name,
+    sourcePageType: "lot"
+  });
+  const payload = {
+    run_id: options.runId,
+    source_name: selected.source_name,
+    source_url: selected.source_url,
+    raw_snapshot_path: selected.raw_snapshot_path,
+    parsed,
+    acceptance
+  };
+  printJson(globals, ctx, payload);
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Replay source: ${selected.source_name}`);
+  logInfo(globals, ctx, `Snapshot: ${selected.raw_snapshot_path}`);
+  logInfo(globals, ctx, `Price type: ${parsed.priceType}`);
+  logInfo(globals, ctx, `Acceptance: ${summarizeReplayAcceptance(acceptance.acceptanceReason)}`);
+}
+
+async function handleArtifactGc(ctx: CliContext, options: ArtifactGcOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const runsRoot = options.runsRoot ? path.resolve(options.runsRoot) : resolveRunsRootLocal();
+  const result = runArtifactGc(runsRoot);
+  printJson(globals, ctx, { runsRoot, ...result });
+  if (globals.json) {
+    return;
+  }
+  logInfo(globals, ctx, `Runs root: ${runsRoot}`);
+  logInfo(globals, ctx, `Scanned items: ${result.scanned_items}`);
+  logInfo(globals, ctx, `Deleted items: ${result.deleted_items}`);
+  logInfo(globals, ctx, `Reclaimed bytes: ${result.reclaimed_bytes}`);
+}
+
+async function handleCanariesRun(ctx: CliContext, options: CanaryRunOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const fixturesRoot = options.fixturesRoot
+    ? path.resolve(options.fixturesRoot)
+    : path.resolve(process.cwd(), "data/fixtures/adapters");
+  const priorityFixtures = [
+    "muzayedeapp/lot.html",
+    "portakal/listing.html",
+    "clar/archive.html",
+    "antikasa/lot.html",
+    "sanatfiyat/licensed.html",
+    "invaluable/lot.html",
+    "liveauctioneers/lot.html"
+  ];
+
+  const results = priorityFixtures.map((relativePath) => {
+    const filePath = path.join(fixturesRoot, relativePath);
+    const html = readFileSync(filePath, "utf-8");
+    const parsed = parseGenericLotFields(html, `https://fixture.local/${relativePath}`);
+    const hasSignal =
+      parsed.priceHidden
+      || parsed.priceType !== "unknown"
+      || typeof parsed.priceAmount === "number"
+      || typeof parsed.estimateLow === "number"
+      || typeof parsed.estimateHigh === "number";
+    return {
+      fixture: relativePath,
+      ok: hasSignal,
+      failure: hasSignal ? null : "missing_price_signal",
+      priceType: parsed.priceType
+    };
+  });
+
+  printJson(globals, ctx, { fixturesRoot, results });
+  if (globals.json) {
+    return;
+  }
+  for (const result of results) {
+    logInfo(
+      globals,
+      ctx,
+      `${result.ok ? "PASS" : "FAIL"} ${result.fixture} · ${result.priceType}${result.failure ? ` · ${result.failure}` : ""}`
+    );
   }
 }
 
@@ -605,6 +815,40 @@ async function handleResearch(
       : runType === "work"
         ? "/research/work"
         : "/crawl/artist-market";
+  const planPath =
+    runType === "artist"
+      ? "/research/artist/plan"
+      : runType === "work"
+        ? "/research/work/plan"
+        : "/crawl/artist-market/plan";
+
+  const shouldPreviewPlan = !globals.json || Boolean(options.previewOnly);
+  const preview = shouldPreviewPlan
+    ? await requestJson<SourcePlanPreviewResponse>(ctx, globals, "POST", planPath, { query })
+    : null;
+
+  if (preview) {
+    if (globals.json && options.previewOnly) {
+      printJson(globals, ctx, preview);
+      return;
+    }
+
+    if (!globals.json) {
+      logInfo(globals, ctx, "Execution plan");
+      logInfo(globals, ctx, renderSourcePlanTable(preview));
+      logInfo(
+        globals,
+        ctx,
+        `Selected: ${preview.totals.selected ?? 0} · Deprioritized: ${preview.totals.deprioritized ?? 0} · Skipped: ${preview.totals.skipped ?? 0} · Blocked: ${preview.totals.blocked ?? 0}`
+      );
+      logInfo(globals, ctx, "");
+    }
+  }
+
+  if (options.previewOnly) {
+    return;
+  }
+
   const created = await requestJson<{ runId: string; status: RunStatus }>(
     ctx,
     globals,
@@ -814,7 +1058,7 @@ async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, c
   }
 
   logInfo(globals, ctx, `Launching Playwright auth capture for ${profile.id}...`);
-  const playwrightCli = require.resolve("playwright/cli");
+  const playwrightCli = path.join(path.dirname(require.resolve("playwright")), "cli.js");
   const result = spawnSync(
     process.execPath,
     [playwrightCli, "codegen", capture.sourceUrl, `--save-storage=${capture.storageStatePath}`],
@@ -827,6 +1071,12 @@ async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, c
 
   if (result.status !== 0) {
     throw new Error(`Auth capture exited with status ${result.status ?? 1}.`);
+  }
+
+  const authManager = new AuthManager([profile]);
+  authManager.persistSessionState(profile.id, capture.storageStatePath);
+  if (capture.storageStatePath !== capture.finalStorageStatePath && fs.existsSync(capture.storageStatePath)) {
+    fs.rmSync(capture.storageStatePath, { force: true });
   }
 }
 
@@ -850,7 +1100,9 @@ function addCommonResearchFlags(command: Command, withOptionalTitle: boolean): C
     .option("--manual-login", "Enable manual login checkpoint")
     .option("--allow-licensed", "Allow licensed integrations")
     .option("--licensed-integrations <list>", "Comma-separated source names")
+    .option("--discovery-providers <list>", "Comma-separated discovery providers (brave,tavily)")
     .option("--refresh", "Run an incremental refresh instead of a full backfill")
+    .option("--preview-only", "Show the source plan without creating the run")
     .option("--wait", "Wait until run reaches terminal state")
     .option("--wait-interval <seconds>", "Polling interval when --wait is enabled");
 
@@ -1019,6 +1271,35 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .argument("<profileId>", "Profile identifier")
     .action(async (profileId: string, _options: Record<string, never>, command: Command) => {
       await handleAuthCapture(ctx, { profileId }, command);
+    });
+
+  const replayGroup = program.command("replay").description("Offline replay and parser-debug commands");
+  replayGroup
+    .command("attempt")
+    .description("Replay a stored raw snapshot from a completed run")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .option("--source <name>", "Source name substring")
+    .option("--index <number>", "1-based replay attempt index", "1")
+    .action(async (options: ReplayAttemptOptions, command: Command) => {
+      await handleReplayAttempt(ctx, options, command);
+    });
+
+  const opsGroup = program.command("ops").description("Operational maintenance commands");
+  opsGroup
+    .command("gc")
+    .description("Run artifact retention and garbage collection over run artifacts")
+    .option("--runs-root <path>", "Runs root to scan")
+    .action(async (options: ArtifactGcOptions, command: Command) => {
+      await handleArtifactGc(ctx, options, command);
+    });
+
+  const canaryGroup = program.command("canaries").description("Fixture-backed canary checks");
+  canaryGroup
+    .command("run")
+    .description("Run lightweight canaries for top fixture families")
+    .option("--fixtures-root <path>", "Fixture root override")
+    .action(async (options: CanaryRunOptions, command: Command) => {
+      await handleCanariesRun(ctx, options, command);
     });
 }
 

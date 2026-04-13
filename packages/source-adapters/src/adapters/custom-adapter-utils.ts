@@ -29,6 +29,8 @@ function isFiniteNumber(value: number | null): value is number {
 function normalizeTitle(value: string | null | undefined): string {
   return (value ?? "")
     .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9çğıöşü\s]/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -36,13 +38,32 @@ function normalizeTitle(value: string | null | undefined): string {
 
 const GENERIC_SHELL_TITLE_PATTERNS = [
   /\banasayfa\b/i,
+  /\binstagram\b/i,
   /\bkategoriler\b/i,
+  /\bm[üu]zayede kurallar[ıi]\b/i,
   /\bonline muzayede app uygulamasi\b/i,
   /\bbonhams search\b/i,
   /\bsearch art and objects\b/i,
   /\bsearch results\b/i,
+  /\bresults found\b/i,
   /\bhome(page)?\b/i,
-  /\bcategories?\b/i
+  /\bcategories?\b/i,
+  /^hemen al\b/i,
+  /^m[üu]zayede ar[şs]ivi\b/i,
+  /^auction archive\b/i,
+  /\bportakal sanat ve kultur evi\b/i
+];
+
+const LOW_VALUE_DISCOVERY_URL_PATTERNS = [
+  /^https?:\/\/(?:www\.)?(?:instagram|facebook|linkedin|youtube|x|twitter)\.com/i,
+  /^https?:\/\/(?:api\.)?whatsapp\.com/i,
+  /\/(?:cart|sepet)(?:[/?#.]|$)/i,
+  /\/(?:account|hesabim|uyelik|uyelik-sozlesmesi|login|register|signup|sign-in|sign-up)(?:[/?#.]|$)/i,
+  /\/giris[^/]*(?:[/?#.]|$)/i,
+  /\/(?:contact|iletisim|about|hakkimizda|privacy|gizlilik|terms|kosullar|sartlar-ve-kosullar)(?:[/?#.]|$)/i,
+  /\/(?:download-app|siparislerim|desteklerim|sifremi(?:unuttum)?|odeme_bilgilendirme|kargo_bilgileri)(?:[/?#.]|$)/i,
+  /\/(?:collections\/shop|collections\/private-sales|pages\/|shop|dukkan\.html|tumurunler\.html|muzayedeler\.html)(?:[/?#]|$)/i,
+  /\/(?:rss|feed)(?:[/?#.]|$)/i
 ];
 
 function isGenericShellTitle(
@@ -69,6 +90,82 @@ function isGenericShellTitle(
   }
 
   return false;
+}
+
+function urlHasLowValueDiscoveryPattern(url: string): boolean {
+  return LOW_VALUE_DISCOVERY_URL_PATTERNS.some((pattern) => pattern.test(url));
+}
+
+function urlContainsRequestedEntity(
+  candidateUrl: string | null | undefined,
+  queryArtist?: string,
+  queryTitle?: string
+): boolean {
+  if (!candidateUrl) {
+    return false;
+  }
+
+  const normalizedCandidate = normalizeTitle(candidateUrl);
+  if (!normalizedCandidate) {
+    return false;
+  }
+
+  const normalizedArtist = normalizeTitle(queryArtist);
+  const normalizedQueryTitle = normalizeTitle(queryTitle);
+
+  if (normalizedQueryTitle && normalizedCandidate.includes(normalizedQueryTitle)) {
+    return true;
+  }
+
+  if (!normalizedArtist) {
+    return false;
+  }
+
+  return normalizedArtist
+    .split(" ")
+    .filter((token) => token.length >= 3)
+    .every((token) => normalizedCandidate.includes(token));
+}
+
+function parsedFieldsContainRequestedEntity(
+  parsed: GenericParsedFields,
+  queryArtist?: string,
+  queryTitle?: string
+): boolean {
+  const parsedTitle = normalizeTitle(parsed.title);
+  const parsedArtist = normalizeTitle(parsed.artistName);
+  const normalizedArtist = normalizeTitle(queryArtist);
+  const normalizedQueryTitle = normalizeTitle(queryTitle);
+
+  if (
+    normalizedQueryTitle &&
+    parsedTitle &&
+    (parsedTitle.includes(normalizedQueryTitle) || normalizedQueryTitle.includes(parsedTitle))
+  ) {
+    return true;
+  }
+
+  if (!normalizedArtist) {
+    return false;
+  }
+
+  if (parsedArtist && (parsedArtist.includes(normalizedArtist) || normalizedArtist.includes(parsedArtist))) {
+    return true;
+  }
+
+  return parsedTitle.includes(normalizedArtist);
+}
+
+function hasRecordLevelEntitySignal(
+  parsed: GenericParsedFields,
+  candidateUrl: string | null | undefined,
+  queryArtist?: string,
+  queryTitle?: string
+): boolean {
+  return (
+    parsedFieldsContainRequestedEntity(parsed, queryArtist, queryTitle) ||
+    urlContainsRequestedEntity(candidateUrl, queryArtist, queryTitle)
+  );
 }
 
 function inferValuationLane(priceType: GenericParsedFields["priceType"]): ValuationLane {
@@ -134,6 +231,9 @@ export function evaluateAcceptance(
   context?: {
     sourceName?: string;
     sourcePageType?: SourceCandidate["sourcePageType"];
+    candidateUrl?: string;
+    queryArtist?: string;
+    queryTitle?: string;
   }
 ): AttemptAcceptanceDetails {
   if (sourceStatus === "blocked") {
@@ -147,7 +247,9 @@ export function evaluateAcceptance(
     };
   }
 
-  if (isGenericShellTitle(parsed.title, context?.sourceName, context?.sourcePageType)) {
+  const hasLotAnchor = Boolean(parsed.lotNumber);
+  const isDetailPage = context?.sourcePageType === "lot" || context?.sourcePageType === "price_db";
+  if (!isDetailPage && !hasLotAnchor && isGenericShellTitle(parsed.title, context?.sourceName, context?.sourcePageType)) {
     return {
       acceptedForEvidence: false,
       acceptedForValuation: false,
@@ -155,6 +257,21 @@ export function evaluateAcceptance(
       acceptanceReason: "generic_shell_page",
       rejectionReason: "Generic navigation/search page detected; not retained as an artwork record.",
       valuationEligibilityReason: "Shell pages are excluded from evidence and valuation."
+    };
+  }
+
+  if (
+    !isDetailPage &&
+    (context?.queryArtist || context?.queryTitle) &&
+    !hasRecordLevelEntitySignal(parsed, context?.candidateUrl, context?.queryArtist, context?.queryTitle)
+  ) {
+    return {
+      acceptedForEvidence: false,
+      acceptedForValuation: false,
+      valuationLane: "none",
+      acceptanceReason: "entity_mismatch",
+      rejectionReason: "Listing/search page lacked record-level evidence for the requested artist or work.",
+      valuationEligibilityReason: "Record-level entity confirmation is required before retaining listing pages."
     };
   }
 
@@ -453,13 +570,19 @@ export function extractHrefCandidates(
         lower === "gclid" ||
         lower === "fbclid" ||
         lower === "mc_cid" ||
-        lower === "mc_eid"
+        lower === "mc_eid" ||
+        lower === "_pos" ||
+        lower === "_sid" ||
+        lower === "_ss"
       ) {
         url.searchParams.delete(key);
       }
     }
 
     const lowerPath = url.pathname.toLowerCase();
+    if (lowerPath.endsWith(".oembed")) {
+      return null;
+    }
     if (lowerPath.endsWith("/feed") || lowerPath.endsWith("/feed/")) {
       return null;
     }
@@ -490,6 +613,9 @@ export function extractHrefCandidates(
     }
 
     if (seen.has(absolute)) {
+      continue;
+    }
+    if (urlHasLowValueDiscoveryPattern(absolute)) {
       continue;
     }
     if (!matchers.some((matcher) => matcher.test(absolute))) {

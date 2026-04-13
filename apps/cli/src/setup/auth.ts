@@ -14,6 +14,10 @@ function normalizeSourcePattern(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function isEncryptedProfile(profile: AuthProfile): boolean {
+  return profile.encryptionMode === "aes-256-gcm";
+}
+
 function buildAuthProfilesParseCandidates(rawValue: string): string[] {
   const trimmed = rawValue.trim();
   const candidates = [trimmed];
@@ -124,12 +128,19 @@ export function parseAuthProfilesJson(rawValue: string | undefined): ParseAuthPr
         id: candidate.id.trim(),
         mode: candidate.mode,
         sourcePatterns: candidate.sourcePatterns.map((pattern: string) => pattern.trim()).filter(Boolean),
+        sourceScope: Array.isArray(candidate.sourceScope)
+          ? candidate.sourceScope.map((pattern: string) => pattern.trim()).filter(Boolean)
+          : undefined,
         cookieFile: candidate.cookieFile,
         usernameEnv: candidate.usernameEnv,
         passwordEnv: candidate.passwordEnv,
         apiKeyEnv: candidate.apiKeyEnv,
         storageStatePath: candidate.storageStatePath,
-        sessionTtlMinutes: candidate.sessionTtlMinutes
+        sessionTtlMinutes: candidate.sessionTtlMinutes,
+        expiresAt: candidate.expiresAt,
+        sensitivity: candidate.sensitivity,
+        encryptionMode: candidate.encryptionMode,
+        encryptionKeyEnv: candidate.encryptionKeyEnv
       });
     }
 
@@ -173,12 +184,30 @@ export function inspectSessionState(profile: AuthProfile, cwd = process.cwd(), n
     expired = now.getTime() - stat.mtime.getTime() > ttlMinutes * 60 * 1000;
   }
 
+  let riskyReason: string | null = null;
+  if ((profile.sensitivity === "sensitive" || profile.sensitivity === "licensed") && !isEncryptedProfile(profile)) {
+    riskyReason = "Sensitive profile is not encrypted at rest.";
+  } else if (isEncryptedProfile(profile)) {
+    const envName = profile.encryptionKeyEnv ?? "AUTH_STATE_ENCRYPTION_KEY";
+    if (!process.env[envName]) {
+      riskyReason = `Missing encryption key env ${envName}.`;
+    }
+  }
+  if (!riskyReason && profile.expiresAt) {
+    const expiresAt = new Date(profile.expiresAt);
+    if (!Number.isNaN(expiresAt.valueOf()) && expiresAt.getTime() <= now.getTime()) {
+      riskyReason = "Profile expiry date has passed.";
+    }
+  }
+
   return {
     profileId: profile.id,
     storageStatePath,
     exists,
     lastModifiedAtIso,
-    expired
+    expired,
+    encryptedAtRest: isEncryptedProfile(profile),
+    riskyReason
   };
 }
 
@@ -206,11 +235,14 @@ export function findAuthRelevantProfiles(profiles: AuthProfile[], sourceNames: s
 }
 
 export function buildAuthCaptureCommand(profile: AuthProfile, sourceUrl: string, storageStatePath = resolveStorageStatePath(profile)): AuthCaptureCommand {
+  const captureStorageStatePath =
+    profile.encryptionMode === "aes-256-gcm" ? `${storageStatePath}.plaintext` : storageStatePath;
   const command = `artbot auth capture ${profile.id}`;
   return {
     profileId: profile.id,
     sourceUrl,
-    storageStatePath,
+    storageStatePath: captureStorageStatePath,
+    finalStorageStatePath: storageStatePath,
     command
   };
 }

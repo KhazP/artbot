@@ -41,4 +41,24 @@ describe("extractHrefCandidates", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.url).toBe("https://example.com/lot/123");
   });
+
+  it("drops low-value navigation and social links during discovery expansion", () => {
+    const html = `
+      <a href="https://www.instagram.com/example">instagram</a>
+      <a href="/cart">cart</a>
+      <a href="/giris21.html">login</a>
+      <a href="/lot/123">lot</a>
+    `;
+
+    const candidates = extractHrefCandidates(
+      html,
+      "https://example.com/search?q=test",
+      "lot",
+      "listing_expansion",
+      0.8,
+      [/.*/]
+    );
+
+    expect(candidates.map((entry) => entry.url)).toEqual(["https://example.com/lot/123"]);
+  });
 });

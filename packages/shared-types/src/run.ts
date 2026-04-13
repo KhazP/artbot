@@ -11,6 +11,13 @@ import {
   reviewItemSchema,
   sourceHostSchema
 } from "./inventory.js";
+import {
+  artifactManifestSchema,
+  evaluationMetricsSchema,
+  hostHealthRecordSchema,
+  recommendedActionSchema,
+  sourcePlanItemSchema
+} from "./operations.js";
 import { researchQuerySchema } from "./query.js";
 import { priceRecordSchema } from "./record.js";
 
@@ -74,6 +81,7 @@ export const runSummarySchema = z.object({
         "asking_price_ready",
         "inquiry_only_evidence",
         "price_hidden_evidence",
+        "entity_mismatch",
         "generic_shell_page",
         "missing_numeric_price",
         "missing_currency",
@@ -84,6 +92,8 @@ export const runSummarySchema = z.object({
       z.number().int().nonnegative()
     )
     .optional(),
+  evaluation_metrics: evaluationMetricsSchema.optional(),
+  persisted_source_health: z.array(hostHealthRecordSchema).optional(),
   valuation_generated: z.boolean(),
   valuation_reason: z.string()
 });
@@ -120,6 +130,10 @@ export const runDetailsResponseSchema = z.object({
   summary: runSummarySchema,
   records: z.array(priceRecordSchema),
   attempts: z.array(sourceAttemptSchema),
+  source_plan: z.array(sourcePlanItemSchema).optional(),
+  recommended_actions: z.array(recommendedActionSchema).optional(),
+  artifact_manifest: artifactManifestSchema.optional(),
+  persisted_source_health: z.array(hostHealthRecordSchema).optional(),
   valuation: z.unknown().optional(),
   duplicates: z.array(priceRecordSchema).optional(),
   per_painting_stats: z.array(z.unknown()).optional(),
@@ -149,6 +163,7 @@ export const acceptanceReasonList: AcceptanceReason[] = [
   "asking_price_ready",
   "inquiry_only_evidence",
   "price_hidden_evidence",
+  "entity_mismatch",
   "generic_shell_page",
   "missing_numeric_price",
   "missing_currency",

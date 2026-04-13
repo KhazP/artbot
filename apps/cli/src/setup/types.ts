@@ -2,12 +2,17 @@ export interface AuthProfile {
   id: string;
   mode: "authorized" | "licensed";
   sourcePatterns: string[];
+  sourceScope?: string[];
   cookieFile?: string;
   usernameEnv?: string;
   passwordEnv?: string;
   apiKeyEnv?: string;
   storageStatePath?: string;
   sessionTtlMinutes?: number;
+  expiresAt?: string;
+  sensitivity?: "standard" | "sensitive" | "licensed";
+  encryptionMode?: "none" | "aes-256-gcm";
+  encryptionKeyEnv?: string;
 }
 
 export interface ParseAuthProfilesResult {
@@ -27,6 +32,8 @@ export interface AuthProfileSessionState {
   exists: boolean;
   lastModifiedAtIso: string | null;
   expired: boolean;
+  encryptedAtRest: boolean;
+  riskyReason?: string | null;
 }
 
 export interface LlmHealthResult {
@@ -48,6 +55,7 @@ export interface AuthCaptureCommand {
   profileId: string;
   sourceUrl: string;
   storageStatePath: string;
+  finalStorageStatePath: string;
   command: string;
 }
 

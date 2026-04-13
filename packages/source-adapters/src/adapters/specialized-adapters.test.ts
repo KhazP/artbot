@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { researchQuerySchema } from "@artbot/shared-types";
 import type { AdapterExtractionContext, SourceCandidate } from "../types.js";
@@ -153,10 +154,11 @@ const fetchMock = vi.hoisted(() => {
 });
 
 vi.mock("@artbot/extraction", async () => {
-  const actual = await vi.importActual<typeof import("@artbot/extraction")>("@artbot/extraction");
+  const parserModuleUrl = pathToFileURL(path.resolve(process.cwd(), "../extraction/src/lot-parser.ts")).href;
+  const { parseGenericLotFields } = await import(parserModuleUrl);
   return {
-    ...actual,
     fetchCheapestFirst: fetchMock,
+    parseGenericLotFields,
     extractWithGeminiSchema: vi.fn(async () => null)
   };
 });
@@ -226,8 +228,9 @@ describe("specialized adapters", () => {
 
     const result = await adapter.extract(candidate("https://muzayede.app/search?q=dogancay"), context("anonymous", "public_access"));
     expect(result.discoveredCandidates?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect((result.discoveredCandidates ?? []).some((entry) => entry.url.includes("muzayede.app/lot/12345"))).toBe(true);
     expect(
-      (result.discoveredCandidates ?? []).every((entry) => entry.url.includes("muzayede.app"))
+      (result.discoveredCandidates ?? []).some((entry) => entry.url.includes("bayrakmuzayede.com/search?q="))
     ).toBe(true);
     expect(result.attempt.discovery_provenance).toBe("seed");
   });
@@ -279,10 +282,98 @@ describe("specialized adapters", () => {
     expect(portakalResult.record?.price_type).toBe("asking_price");
 
     const clarBuyResult = await clarBuy.extract(candidate("https://clar-buy.test/search?q=dogancay"), context("anonymous", "public_access"));
-    expect(clarBuyResult.record?.price_type).toBe("asking_price");
+    expect(clarBuyResult.record).toBeNull();
+    expect(clarBuyResult.attempt.acceptance_reason).toBe("entity_mismatch");
+    expect((clarBuyResult.discoveredCandidates ?? []).some((entry) => /\/urun\/4455$/i.test(entry.url))).toBe(true);
 
     const clarArchiveResult = await clarArchive.extract(candidate("https://clar-archive.test/search?q=dogancay"), context("anonymous", "public_access"));
-    expect(["realized_price", "estimate"]).toContain(clarArchiveResult.record?.price_type);
+    expect(clarArchiveResult.record).toBeNull();
+    expect(clarArchiveResult.attempt.acceptance_reason).toBe("entity_mismatch");
+    expect((clarArchiveResult.discoveredCandidates ?? []).some((entry) => /\/auction\/lot\/7788$/i.test(entry.url))).toBe(true);
+  });
+
+  it("rejects title-led entity mismatches even when the page mentions the query artist elsewhere", async () => {
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      const html = `
+        <html>
+          <body>
+            <h1>FERRUH BASAGA - KADIN PORTRESI</h1>
+            <p>ABIDIN DINO 1913-1993 biyografi metni referans olarak asagida yer alir.</p>
+            <p>Hemen Al: 320.000 TL</p>
+          </body>
+        </html>
+      `;
+      return {
+        url,
+        html,
+        markdown: html,
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    });
+
+    const adapter = new DeterministicVenueAdapter({
+      id: "clar-buy-test",
+      sourceName: "Clar Buy",
+      venueName: "Clar",
+      venueType: "auction_house",
+      sourcePageType: "lot",
+      tier: 1,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://clar-buy.test",
+      searchPaths: ["/search?q="],
+      lotUrlMatchers: [/\/urun\//i]
+    });
+
+    const result = await adapter.extract(candidate("https://clar-buy.test/urun/4455", "lot"), context("anonymous", "public_access"));
+    expect(result.attempt.accepted).toBe(false);
+    expect(result.attempt.acceptance_reason).toBe("entity_mismatch");
+    expect(result.record).toBeNull();
+  });
+
+  it("discovers Clar archive event pages and keeps them typed as listing pages", async () => {
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      const html = `
+        <html>
+          <body>
+            <a href="/muzayede/34308/karma-eserler-muzayedesi">Karma Eserler Muzayedesi</a>
+            <a href="/canli-muzayede/34308/karma-eserler-muzayedesi">Canli Muzayede</a>
+            <p>Estimate: 300.000 TL - 450.000 TL</p>
+          </body>
+        </html>
+      `;
+      return {
+        url,
+        html,
+        markdown: html,
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    });
+
+    const adapter = new DeterministicVenueAdapter({
+      id: "clar-archive",
+      sourceName: "Clar Archive",
+      venueName: "Clar",
+      venueType: "auction_house",
+      sourcePageType: "listing",
+      tier: 1,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://clar-archive.test",
+      searchPaths: ["/search?q="],
+      lotUrlMatchers: [/\/lot\//i, /\/muzayede\/\d+\//i, /\/canli-muzayede\/\d+\//i]
+    });
+
+    const result = await adapter.extract(candidate("https://clar-archive.test/search?q=dogancay"), context("anonymous", "public_access"));
+    expect((result.discoveredCandidates ?? []).some((entry) => /\/muzayede\/34308\//i.test(entry.url))).toBe(true);
+    expect((result.discoveredCandidates ?? []).some((entry) => /\/canli-muzayede\/34308\//i.test(entry.url))).toBe(true);
+    expect(
+      (result.discoveredCandidates ?? [])
+        .filter((entry) => /34308/.test(entry.url))
+        .every((entry) => entry.sourcePageType === "listing")
+    ).toBe(true);
   });
 
   it("marks maintenance pages as blocked", async () => {
@@ -353,6 +444,123 @@ describe("specialized adapters", () => {
     expect(licensed.record?.price_type).toBe("realized_with_buyers_premium");
   });
 
+  it("discovers Sanatfiyat artwork-detail pages from artist-detail pages", async () => {
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      const html = `
+        <html>
+          <body>
+            <h1>Abidin Dino</h1>
+            <a href="https://sanatfiyat.com/artist/artwork-detail/138211/isimsiz">Isimsiz</a>
+            <a href="https://sanatfiyat.com/artist/artwork-detail/138209/eller-serisinden">Eller Serisinden</a>
+          </body>
+        </html>
+      `;
+      return {
+        url,
+        html,
+        markdown: html,
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    });
+
+    const sanatfiyat = new DeterministicVenueAdapter({
+      id: "sanatfiyat-licensed-extractor",
+      sourceName: "Sanatfiyat",
+      venueName: "Sanatfiyat",
+      venueType: "database",
+      sourcePageType: "price_db",
+      tier: 2,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://sanatfiyat.com",
+      searchPaths: ["/search?q=", "/artist?q="],
+      lotUrlMatchers: [/\/lot\//i, /\/result\//i, /\/eser\//i],
+      requiresAuth: true,
+      requiresLicense: true,
+      supportedAccessModes: ["licensed"]
+    });
+
+    const result = await sanatfiyat.extract(
+      candidate("https://sanatfiyat.com/artist/artist-detail/95/abidin-dino", "artist_page"),
+      context("licensed", "licensed_access")
+    );
+
+    expect(result.discoveredCandidates?.some((entry) => entry.url.includes("/artist/artwork-detail/138211/isimsiz"))).toBe(true);
+    expect(
+      result.discoveredCandidates?.find((entry) => entry.url.includes("/artist/artwork-detail/138209/eller-serisinden"))
+        ?.sourcePageType
+    ).toBe("lot");
+  });
+
+  it("parses Sanatfiyat opening-bid rows as asking prices when hammer columns are zero", async () => {
+    fetchMock.mockImplementationOnce(async (url: string) => {
+      const html = `
+        <html>
+          <body>
+            <div class="title"><h3>Eser Fiyat Trend Analizi</h3></div>
+            <table class="table table-striped table-inverse">
+              <thead>
+                <tr>
+                  <th>Müzayede Tarihi</th>
+                  <th>Açılış Fiyatı</th>
+                  <th>Pey</th>
+                  <th>TL</th>
+                  <th>Çekiç Fiyatı USD</th>
+                  <th>EUR</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>14-04-2024</td>
+                  <td>55.000 TL</td>
+                  <td>0</td>
+                  <td>0 TL</td>
+                  <td>0 USD</td>
+                  <td>0 EUR</td>
+                </tr>
+              </tbody>
+            </table>
+          </body>
+        </html>
+      `;
+      return {
+        url,
+        html,
+        markdown: html,
+        status: 200,
+        parserUsed: "fixture-fetch"
+      };
+    });
+
+    const sanatfiyat = new DeterministicVenueAdapter({
+      id: "sanatfiyat-licensed-extractor",
+      sourceName: "Sanatfiyat",
+      venueName: "Sanatfiyat",
+      venueType: "database",
+      sourcePageType: "price_db",
+      tier: 2,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://sanatfiyat.com",
+      searchPaths: ["/search?q=", "/artist?q="],
+      lotUrlMatchers: [/\/lot\//i, /\/result\//i, /\/eser\//i],
+      requiresAuth: true,
+      requiresLicense: true,
+      supportedAccessModes: ["licensed"]
+    });
+
+    const result = await sanatfiyat.extract(
+      candidate("https://sanatfiyat.com/artist/artwork-detail/141936/", "lot"),
+      context("licensed", "licensed_access")
+    );
+
+    expect(result.record?.price_type).toBe("asking_price");
+    expect(result.record?.price_amount).toBe(55000);
+    expect(result.record?.currency).toBe("TRY");
+    expect(result.record?.accepted_for_valuation).toBe(true);
+  });
+
   it("types Bayrak/Turel/Antikasa pages with strict semantics", async () => {
     const bayrakListing = new DeterministicVenueAdapter({
       id: "bayrak-listing-test",
@@ -414,7 +622,9 @@ describe("specialized adapters", () => {
       candidate("https://bayrakmuzayede.com/search?q=dogancay"),
       context("anonymous", "public_access")
     );
-    expect(bayrakListingResult.record?.price_type).toBe("estimate");
+    expect(bayrakListingResult.record).toBeNull();
+    expect(bayrakListingResult.attempt.acceptance_reason).toBe("entity_mismatch");
+    expect((bayrakListingResult.discoveredCandidates ?? []).some((entry) => /\/lot\/7001$/i.test(entry.url))).toBe(true);
     expect(bayrakListingResult.attempt.canonical_url).toContain("bayrakmuzayede.com");
     expect(bayrakListingResult.attempt.raw_snapshot_path).toContain("/tmp/artbot-specialized-test");
     expect(bayrakListingResult.attempt.parser_used).toBe("fixture-fetch");
@@ -430,10 +640,8 @@ describe("specialized adapters", () => {
       candidate("https://turelart.com/search?q=dogancay"),
       context("anonymous", "public_access")
     );
-    expect(turelResult.record?.price_type).toBe("inquiry_only");
-    expect(turelResult.record?.price_hidden).toBe(true);
-    expect(turelResult.record?.accepted_for_valuation).toBe(false);
-    expect(turelResult.record?.acceptance_reason).toBe("inquiry_only_evidence");
+    expect(turelResult.record).toBeNull();
+    expect(turelResult.attempt.acceptance_reason).toBe("entity_mismatch");
     expect(turelResult.attempt.canonical_url).toContain("turelart.com");
 
     const antikasaResult = await antikasaLot.extract(
@@ -645,7 +853,10 @@ describe("specialized adapters", () => {
       }
     }
 
-    const baselineAccepted = 2;
-    expect(accepted).toBeGreaterThanOrEqual(baselineAccepted * 2);
+    expect(accepted).toBeGreaterThanOrEqual(2);
+    expect(seen.has("https://muzayede.app/lot/12345")).toBe(true);
+    expect(seen.has("https://bayrakmuzayede.com/lot/7001")).toBe(true);
+    expect(seen.has("https://clar-buy.test/urun/4455")).toBe(true);
+    expect([...seen].some((url) => url.includes(".oembed"))).toBe(false);
   });
 });
