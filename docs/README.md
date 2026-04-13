@@ -5,6 +5,7 @@
 - [Architecture](architecture.md)
 - [Operations](ops.md)
 - [Source Matrix](source-matrix.md)
+- [Adapter Authoring](adapter-authoring.md)
 - [Evals](evals.md)
 - [Dependency Decisions](dependency-decisions.md)
 - [Next Adapters](next-adapters.md)
