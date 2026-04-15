@@ -1,4 +1,4 @@
-import type { ApiHealthResult, LlmHealthResult } from "./types.js";
+import type { ApiHealthResult, LlmHealthResult, SearxngHealthResult } from "./types.js";
 
 export function normalizeLlmBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim();
@@ -94,6 +94,42 @@ export async function checkApiHealth(apiBaseUrl: string, apiKey = "", timeoutMs 
     return {
       ok: false,
       apiBaseUrl,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export async function checkSearxngHealth(baseUrl: string, timeoutMs = 1500): Promise<SearxngHealthResult> {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  try {
+    const endpoint = new URL("/search", `${normalizedBaseUrl}/`);
+    endpoint.searchParams.set("q", "artbot health");
+    endpoint.searchParams.set("format", "json");
+    endpoint.searchParams.set("language", "all");
+
+    const response = await fetchWithTimeout(
+      endpoint.toString(),
+      {
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (compatible; ArtBot/1.0; +https://artbot.local)"
+        }
+      },
+      timeoutMs
+    );
+    if (!response.ok) {
+      return {
+        ok: false,
+        baseUrl: normalizedBaseUrl,
+        statusCode: response.status,
+        reason: `HTTP ${response.status}`
+      };
+    }
+    return { ok: true, baseUrl: normalizedBaseUrl };
+  } catch (error) {
+    return {
+      ok: false,
+      baseUrl: normalizedBaseUrl,
       reason: error instanceof Error ? error.message : String(error)
     };
   }

@@ -51,6 +51,13 @@ export interface ApiHealthResult {
   reason?: string;
 }
 
+export interface SearxngHealthResult {
+  ok: boolean;
+  baseUrl: string;
+  statusCode?: number;
+  reason?: string;
+}
+
 export interface AuthCaptureCommand {
   profileId: string;
   sourceUrl: string;
@@ -89,8 +96,13 @@ export interface SetupAssessment {
   localBackendPath: string | null;
   llmBaseUrl: string;
   apiBaseUrl: string;
+  webDiscoveryEnabled: boolean;
+  webDiscoveryProvider: string;
+  searxngBaseUrl: string;
+  firecrawlEnabled: boolean;
   llmHealth: LlmHealthResult;
   apiHealth: ApiHealthResult;
+  searxngHealth: SearxngHealthResult;
   profiles: AuthProfile[];
   authProfilesError: AuthProfilesError | null;
   relevantProfiles: AuthRelevantProfile[];

@@ -31,6 +31,18 @@ export type SourceHostStatus = z.infer<typeof sourceHostStatusSchema>;
 export const sourceTrustTierSchema = z.enum(["formal", "validated", "lead"]);
 export type SourceTrustTier = z.infer<typeof sourceTrustTierSchema>;
 
+export const sourceFamilyBucketSchema = z.enum([
+  "turkey_first_party",
+  "turkey_platform",
+  "turkey_gallery_shop_private_sale",
+  "global_major",
+  "global_marketplace",
+  "global_direct_sale",
+  "db_meta",
+  "open_web"
+]);
+export type SourceFamilyBucket = z.infer<typeof sourceFamilyBucketSchema>;
+
 export const frontierStatusSchema = z.enum(["pending", "processing", "completed", "failed", "skipped"]);
 export type FrontierStatus = z.infer<typeof frontierStatusSchema>;
 
@@ -69,6 +81,8 @@ export const frontierItemSchema = z.object({
   source_host: z.string(),
   adapter_id: z.string(),
   source_name: z.string(),
+  source_family: z.string().default("unknown"),
+  source_family_bucket: sourceFamilyBucketSchema.default("open_web"),
   url: z.string().url(),
   source_page_type: z.enum(["lot", "artist_page", "price_db", "listing", "article", "other"]),
   provenance: z.enum(["seed", "query_variant", "listing_expansion", "signature_expansion", "direct_lot", "web_discovery"]),

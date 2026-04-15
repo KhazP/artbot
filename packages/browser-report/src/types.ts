@@ -40,12 +40,74 @@ export interface ReportAction {
   severity: "info" | "warning" | "critical";
 }
 
+export interface ReportSourceMetric {
+  sourceName: string;
+  sourceFamily: string;
+  venueName: string;
+  legalPosture: string;
+  reliabilityScore: number;
+  totalAttempts: number;
+  reachableCount: number;
+  parseSuccessCount: number;
+  priceSignalCount: number;
+  acceptedForEvidenceCount: number;
+  valuationReadyCount: number;
+  blockedCount: number;
+  authRequiredCount: number;
+  lastStatus: string;
+}
+
+export interface ReportCanary {
+  family: string;
+  sourceName: string;
+  fixture: string;
+  sourcePageType: string;
+  legalPosture: string;
+  expectedPriceType: string | null;
+  observedPriceType: string;
+  acceptanceReason: string;
+  acceptedForEvidence: boolean;
+  acceptedForValuation: boolean;
+  status: "pass" | "fail";
+  details: string;
+  recordedAt: string;
+}
+
+export interface ReportDiscoveryDiagnostic {
+  provider: string;
+  enabled: boolean;
+  reason: string | null;
+  requestsUsed: number;
+  resultsReturned: number;
+  candidatesConsidered: number;
+  candidatesKept: number;
+  failoverInvoked: boolean;
+  trimmedByCaps: boolean;
+  budgetExhausted: boolean;
+}
+
+export interface ReportLocalAiAnalysis {
+  accepted: number;
+  queued: number;
+  rejected: number;
+  deterministicVetoCount: number;
+  confidenceBands: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  provider: string | null;
+  model: string | null;
+  avgLatencyMs: number | null;
+}
+
 export interface ReportSourcePlanItem {
   sourceName: string;
   venueName: string;
   sourceFamily: string;
   accessMode: string;
   accessStatus: string;
+  legalPosture: string | null;
   candidateCount: number;
   status: string;
   selectionState: string;
@@ -70,6 +132,11 @@ export interface ResearchRunReportItem {
   acceptedForValuation: boolean;
   acceptanceReason: string | null;
   sourceAccessStatus: string | null;
+  accessMode: string | null;
+  legalPosture: string | null;
+  accessProvenanceLabel: string | null;
+  acceptanceExplanation: string | null;
+  nextStepHint: string | null;
   detail: string | null;
 }
 
@@ -98,6 +165,8 @@ export interface ResearchRunReportData {
     totalAttempts: number;
     totalRecords: number;
     valuationEligible: number | null;
+    clusterCount: number | null;
+    reviewItemCount: number | null;
   };
   sourceHealth: Record<string, number>;
   sourceHealthItems: ReportDistributionItem[];
@@ -108,8 +177,12 @@ export interface ResearchRunReportData {
   records: ResearchRunReportItem[];
   recommendedActions: ReportAction[];
   sourcePlan: ReportSourcePlanItem[];
+  sourceMetrics: ReportSourceMetric[];
+  canaries: ReportCanary[];
+  discoveryDiagnostics: ReportDiscoveryDiagnostic[];
   reasonBreakdown: ReportReasonItem[];
   failureBreakdown: ReportReasonItem[];
+  localAi: ReportLocalAiAnalysis | null;
   gaps: string[];
   diagnosticsNotes: string[];
 }

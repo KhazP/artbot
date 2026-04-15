@@ -7,13 +7,16 @@ import { AlertTriangle, BarChart3, CheckCircle2, CircleDollarSign, ExternalLink,
 import { z } from "zod";
 import { normalizeResearchRunReport } from "./normalize.js";
 import type {
+  ReportCanary,
   ResearchRunReportData,
   ReportAction,
   ReportComparable,
+  ReportDiscoveryDiagnostic,
   ReportDistributionItem,
   ReportMetric,
   ReportRange,
   ReportReasonItem,
+  ReportSourceMetric,
   ReportSourcePlanItem,
   ResearchRunReportItem,
   ReportTone
@@ -102,6 +105,11 @@ const recordSchema = z.object({
   acceptedForValuation: z.boolean(),
   acceptanceReason: z.string().nullable(),
   sourceAccessStatus: z.string().nullable(),
+  accessMode: z.string().nullable(),
+  legalPosture: z.string().nullable(),
+  accessProvenanceLabel: z.string().nullable(),
+  acceptanceExplanation: z.string().nullable(),
+  nextStepHint: z.string().nullable(),
   detail: z.string().nullable()
 });
 
@@ -155,6 +163,7 @@ const sourcePlanSchema = z.object({
   sourceFamily: z.string(),
   accessMode: z.string(),
   accessStatus: z.string(),
+  legalPosture: z.string().nullable(),
   candidateCount: z.number(),
   status: z.string(),
   selectionState: z.string(),
@@ -163,9 +172,61 @@ const sourcePlanSchema = z.object({
   skipReason: z.string().nullable()
 });
 
+const sourceMetricSchema = z.object({
+  sourceName: z.string(),
+  sourceFamily: z.string(),
+  venueName: z.string(),
+  legalPosture: z.string(),
+  reliabilityScore: z.number(),
+  totalAttempts: z.number(),
+  reachableCount: z.number(),
+  parseSuccessCount: z.number(),
+  priceSignalCount: z.number(),
+  acceptedForEvidenceCount: z.number(),
+  valuationReadyCount: z.number(),
+  blockedCount: z.number(),
+  authRequiredCount: z.number(),
+  lastStatus: z.string()
+});
+
+const canarySchema = z.object({
+  family: z.string(),
+  sourceName: z.string(),
+  fixture: z.string(),
+  sourcePageType: z.string(),
+  legalPosture: z.string(),
+  expectedPriceType: z.string().nullable(),
+  observedPriceType: z.string(),
+  acceptanceReason: z.string(),
+  acceptedForEvidence: z.boolean(),
+  acceptedForValuation: z.boolean(),
+  status: z.enum(["pass", "fail"]),
+  details: z.string(),
+  recordedAt: z.string()
+});
+
+const discoveryDiagnosticSchema = z.object({
+  provider: z.string(),
+  enabled: z.boolean(),
+  reason: z.string().nullable(),
+  requestsUsed: z.number(),
+  resultsReturned: z.number(),
+  candidatesConsidered: z.number(),
+  candidatesKept: z.number(),
+  failoverInvoked: z.boolean(),
+  trimmedByCaps: z.boolean(),
+  budgetExhausted: z.boolean()
+});
+
 const nextActionsPropsSchema = z.object({
   actions: z.array(actionSchema),
   sourcePlan: z.array(sourcePlanSchema)
+});
+
+const reliabilityPropsSchema = z.object({
+  sourceMetrics: z.array(sourceMetricSchema),
+  canaries: z.array(canarySchema),
+  discoveryDiagnostics: z.array(discoveryDiagnosticSchema)
 });
 
 const recordsTablePropsSchema = z.object({
@@ -202,6 +263,10 @@ const catalog = (defineCatalog as (...args: any[]) => any)(schema, {
     NextActionsPanel: {
       props: nextActionsPropsSchema,
       description: "Operator actions and source-plan visibility"
+    },
+    ReliabilityPanel: {
+      props: reliabilityPropsSchema,
+      description: "Persistent source metrics, canaries, and discovery diagnostics"
     },
     RecordsTable: {
       props: recordsTablePropsSchema,
@@ -450,7 +515,10 @@ const { registry } = defineRegistry(catalog, {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="font-medium text-white">#{item.priorityRank} · {item.sourceName}</div>
-                    <div className="mt-1 text-xs text-zinc-500">{item.venueName} · {item.sourceFamily} · {item.accessMode.replace(/_/g, " ")}</div>
+                    <div className="mt-1 text-xs text-zinc-500">
+                      {item.venueName} · {item.sourceFamily} · {item.accessMode.replace(/_/g, " ")}
+                      {item.legalPosture ? ` · ${item.legalPosture.replace(/_/g, " ")}` : ""}
+                    </div>
                   </div>
                   <div className={`rounded-full border px-2 py-1 text-xs ${toneClasses(item.selectionState === "blocked" ? "danger" : item.selectionState === "deprioritized" ? "warning" : "success")}`}>
                     {item.selectionState}
@@ -464,6 +532,104 @@ const { registry } = defineRegistry(catalog, {
             )) : (
               <div className="text-sm text-zinc-500">No source plan data was included in the payload.</div>
             )}
+          </div>
+        </div>
+      </div>
+    ),
+    ReliabilityPanel: ({
+      props
+    }: {
+      props: {
+        sourceMetrics: ReportSourceMetric[];
+        canaries: ReportCanary[];
+        discoveryDiagnostics: ReportDiscoveryDiagnostic[];
+      };
+    }) => (
+      <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium uppercase tracking-[0.22em] text-zinc-500">Source metrics</h3>
+          {props.sourceMetrics.length > 0 ? props.sourceMetrics.slice(0, 10).map((item) => (
+            <div key={item.sourceName} className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="font-medium text-white">{item.sourceName}</div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    {item.venueName} · {item.sourceFamily} · {item.legalPosture.replace(/_/g, " ")}
+                  </div>
+                </div>
+                <div className={`rounded-full border px-3 py-1 text-xs ${toneClasses(item.reliabilityScore >= 0.6 ? "success" : item.reliabilityScore >= 0.35 ? "warning" : "danger")}`}>
+                  {Math.round(item.reliabilityScore * 100)}% reliable
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 text-sm text-zinc-300 md:grid-cols-3">
+                <div>Attempts {item.totalAttempts}</div>
+                <div>Reachable {item.reachableCount}</div>
+                <div>Parsed {item.parseSuccessCount}</div>
+                <div>Priced {item.priceSignalCount}</div>
+                <div>Evidence {item.acceptedForEvidenceCount}</div>
+                <div>Valuation {item.valuationReadyCount}</div>
+                <div>Blocked {item.blockedCount}</div>
+                <div>Auth {item.authRequiredCount}</div>
+                <div>Last {item.lastStatus.replace(/_/g, " ")}</div>
+              </div>
+            </div>
+          )) : (
+            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950/70 p-4 text-sm text-zinc-500">
+              No persisted source metrics were included in the payload.
+            </div>
+          )}
+        </div>
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <h3 className="mb-3 text-sm font-medium uppercase tracking-[0.22em] text-zinc-500">Recent canaries</h3>
+            <div className="space-y-3">
+              {props.canaries.length > 0 ? props.canaries.slice(0, 8).map((item) => (
+                <div key={`${item.sourceName}-${item.fixture}-${item.recordedAt}`} className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="font-medium text-white">{item.sourceName}</div>
+                    <div className={`rounded-full border px-2 py-1 text-xs ${toneClasses(item.status === "pass" ? "success" : "danger")}`}>
+                      {item.status}
+                    </div>
+                  </div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    {item.family} · {item.sourcePageType} · {item.legalPosture.replace(/_/g, " ")}
+                  </div>
+                  <div className="mt-2 text-sm text-zinc-300">
+                    {item.observedPriceType}
+                    {item.expectedPriceType ? ` vs ${item.expectedPriceType}` : ""}
+                    {" · "}
+                    {item.acceptanceReason.replace(/_/g, " ")}
+                  </div>
+                  <div className="mt-2 text-xs text-zinc-400">{item.details}</div>
+                </div>
+              )) : (
+                <div className="text-sm text-zinc-500">No canary history was included in the payload.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <h3 className="mb-3 text-sm font-medium uppercase tracking-[0.22em] text-zinc-500">Discovery providers</h3>
+            <div className="space-y-3">
+              {props.discoveryDiagnostics.length > 0 ? props.discoveryDiagnostics.map((item) => (
+                <div key={item.provider} className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="font-medium text-white">{item.provider}</div>
+                    <div className={`rounded-full border px-2 py-1 text-xs ${toneClasses(item.enabled ? "accent" : "muted")}`}>
+                      {item.enabled ? "enabled" : "disabled"}
+                    </div>
+                  </div>
+                  <div className="mt-2 text-sm text-zinc-300">
+                    Requests {item.requestsUsed} · Results {item.resultsReturned} · Kept {item.candidatesKept}
+                  </div>
+                  <div className="mt-2 text-xs text-zinc-400">
+                    Considered {item.candidatesConsidered} · Failover {item.failoverInvoked ? "yes" : "no"} · Caps {item.trimmedByCaps ? "trimmed" : "ok"} · Budget {item.budgetExhausted ? "exhausted" : "available"}
+                  </div>
+                  {item.reason ? <div className="mt-2 text-xs text-zinc-400">{item.reason}</div> : null}
+                </div>
+              )) : (
+                <div className="text-sm text-zinc-500">No discovery diagnostics were included in the payload.</div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -497,6 +663,13 @@ const { registry } = defineRegistry(catalog, {
                       <div className="min-w-0">
                         <div className="font-medium text-white">{item.title}</div>
                         <div className="mt-1 text-xs text-zinc-500">{[item.year, item.date, item.detail].filter(Boolean).join(" · ") || "No extra metadata"}</div>
+                        {(item.accessProvenanceLabel || item.acceptanceExplanation || item.nextStepHint) ? (
+                          <div className="mt-2 space-y-1 text-xs text-zinc-400">
+                            {item.accessProvenanceLabel ? <div>{item.accessProvenanceLabel}</div> : null}
+                            {item.acceptanceExplanation ? <div>{item.acceptanceExplanation}</div> : null}
+                            {item.nextStepHint ? <div className="text-amber-200">{item.nextStepHint}</div> : null}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   </td>
@@ -530,6 +703,11 @@ const { registry } = defineRegistry(catalog, {
                     <div className={`inline-flex rounded-full border px-2 py-1 text-xs ${toneClasses(item.acceptedForValuation ? "success" : item.sourceAccessStatus?.includes("blocked") ? "danger" : item.sourceAccessStatus?.includes("auth") ? "warning" : "muted")}`}>
                       {item.acceptedForValuation ? "Accepted" : item.acceptanceReason ? item.acceptanceReason.replace(/_/g, " ") : item.sourceAccessStatus?.replace(/_/g, " ") ?? "Review"}
                     </div>
+                    {(item.sourceAccessStatus || item.legalPosture || item.accessMode) ? (
+                      <div className="mt-2 text-xs text-zinc-500">
+                        {[item.sourceAccessStatus, item.legalPosture, item.accessMode].filter(Boolean).join(" · ").replace(/_/g, " ")}
+                      </div>
+                    ) : null}
                   </td>
                 </tr>
               )) : (
@@ -575,6 +753,16 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
     title: "Overview",
     subtitle: "Core run metrics, priced coverage, and source health."
   }, [metrics, sourceHealth]);
+
+  const reliability = add("ReliabilityPanel", {
+    sourceMetrics: input.sourceMetrics,
+    canaries: input.canaries,
+    discoveryDiagnostics: input.discoveryDiagnostics
+  });
+  const reliabilitySection = add("Section", {
+    title: "Reliability",
+    subtitle: "Persisted source health, canary history, and discovery provider diagnostics."
+  }, [reliability]);
 
   const valuation = add("ValuationPanel", {
     generated: input.valuation.generated,
@@ -624,7 +812,7 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
     runType: input.runType,
     analysisMode: input.analysisMode,
     createdAt: input.createdAt
-  }, [overview, valuationSection, nextActionsSection, recordsSection, diagnosticsSection]);
+  }, [overview, reliabilitySection, valuationSection, nextActionsSection, recordsSection, diagnosticsSection]);
 
   return {
     root,

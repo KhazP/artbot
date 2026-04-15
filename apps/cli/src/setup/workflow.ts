@@ -17,7 +17,7 @@ import {
   resolveWorkspaceRoot,
   upsertEnvFile
 } from "./env.js";
-import { checkApiHealth, checkLlmHealth, normalizeLlmBaseUrl } from "./health.js";
+import { checkApiHealth, checkLlmHealth, checkSearxngHealth, normalizeLlmBaseUrl } from "./health.js";
 import type { SetupAssessment, SetupIssue, SetupWizardValues, StartedBackendServices } from "./types.js";
 import { normalizeReportSurface } from "../report/browser-report.js";
 
@@ -36,8 +36,16 @@ export async function assessLocalSetup(env: NodeJS.ProcessEnv = process.env, cwd
   const localBackendSupport = resolveLocalBackendSupport(cwd);
   const llmBaseUrl = normalizeLlmBaseUrl(env.LLM_BASE_URL?.trim() || "http://127.0.0.1:1234/v1");
   const apiBaseUrl = env.API_BASE_URL?.trim() || "http://localhost:4000";
+  const webDiscoveryEnabled = parseBooleanEnv(env.WEB_DISCOVERY_ENABLED, true);
+  const webDiscoveryProvider = (env.WEB_DISCOVERY_PROVIDER?.trim().toLowerCase() || "searxng");
+  const searxngBaseUrl = env.SEARXNG_BASE_URL?.trim() || "http://127.0.0.1:8080";
+  const firecrawlEnabled = parseBooleanEnv(env.FIRECRAWL_ENABLED, false);
   const llmHealth = await checkLlmHealth(llmBaseUrl, env.LLM_API_KEY ?? env.OPENAI_API_KEY ?? "lm-studio");
   const apiHealth = await checkApiHealth(apiBaseUrl, env.ARTBOT_API_KEY);
+  const searxngHealth =
+    webDiscoveryEnabled && webDiscoveryProvider === "searxng"
+      ? await checkSearxngHealth(searxngBaseUrl)
+      : { ok: true, baseUrl: searxngBaseUrl };
   const parsedProfiles = parseAuthProfilesJson(env.AUTH_PROFILES_JSON);
   const profiles = parsedProfiles.profiles;
   const enableOptionalProbes = parseBooleanEnv(env.ENABLE_OPTIONAL_PROBE_ADAPTERS, false);
@@ -73,6 +81,46 @@ export async function assessLocalSetup(env: NodeJS.ProcessEnv = process.env, cwd
       );
     }
   }
+  if (!webDiscoveryEnabled) {
+    issues.push(
+      createIssue(
+        "warning",
+        "web_discovery_disabled",
+        "Web discovery is disabled.",
+        "Enable WEB_DISCOVERY_ENABLED=true for the local-unlimited discovery profile."
+      )
+    );
+  }
+  if (webDiscoveryEnabled && webDiscoveryProvider !== "searxng") {
+    issues.push(
+      createIssue(
+        "warning",
+        "web_discovery_nonlocal_provider",
+        `Web discovery provider is set to ${webDiscoveryProvider}.`,
+        "Use WEB_DISCOVERY_PROVIDER=searxng for the default local-unlimited profile."
+      )
+    );
+  }
+  if (webDiscoveryEnabled && webDiscoveryProvider === "searxng" && !searxngHealth.ok) {
+    issues.push(
+      createIssue(
+        "warning",
+        "searxng_unreachable",
+        "SearXNG is not reachable.",
+        `${searxngHealth.reason ?? "Unknown error."} ArtBot can still fall back to DuckDuckGo HTML search, but local SearXNG should be started for best throughput.`
+      )
+    );
+  }
+  if (firecrawlEnabled) {
+    issues.push(
+      createIssue(
+        "warning",
+        "firecrawl_opt_in_enabled",
+        "Firecrawl is enabled.",
+        "This is optional and can incur paid API costs. Set FIRECRAWL_ENABLED=false for the default free-by-default profile."
+      )
+    );
+  }
   if (parsedProfiles.error) {
     issues.push(createIssue("error", "auth_profiles_invalid", parsedProfiles.error.message, parsedProfiles.error.details));
   }
@@ -99,8 +147,13 @@ export async function assessLocalSetup(env: NodeJS.ProcessEnv = process.env, cwd
     localBackendPath: localBackendSupport.path,
     llmBaseUrl,
     apiBaseUrl,
+    webDiscoveryEnabled,
+    webDiscoveryProvider,
+    searxngBaseUrl,
+    firecrawlEnabled,
     llmHealth,
     apiHealth,
+    searxngHealth,
     profiles,
     authProfilesError: parsedProfiles.error,
     relevantProfiles,

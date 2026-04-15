@@ -1,4 +1,4 @@
-import type { AccessMode } from "@artbot/shared-types";
+import type { AccessMode, SourceLegalPosture } from "@artbot/shared-types";
 
 export interface AuthProfile {
   id: string;
@@ -15,6 +15,8 @@ export interface AuthProfile {
   sensitivity?: "standard" | "sensitive" | "licensed";
   encryptionMode?: "none" | "aes-256-gcm";
   encryptionKeyEnv?: string;
+  browserIdentity?: string;
+  proxyIdentity?: string;
 }
 
 export interface CredentialRefs {
@@ -46,6 +48,7 @@ export interface ResolveAccessInput {
   manualLoginCheckpoint?: boolean;
   cookieFile?: string;
   licensedIntegrations?: string[];
+  legalPosture?: SourceLegalPosture;
 }
 
 export interface MaterializedSessionState {

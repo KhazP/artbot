@@ -952,25 +952,56 @@ Retention target: 7–30 days.
 
 # 12. Strategic Roadmap
 
+## Status update (2026-04-14)
+
+Legend:
+
+* `[x]` completed enough to remove from the immediate reliability backlog
+* `[~]` partially completed; still open
+* `[ ]` still open
+
+### Reliability backlog status
+
+* `[x]` Source health scoring now persists per-source metrics and is surfaced in CLI/API/browser report.
+* `[x]` Synthetic canary pack now persists history and covers the priority families: Müzayede App, Bayrak, Türel, Clar, Portakal, Antik A.S., Sanatfiyat, Invaluable, LiveAuctioneers.
+* `[x]` Operator-facing acceptance/rejection explanations now exist at the record level in markdown reports, browser reports, and run payloads.
+* `[x]` Session identity, browser identity, and proxy identity are now separate runtime concepts.
+* `[x]` Legal posture labeling and access provenance labeling are now carried through source plan, attempts, records, reports, and artifact manifests.
+* `[x]` Sensitive artifact handling is hardened beyond auth state: non-public/auth/licensed captures are scrubbed or suppressed, and licensed/auth-derived exports are marked restricted.
+* `[x]` High-value source-family hardening landed for Bayrak, Türel, Sanatfiyat, Invaluable, LiveAuctioneers, and Müzayede-family offline coverage.
+* `[x]` Artifact GC/retention now has lifecycle enforcement: automatic post-run GC, dry-run inspection, per-class deletion accounting, and conservative preservation of restricted/promoted artifacts.
+* `[x]` Golden-fixture and replay regression coverage now includes explicit replay artifact selection (`raw`/`har`/`auto`) plus selective/always/off heavy-evidence gating.
+* `[x]` Multi-provider discovery now validates yield, caps, and deterministic primary→secondary failover and persists those diagnostics through CLI/report surfaces.
+* `[x]` Canonical entity graph now persists deterministic cluster identity and survives reruns with stable cluster IDs.
+* `[x]` Cluster rebuild now preserves historical artist inventory context across reruns instead of limiting clustering to only the current run.
+* `[x]` Evidence review/adjudication console now includes queue inspection plus explicit adjudication actions through API/CLI.
+* `[x]` Artam cached extraction now preserves recovery escalation (Crawlee/browser) for non-parseable candidates.
+* `[ ]` Continuous watchlists and market monitoring remain open.
+* `[ ]` Stronger duplicate embeddings remain open.
+* `[ ]` Benchmark-backed valuation calibration remains open.
+* `[ ]` Source usage/legal matrix and counsel review remain open.
+* `[ ]` Litestream/object-storage durability and hot/warm/cold tiering remain open.
+* `[ ]` OpenTelemetry-grade observability remains open.
+
 ## Now (0–90 days)
 
-1. **Deepen the highest-value source families**, not the long tail.
-2. **Ship artifact retention/GC** before storage becomes a tax you carry forever.
-3. **Build source health dashboards and synthetic canaries.**
-4. **Create golden sets and replay-based regression tests.**
-5. **Harden auth/session secret handling.**
-6. **Add multi-provider discovery.**
-7. **Improve operator-facing acceptance/rejection explanations.**
+1. `[x]` **Deepen the highest-value source families**, not the long tail.
+2. `[x]` **Ship artifact retention/GC** before storage becomes a tax you carry forever.
+3. `[x]` **Build source health dashboards and synthetic canaries.**
+4. `[x]` **Create golden sets and replay-based regression tests.**
+5. `[x]` **Harden auth/session secret handling.**
+6. `[x]` **Add multi-provider discovery.**
+7. `[x]` **Improve operator-facing acceptance/rejection explanations.**
 
 ## Next (3–9 months)
 
-1. **Canonical entity graph**
-2. **Evidence review/adjudication console**
-3. **Session/proxy policy layer**
-4. **Better visual duplicate detection**
-5. **Continuous watchlists and monitoring**
-6. **Partner/licensed-source conversations**
-7. **Team workflows and audit trails**
+1. **Session/proxy policy layer**
+2. **Better visual duplicate detection**
+3. **Continuous watchlists and monitoring**
+4. **Partner/licensed-source conversations**
+5. **Team workflows and audit trails**
+6. **Graph/review operator UX hardening**
+7. **Cross-run entity-history analytics**
 
 ## Later (9+ months)
 
@@ -982,20 +1013,20 @@ Retention target: 7–30 days.
 
 ## High-impact / low-effort
 
-* Artifact GC
-* Better reports
-* source health metrics
-* replay fixtures
-* source plan transparency
-* auth secret hardening
+* `[x]` Artifact GC
+* `[x]` Better reports
+* `[x]` source health metrics
+* `[x]` replay fixtures
+* `[x]` source plan transparency
+* `[x]` auth secret hardening
 
 ## High-impact / high-effort
 
-* canonical entity graph
-* review console
 * partner/licensed acquisition layer
 * session/proxy platform
 * benchmarked valuation calibration
+* cross-run entity-history analytics
+* monitoring/watchlist automation
 
 ## Risky but potentially transformative bets
 

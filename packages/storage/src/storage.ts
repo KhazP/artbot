@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import type {
   ArtworkCluster,
   ArtworkImage,
+  CanaryResult,
   ClusterMembership,
   CrawlCheckpoint,
   FrontierItem,
@@ -21,8 +22,10 @@ import type {
   RunType,
   SourceAccessStatus,
   SourceAttempt,
+  SourceHealthRecord,
   SourceHost
 } from "@artbot/shared-types";
+import { buildDefaultGcPolicyFromEnv, runArtifactGc } from "./artifact-lifecycle.js";
 
 interface RunRow {
   id: string;
@@ -38,6 +41,26 @@ interface RunRow {
   lease_expires_at?: string | null;
   heartbeat_at?: string | null;
 }
+
+type HostHealthDimension = {
+  source_family: string;
+  crawl_lane: "deterministic" | "cheap_fetch" | "crawlee" | "browser";
+  access_mode: "anonymous" | "authorized" | "licensed";
+  total_attempts: number;
+  success_count: number;
+  blocked_count: number;
+  auth_required_count: number;
+  failure_count: number;
+  reliability_score: number;
+  last_status: HostHealthRecord["last_status"];
+  last_failure_class: HostHealthRecord["last_failure_class"];
+  last_attempt_at: string;
+  updated_at: string;
+};
+
+type HostHealthRecordWithDimensions = HostHealthRecord & {
+  dimensions?: Record<string, HostHealthDimension>;
+};
 
 export interface RunDetails {
   run: RunEntity;
@@ -86,6 +109,33 @@ function parsePayloadRows<T>(rows: Array<{ payload_json: string }>): T[] {
 
 function frontierCanonicalKey(url: string): string {
   return createHash("sha256").update(url).digest("hex");
+}
+
+function hasParsedSignal(attempt: SourceAttempt): boolean {
+  return Object.keys(attempt.extracted_fields ?? {}).length > 0;
+}
+
+function hasPriceSignal(attempt: SourceAttempt): boolean {
+  return (
+    attempt.acceptance_reason === "valuation_ready"
+    || attempt.acceptance_reason === "estimate_range_ready"
+    || attempt.acceptance_reason === "asking_price_ready"
+    || attempt.acceptance_reason === "inquiry_only_evidence"
+    || attempt.acceptance_reason === "price_hidden_evidence"
+    || typeof attempt.extracted_fields?.price_amount === "number"
+    || typeof attempt.extracted_fields?.estimate_low === "number"
+    || typeof attempt.extracted_fields?.estimate_high === "number"
+    || attempt.source_access_status === "price_hidden"
+  );
+}
+
+function isReachableAttempt(attempt: SourceAttempt): boolean {
+  return (
+    attempt.failure_class !== "transport_dns"
+    && attempt.failure_class !== "transport_timeout"
+    && attempt.failure_class !== "host_circuit"
+    && attempt.source_access_status !== "blocked"
+  );
 }
 
 export class ArtbotStorage {
@@ -187,6 +237,21 @@ export class ArtbotStorage {
         host TEXT PRIMARY KEY,
         payload_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS source_health (
+        source_name TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS canary_results (
+        id TEXT PRIMARY KEY,
+        family TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        fixture TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS crawl_frontier (
@@ -469,6 +534,11 @@ export class ArtbotStorage {
         )
         .run(reportPath, resultsPath, now, runId)
     );
+    this.runArtifactGc();
+  }
+
+  public runArtifactGc(options: { dryRun?: boolean; now?: Date } = {}) {
+    return runArtifactGc(this.runsRoot, buildDefaultGcPolicyFromEnv(), options);
   }
 
   public failRun(runId: string, error: string): void {
@@ -551,9 +621,33 @@ export class ArtbotStorage {
 
   public recordHostAttempt(host: string, attempt: SourceAttempt): HostHealthRecord {
     const existing = this.getHostHealth(host);
+    const existingWithDimensions = existing as HostHealthRecordWithDimensions | null;
     const success = Boolean(attempt.accepted_for_evidence ?? attempt.accepted) && !attempt.failure_class;
     const now = nowIso();
-    const next: HostHealthRecord = {
+    const lane = attempt.crawl_lane ?? "cheap_fetch";
+    const sourceFamily = attempt.source_family ?? "unknown";
+    const dimensionKey = `${sourceFamily}::${lane}::${attempt.access_mode}`;
+    const existingDimension = existingWithDimensions?.dimensions?.[dimensionKey];
+    const nextDimension = {
+      source_family: sourceFamily,
+      crawl_lane: lane,
+      access_mode: attempt.access_mode,
+      total_attempts: (existingDimension?.total_attempts ?? 0) + 1,
+      success_count: (existingDimension?.success_count ?? 0) + (success ? 1 : 0),
+      blocked_count: (existingDimension?.blocked_count ?? 0) + (attempt.source_access_status === "blocked" ? 1 : 0),
+      auth_required_count:
+        (existingDimension?.auth_required_count ?? 0) + (attempt.source_access_status === "auth_required" ? 1 : 0),
+      failure_count:
+        (existingDimension?.failure_count ?? 0) + (attempt.failure_class || attempt.source_access_status === "blocked" ? 1 : 0),
+      reliability_score: 0,
+      last_status: attempt.source_access_status,
+      last_failure_class: attempt.failure_class ?? null,
+      last_attempt_at: attempt.fetched_at,
+      updated_at: now
+    };
+    nextDimension.reliability_score = Number((nextDimension.success_count / Math.max(1, nextDimension.total_attempts)).toFixed(4));
+
+    const next: HostHealthRecordWithDimensions = {
       host,
       total_attempts: (existing?.total_attempts ?? 0) + 1,
       success_count: (existing?.success_count ?? 0) + (success ? 1 : 0),
@@ -567,7 +661,11 @@ export class ArtbotStorage {
       last_status: attempt.source_access_status,
       last_failure_class: attempt.failure_class ?? null,
       last_attempt_at: attempt.fetched_at,
-      updated_at: now
+      updated_at: now,
+      dimensions: {
+        ...(existingWithDimensions?.dimensions ?? {}),
+        [dimensionKey]: nextDimension
+      }
     };
     next.reliability_score = Number((next.success_count / Math.max(1, next.total_attempts)).toFixed(4));
 
@@ -579,6 +677,53 @@ export class ArtbotStorage {
          DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
       )
       .run(host, JSON.stringify(next), now);
+
+    return next as HostHealthRecord;
+  }
+
+  public recordSourceAttempt(attempt: SourceAttempt): SourceHealthRecord {
+    const existing = this.getSourceHealth(attempt.source_name);
+    const now = nowIso();
+    const acceptedForEvidence = Boolean(attempt.accepted_for_evidence ?? attempt.accepted);
+    const acceptedForValuation = Boolean(attempt.accepted_for_valuation);
+
+    const next: SourceHealthRecord = {
+      source_name: attempt.source_name,
+      source_family: attempt.source_family ?? attempt.source_name,
+      venue_name: attempt.venue_name ?? attempt.source_name,
+      legal_posture: attempt.source_legal_posture ?? "public_permitted",
+      total_attempts: (existing?.total_attempts ?? 0) + 1,
+      reachable_count: (existing?.reachable_count ?? 0) + (isReachableAttempt(attempt) ? 1 : 0),
+      parse_success_count: (existing?.parse_success_count ?? 0) + (hasParsedSignal(attempt) ? 1 : 0),
+      price_signal_count: (existing?.price_signal_count ?? 0) + (hasPriceSignal(attempt) ? 1 : 0),
+      accepted_for_evidence_count: (existing?.accepted_for_evidence_count ?? 0) + (acceptedForEvidence ? 1 : 0),
+      valuation_ready_count: (existing?.valuation_ready_count ?? 0) + (acceptedForValuation ? 1 : 0),
+      blocked_count: (existing?.blocked_count ?? 0) + (attempt.source_access_status === "blocked" ? 1 : 0),
+      auth_required_count: (existing?.auth_required_count ?? 0) + (attempt.source_access_status === "auth_required" ? 1 : 0),
+      failure_count:
+        (existing?.failure_count ?? 0) +
+        (attempt.failure_class || attempt.source_access_status === "blocked" ? 1 : 0),
+      reliability_score: 0,
+      last_status: attempt.source_access_status,
+      last_failure_class: attempt.failure_class ?? null,
+      last_run_id: attempt.run_id,
+      last_attempt_at: attempt.fetched_at,
+      updated_at: now
+    };
+    next.reliability_score = Number(
+      (next.accepted_for_evidence_count / Math.max(1, next.total_attempts)).toFixed(4)
+    );
+
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `INSERT INTO source_health (source_name, payload_json, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(source_name)
+           DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+        )
+        .run(attempt.source_name, JSON.stringify(next), now)
+    );
 
     return next;
   }
@@ -597,26 +742,102 @@ export class ArtbotStorage {
     return parsePayloadRows<HostHealthRecord>(rows);
   }
 
+  public getSourceHealth(sourceName: string): SourceHealthRecord | null {
+    const row = this.db.prepare(`SELECT payload_json FROM source_health WHERE source_name = ?`).get(sourceName) as
+      | { payload_json: string }
+      | undefined;
+    return row ? (JSON.parse(row.payload_json) as SourceHealthRecord) : null;
+  }
+
+  public listSourceHealth(limit = 50): SourceHealthRecord[] {
+    const rows = this.db
+      .prepare(`SELECT payload_json FROM source_health ORDER BY updated_at DESC LIMIT ?`)
+      .all(limit) as Array<{ payload_json: string }>;
+    return parsePayloadRows<SourceHealthRecord>(rows);
+  }
+
+  public saveCanaryResult(result: CanaryResult): CanaryResult {
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `INSERT INTO canary_results (id, family, source_name, fixture, payload_json, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id)
+           DO UPDATE SET
+             family = excluded.family,
+             source_name = excluded.source_name,
+             fixture = excluded.fixture,
+             payload_json = excluded.payload_json,
+             recorded_at = excluded.recorded_at`
+        )
+        .run(
+          result.id,
+          result.family,
+          result.source_name,
+          result.fixture,
+          JSON.stringify(result),
+          result.recorded_at
+        )
+    );
+    return result;
+  }
+
+  public listCanaryResults(limit = 50, family?: string): CanaryResult[] {
+    const rows = family
+      ? (this.db
+          .prepare(
+            `SELECT payload_json
+             FROM canary_results
+             WHERE family = ?
+             ORDER BY recorded_at DESC
+             LIMIT ?`
+          )
+          .all(family, limit) as Array<{ payload_json: string }>)
+      : (this.db
+          .prepare(
+            `SELECT payload_json
+             FROM canary_results
+             ORDER BY recorded_at DESC
+             LIMIT ?`
+          )
+          .all(limit) as Array<{ payload_json: string }>);
+
+    return parsePayloadRows<CanaryResult>(rows);
+  }
+
   public enqueueFrontierItem(
     item: Omit<
       FrontierItem,
-      "id" | "status" | "retry_count" | "revisit_after" | "last_error" | "created_at" | "updated_at"
-    >
+      | "id"
+      | "status"
+      | "retry_count"
+      | "revisit_after"
+      | "last_error"
+      | "created_at"
+      | "updated_at"
+      | "source_family"
+      | "source_family_bucket"
+    > & Partial<Pick<FrontierItem, "source_family" | "source_family_bucket">>
   ): FrontierItem {
     const now = nowIso();
-    const canonicalKey = frontierCanonicalKey(item.url);
+    const canonicalKey = `${item.adapter_id}:${frontierCanonicalKey(item.url)}`;
     const existing = this.db
       .prepare(`SELECT payload_json FROM crawl_frontier WHERE artist_key = ? AND canonical_key = ?`)
       .get(item.artist_key, canonicalKey) as { payload_json: string } | undefined;
     const existingItem = existing ? (JSON.parse(existing.payload_json) as FrontierItem) : null;
+    const isCrossRunReuse = Boolean(existingItem && existingItem.run_id !== item.run_id);
+    const preserveProcessingState =
+      existingItem?.status === "processing" && existingItem.run_id === item.run_id;
     const frontierItem: FrontierItem = {
       ...item,
+      source_family: item.source_family ?? existingItem?.source_family ?? "unknown",
+      source_family_bucket: item.source_family_bucket ?? existingItem?.source_family_bucket ?? "open_web",
       id: existingItem?.id ?? uuidv4(),
-      status: existingItem?.status === "processing" ? "processing" : "pending",
-      retry_count: existingItem?.retry_count ?? 0,
-      revisit_after: existingItem?.revisit_after ?? null,
-      last_error: existingItem?.last_error ?? null,
-      created_at: existingItem?.created_at ?? now,
+      status: preserveProcessingState ? "processing" : "pending",
+      retry_count: isCrossRunReuse ? 0 : existingItem?.retry_count ?? 0,
+      revisit_after: isCrossRunReuse ? null : existingItem?.revisit_after ?? null,
+      last_error: isCrossRunReuse ? null : existingItem?.last_error ?? null,
+      created_at: isCrossRunReuse ? now : existingItem?.created_at ?? now,
       updated_at: now
     };
 
@@ -629,7 +850,12 @@ export class ArtbotStorage {
            run_id = excluded.run_id,
            source_host = excluded.source_host,
            url = excluded.url,
-           status = CASE WHEN crawl_frontier.status = 'processing' THEN crawl_frontier.status ELSE 'pending' END,
+           status = CASE
+             WHEN crawl_frontier.status = 'processing' AND crawl_frontier.run_id = excluded.run_id
+               THEN crawl_frontier.status
+             ELSE 'pending'
+           END,
+           created_at = excluded.created_at,
            payload_json = excluded.payload_json,
            updated_at = excluded.updated_at`
       )
@@ -936,11 +1162,18 @@ export class ArtbotStorage {
       this.db.prepare(`DELETE FROM cluster_memberships WHERE cluster_id IN (${placeholders})`).run(...existingClusterIds);
     }
     this.db.prepare(`DELETE FROM artwork_clusters WHERE artist_key = ?`).run(artistKey);
-    this.db.prepare(`DELETE FROM review_items WHERE artist_key = ?`).run(artistKey);
 
     for (const cluster of clusters) {
       this.db
-        .prepare(`INSERT INTO artwork_clusters (id, artist_key, payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+        .prepare(
+          `INSERT INTO artwork_clusters (id, artist_key, payload_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id)
+           DO UPDATE SET
+             artist_key = excluded.artist_key,
+             payload_json = excluded.payload_json,
+             updated_at = excluded.updated_at`
+        )
         .run(cluster.id, artistKey, JSON.stringify(cluster), cluster.created_at, cluster.updated_at);
     }
 
@@ -1014,6 +1247,37 @@ export class ArtbotStorage {
       .prepare(`SELECT payload_json FROM review_items WHERE artist_key = ? ORDER BY updated_at ASC`)
       .all(artistKey) as Array<{ payload_json: string }>;
     return parsePayloadRows<ReviewItem>(rows);
+  }
+
+  public adjudicateReviewItem(
+    artistKey: string,
+    reviewItemId: string,
+    decision: "merge" | "keep_separate"
+  ): ReviewItem | null {
+    const row = this.db
+      .prepare(`SELECT payload_json FROM review_items WHERE artist_key = ? AND id = ?`)
+      .get(artistKey, reviewItemId) as { payload_json: string } | undefined;
+    if (!row) {
+      return null;
+    }
+    const current = JSON.parse(row.payload_json) as ReviewItem;
+    const updatedAt = nowIso();
+    const next: ReviewItem = {
+      ...current,
+      recommended_action: decision,
+      status: decision === "merge" ? "accepted" : "rejected",
+      updated_at: updatedAt
+    };
+
+    const pairKey = stablePairKey(next.left_record_key, next.right_record_key);
+    this.db
+      .prepare(
+        `UPDATE review_items
+         SET payload_json = ?, pair_key = ?, updated_at = ?
+         WHERE id = ? AND artist_key = ?`
+      )
+      .run(JSON.stringify(next), pairKey, updatedAt, reviewItemId, artistKey);
+    return next;
   }
 
   public listArtworkClustersByArtist(artistKey: string): ArtworkCluster[] {

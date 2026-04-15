@@ -1,47 +1,16 @@
-import fs from "node:fs";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { ResearchOrchestrator } from "@artbot/orchestrator";
-import { ArtbotStorage } from "@artbot/storage";
+import { ArtbotStorage, ensureWorkspaceRuntimeStoragePaths, resolveWorkspaceRelativePath } from "@artbot/storage";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
-function findWorkspaceRoot(start: string): string | null {
-  let current = path.resolve(start);
-  while (true) {
-    if (fs.existsSync(path.join(current, "pnpm-workspace.yaml"))) {
-      return current;
-    }
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return null;
-    }
-    current = parent;
-  }
-}
-
-function resolveWorkspaceRoot(): string {
-  const candidates = [
-    process.env.INIT_CWD,
-    process.cwd(),
-    path.resolve(moduleDir, "../../..")
-  ].filter((value): value is string => Boolean(value));
-
-  for (const candidate of candidates) {
-    const root = findWorkspaceRoot(candidate);
-    if (root) {
-      return root;
-    }
-  }
-
-  return path.resolve(moduleDir, "../../..");
-}
-
 function resolveWorkspaceDefault(relativePath: string): string {
-  return path.resolve(resolveWorkspaceRoot(), relativePath);
+  const workspaceRoot = process.env.INIT_CWD ?? path.resolve(moduleDir, "../../..");
+  return path.resolve(workspaceRoot, relativePath);
 }
 
 dotenv.config({ path: resolveWorkspaceDefault(".env"), override: false });
@@ -51,12 +20,28 @@ const leaseMs = Number(process.env.WORKER_LEASE_MS ?? 120_000);
 const heartbeatMs = Number(process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 5_000);
 const staleRecoveryMs = Number(process.env.WORKER_STALE_RECOVERY_MS ?? Math.max(leaseMs * 2, 180_000));
 const workerId = `${os.hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
-
-const dbPath = process.env.DATABASE_PATH ?? resolveWorkspaceDefault("var/data/artbot.db");
-const runsRoot = process.env.RUNS_ROOT ?? resolveWorkspaceDefault("var/runs");
+const workspaceRoot = resolveWorkspaceDefault(".");
+const dbPath = resolveWorkspaceRelativePath(process.env.DATABASE_PATH, workspaceRoot, "var/data/artbot.db");
+const runsRoot = resolveWorkspaceRelativePath(process.env.RUNS_ROOT, workspaceRoot, "var/runs");
+const runtimePathGuard = ensureWorkspaceRuntimeStoragePaths("worker", workspaceRoot, dbPath, runsRoot);
 
 const storage = new ArtbotStorage(dbPath, runsRoot);
 const orchestrator = new ResearchOrchestrator(storage);
+
+console.info(
+  "[worker] Resolved runtime storage paths:",
+  JSON.stringify(
+    {
+      workspaceRoot,
+      dbPath,
+      runsRoot,
+      manifestPath: runtimePathGuard.manifestPath,
+      manifestCreated: runtimePathGuard.created
+    },
+    null,
+    2
+  )
+);
 
 let isShuttingDown = false;
 let loopRunning = false;

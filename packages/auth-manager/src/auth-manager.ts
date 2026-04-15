@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import type { AccessContext } from "@artbot/shared-types";
+import type { AccessContext, AccessMode, ArtifactHandling, SourceLegalPosture } from "@artbot/shared-types";
 import { logger } from "@artbot/observability";
 import type {
   AuthProfile,
@@ -83,6 +83,47 @@ function isEncryptedProfile(profile: AuthProfile | undefined): boolean {
   return profile?.encryptionMode === "aes-256-gcm";
 }
 
+function buildAccessProvenanceLabel(
+  mode: AccessMode,
+  profile: AuthProfile | undefined,
+  legalPosture: SourceLegalPosture | undefined
+): string {
+  if (mode === "licensed") {
+    return `Licensed access${profile ? ` via ${profile.id}` : ""}${legalPosture ? ` (${legalPosture})` : ""}.`;
+  }
+  if (mode === "authorized") {
+    return `Authorized session${profile ? ` via ${profile.id}` : ""}${legalPosture ? ` (${legalPosture})` : ""}.`;
+  }
+  return legalPosture === "public_contract_sensitive"
+    ? "Anonymous public access on a contract-sensitive source."
+    : "Anonymous public access.";
+}
+
+function buildArtifactHandling(mode: AccessMode, legalPosture: SourceLegalPosture | undefined): ArtifactHandling {
+  if (mode === "licensed" || legalPosture === "licensed_only") {
+    return "internal_only";
+  }
+  if (mode === "authorized" || legalPosture === "auth_required" || legalPosture === "public_contract_sensitive") {
+    return "scrubbed_sensitive";
+  }
+  return "standard";
+}
+
+function buildIdentityContext(
+  profile: AuthProfile | undefined,
+  mode: AccessMode,
+  legalPosture: SourceLegalPosture | undefined
+) {
+  return {
+    legalPosture,
+    sessionIdentity: profile ? `session:${profile.id}` : "session:anonymous",
+    browserIdentity: profile?.browserIdentity?.trim() || (profile ? `browser:${profile.id}` : "browser:ephemeral"),
+    proxyIdentity: profile?.proxyIdentity?.trim() || process.env.ARTBOT_PROXY_IDENTITY?.trim() || "proxy:direct",
+    artifactHandling: buildArtifactHandling(mode, legalPosture),
+    accessProvenanceLabel: buildAccessProvenanceLabel(mode, profile, legalPosture)
+  };
+}
+
 function encryptPayload(secret: string, plaintext: string): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", deriveEncryptionKey(secret), iv);
@@ -127,6 +168,7 @@ export class AuthManager {
 
   public resolveAccess(input: ResolveAccessInput): AccessContext {
     const licensedIntegrations = input.licensedIntegrations ?? [];
+    const legalPosture = input.legalPosture;
 
     if (input.sourceRequiresLicense) {
       const hasLicensedPath = Boolean(input.allowLicensed) && licensedIntegrations.includes(input.sourceName);
@@ -139,6 +181,7 @@ export class AuthManager {
           sessionExpiresAt: licensedProfile?.expiresAt,
           sensitivity: licensedProfile?.sensitivity ?? "licensed",
           encryptedAtRest: isEncryptedProfile(licensedProfile),
+          ...buildIdentityContext(licensedProfile, "licensed", legalPosture ?? "licensed_only"),
           licensedIntegrations,
           sourceAccessStatus: "licensed_access",
           allowLicensed: true,
@@ -148,6 +191,7 @@ export class AuthManager {
 
       return {
         mode: "anonymous",
+        ...buildIdentityContext(undefined, "anonymous", legalPosture ?? "licensed_only"),
         licensedIntegrations,
         sourceAccessStatus: "blocked",
         allowLicensed: false,
@@ -162,6 +206,7 @@ export class AuthManager {
       if (!selectedProfile) {
         return {
           mode: "anonymous",
+          ...buildIdentityContext(undefined, "anonymous", legalPosture ?? "auth_required"),
           licensedIntegrations,
           sourceAccessStatus: "auth_required",
           allowLicensed: Boolean(input.allowLicensed),
@@ -180,6 +225,7 @@ export class AuthManager {
         sessionExpiresAt: selectedProfile.expiresAt,
         sensitivity: selectedProfile.sensitivity ?? (selectedProfile.mode === "licensed" ? "licensed" : "sensitive"),
         encryptedAtRest: isEncryptedProfile(selectedProfile),
+        ...buildIdentityContext(selectedProfile, selectedProfile.mode, legalPosture ?? "auth_required"),
         manualLoginCheckpoint: input.manualLoginCheckpoint,
         allowLicensed: Boolean(input.allowLicensed),
         licensedIntegrations,
@@ -196,6 +242,7 @@ export class AuthManager {
         sessionExpiresAt: selectedProfile.expiresAt,
         sensitivity: selectedProfile.sensitivity ?? "licensed",
         encryptedAtRest: isEncryptedProfile(selectedProfile),
+        ...buildIdentityContext(selectedProfile, "licensed", legalPosture ?? "licensed_only"),
         allowLicensed: Boolean(input.allowLicensed),
         licensedIntegrations,
         sourceAccessStatus: "licensed_access",
@@ -212,6 +259,7 @@ export class AuthManager {
         sessionExpiresAt: selectedProfile.expiresAt,
         sensitivity: selectedProfile.sensitivity ?? "sensitive",
         encryptedAtRest: isEncryptedProfile(selectedProfile),
+        ...buildIdentityContext(selectedProfile, "authorized", legalPosture ?? "public_contract_sensitive"),
         manualLoginCheckpoint: input.manualLoginCheckpoint,
         allowLicensed: Boolean(input.allowLicensed),
         licensedIntegrations,
@@ -222,6 +270,7 @@ export class AuthManager {
 
     return {
       mode: "anonymous",
+      ...buildIdentityContext(undefined, "anonymous", legalPosture ?? "public_permitted"),
       allowLicensed: Boolean(input.allowLicensed),
       licensedIntegrations,
       sourceAccessStatus: "public_access",

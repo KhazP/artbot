@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import dotenv from "dotenv";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import dotenv from "dotenv";
 import { AuthManager } from "@artbot/auth-manager";
 import { buildEvaluationMetrics } from "@artbot/orchestrator";
 import { buildDiscoveryConfigFromEnv, buildSourcePlanItems, planSources, SourceRegistry } from "@artbot/source-registry";
@@ -19,44 +19,21 @@ import {
   type RunSummary,
   sourceStatusList
 } from "@artbot/shared-types";
-import { ARTIFACT_MANIFEST_FILE, ArtbotStorage, readArtifactManifest } from "@artbot/storage";
+import {
+  ARTIFACT_MANIFEST_FILE,
+  ArtbotStorage,
+  artistKeyFromName,
+  ensureWorkspaceRuntimeStoragePaths,
+  readArtifactManifest,
+  resolveWorkspaceRelativePath
+} from "@artbot/storage";
 import { z } from "zod";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
-function findWorkspaceRoot(start: string): string | null {
-  let current = path.resolve(start);
-  while (true) {
-    if (fs.existsSync(path.join(current, "pnpm-workspace.yaml"))) {
-      return current;
-    }
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return null;
-    }
-    current = parent;
-  }
-}
-
-function resolveWorkspaceRoot(): string {
-  const candidates = [
-    process.env.INIT_CWD,
-    process.cwd(),
-    path.resolve(moduleDir, "../../..")
-  ].filter((value): value is string => Boolean(value));
-
-  for (const candidate of candidates) {
-    const root = findWorkspaceRoot(candidate);
-    if (root) {
-      return root;
-    }
-  }
-
-  return path.resolve(moduleDir, "../../..");
-}
-
 function resolveWorkspaceDefault(relativePath: string): string {
-  return path.resolve(resolveWorkspaceRoot(), relativePath);
+  const workspaceRoot = process.env.INIT_CWD ?? path.resolve(moduleDir, "../../..");
+  return path.resolve(workspaceRoot, relativePath);
 }
 
 dotenv.config({ path: resolveWorkspaceDefault(".env"), override: false });
@@ -64,9 +41,10 @@ dotenv.config({ path: resolveWorkspaceDefault(".env"), override: false });
 const port = Number(process.env.PORT ?? 4000);
 const host = process.env.HOST?.trim() || "0.0.0.0";
 const apiKey = process.env.ARTBOT_API_KEY;
-
-const dbPath = process.env.DATABASE_PATH ?? resolveWorkspaceDefault("var/data/artbot.db");
-const runsRoot = process.env.RUNS_ROOT ?? resolveWorkspaceDefault("var/runs");
+const workspaceRoot = resolveWorkspaceDefault(".");
+const dbPath = resolveWorkspaceRelativePath(process.env.DATABASE_PATH, workspaceRoot, "var/data/artbot.db");
+const runsRoot = resolveWorkspaceRelativePath(process.env.RUNS_ROOT, workspaceRoot, "var/runs");
+const runtimePathGuard = ensureWorkspaceRuntimeStoragePaths("api", workspaceRoot, dbPath, runsRoot);
 
 const storage = new ArtbotStorage(dbPath, runsRoot);
 const sourceRegistry = new SourceRegistry();
@@ -74,6 +52,16 @@ const authManager = new AuthManager();
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
+app.log.info(
+  {
+    workspaceRoot,
+    dbPath,
+    runsRoot,
+    manifestPath: runtimePathGuard.manifestPath,
+    manifestCreated: runtimePathGuard.created
+  },
+  "Resolved runtime storage paths"
+);
 
 function isPricedAcceptanceReason(reason: (typeof acceptanceReasonList)[number]): boolean {
   return reason === "valuation_ready" || reason === "estimate_range_ready" || reason === "asking_price_ready";
@@ -91,6 +79,10 @@ const runsQuerySchema = z.object({
 const recoverStaleRunsSchema = z.object({
   maxStaleMinutes: z.coerce.number().int().positive().max(24 * 60).optional(),
   reason: z.string().trim().min(3).max(240).optional()
+});
+
+const adjudicateReviewItemSchema = z.object({
+  decision: z.enum(["merge", "keep_separate"])
 });
 
 app.addHook("preHandler", async (request, reply) => {
@@ -116,7 +108,7 @@ async function buildPlanPreview(
     runType === "artist_market_inventory"
       ? sourceRegistry.list().filter((adapter: ReturnType<typeof sourceRegistry.list>[number]) => (query.sourceClasses ?? []).includes(adapter.venueType))
       : sourceRegistry.list();
-  const plannedSources = await planSources(query, adapters, authManager, storage.listHostHealth(50));
+  const plannedSources = await planSources(query, adapters, authManager);
   const candidateCap = buildDiscoveryConfigFromEnv(query.analysisMode).maxCandidatesPerSource;
   const sourcePlan = buildSourcePlanItems(plannedSources, candidateCap, query.analysisMode);
   const totals = sourcePlan.reduce<Record<string, number>>((acc: Record<string, number>, item) => {
@@ -216,6 +208,7 @@ app.get("/runs/:id", async (request, reply) => {
   let sourcePlan: unknown[] = [];
   let recommendedActions: unknown[] = [];
   let persistedSourceHealth: unknown[] = [];
+  let localAiDecisions: unknown[] = [];
   let persistedPayload: Record<string, unknown> | null = null;
   let persistedInventoryPayload: ArtistMarketInventoryResultsPayload | null = null;
   let persistedSummary: RunSummary | null = null;
@@ -243,6 +236,7 @@ app.get("/runs/:id", async (request, reply) => {
       sourcePlan = Array.isArray(payload.source_plan) ? payload.source_plan : [];
       recommendedActions = Array.isArray(payload.recommended_actions) ? payload.recommended_actions : [];
       persistedSourceHealth = Array.isArray(payload.persisted_source_health) ? payload.persisted_source_health : [];
+      localAiDecisions = Array.isArray(payload.local_ai_decisions) ? payload.local_ai_decisions : [];
     } catch {
       valuationReason = "Failed to parse valuation output.";
     }
@@ -341,6 +335,13 @@ app.get("/runs/:id", async (request, reply) => {
       }
     : computedSummary;
 
+  const artistKey = typeof details.run.query.artist === "string" ? artistKeyFromName(details.run.query.artist) : null;
+  const liveInventory = artistKey ? storage.listInventoryRecordsByArtist(artistKey) : [];
+  const liveClusters = artistKey ? storage.listArtworkClustersByArtist(artistKey) : [];
+  const liveClusterMemberships = artistKey ? storage.listClusterMemberships(artistKey) : [];
+  const liveReviewQueue = artistKey ? storage.listReviewItemsByArtist(artistKey) : [];
+  const inventoryPayloadLocalAiDecisions = persistedInventoryPayload?.local_ai_decisions ?? [];
+
   const response = {
     run: details.run,
     summary,
@@ -350,20 +351,49 @@ app.get("/runs/:id", async (request, reply) => {
     recommended_actions: recommendedActions,
     artifact_manifest: artifactManifest ?? undefined,
     persisted_source_health: persistedSourceHealth.length > 0 ? persistedSourceHealth : summary.persisted_source_health,
+    local_ai_decisions: localAiDecisions.length > 0 ? localAiDecisions : inventoryPayloadLocalAiDecisions,
     valuation,
     duplicates,
     per_painting_stats: perPaintingStats,
     inventory_summary: persistedInventoryPayload?.inventory_summary,
-    inventory: persistedInventoryPayload?.inventory,
-    clusters: persistedInventoryPayload?.clusters,
-    cluster_memberships: persistedInventoryPayload?.cluster_memberships,
-    review_queue: persistedInventoryPayload?.review_queue,
+    inventory: liveInventory.length > 0 ? liveInventory : persistedInventoryPayload?.inventory,
+    clusters: liveClusters.length > 0 ? liveClusters : persistedInventoryPayload?.clusters,
+    cluster_memberships: liveClusterMemberships.length > 0 ? liveClusterMemberships : persistedInventoryPayload?.cluster_memberships,
+    review_queue: liveReviewQueue.length > 0 ? liveReviewQueue : persistedInventoryPayload?.review_queue,
     source_hosts: persistedInventoryPayload?.source_hosts,
     checkpoints: persistedInventoryPayload?.checkpoints,
     artifacts: persistedInventoryPayload?.artifacts
   };
 
   return runDetailsResponseSchema.parse(response);
+});
+
+app.post("/runs/:id/review-queue/:reviewId/adjudicate", async (request, reply) => {
+  const id = (request.params as { id: string }).id;
+  const reviewId = (request.params as { reviewId: string }).reviewId;
+  const parsed = adjudicateReviewItemSchema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    return reply.status(400).send({ error: parsed.error.flatten() });
+  }
+
+  const details = storage.getRunDetails(id);
+  if (!details) {
+    return reply.status(404).send({ error: "Run not found" });
+  }
+  if (typeof details.run.query.artist !== "string") {
+    return reply.status(400).send({ error: "Run query missing artist identity." });
+  }
+
+  const artistKey = artistKeyFromName(details.run.query.artist);
+  const updated = storage.adjudicateReviewItem(artistKey, reviewId, parsed.data.decision);
+  if (!updated) {
+    return reply.status(404).send({ error: "Review item not found" });
+  }
+
+  return {
+    run_id: id,
+    review_item: updated
+  };
 });
 
 app.post("/runs/recover-stale", async (request, reply) => {

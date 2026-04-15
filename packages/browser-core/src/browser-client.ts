@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { AuthManager } from "@artbot/auth-manager";
 import { logger } from "@artbot/observability";
-import type { AccessContext } from "@artbot/shared-types";
+import type { AccessContext, ArtifactHandling } from "@artbot/shared-types";
 import { chromium, type BrowserContext, type Page } from "playwright";
 
 export interface BrowserCaptureInput {
@@ -53,11 +53,31 @@ export interface RenderedPageProgressSnapshot {
   textLength: number;
 }
 
+export function shouldPersistHeavyBrowserArtifacts(
+  captureHeavyEvidence: boolean | undefined,
+  artifactHandling: ArtifactHandling | undefined
+): boolean {
+  return Boolean(captureHeavyEvidence) && artifactHandling === "standard";
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const NAVIGATION_SETTLE_MS = 1_500;
+
+function sanitizeSensitiveArtifactText(content: string): string {
+  return content
+    .replace(/(authorization["'\s:=]+bearer\s+)[^"'\\\s<]+/gi, "$1[REDACTED]")
+    .replace(/(x-api-key["'\s:=]+)[^"'\\\s<]+/gi, "$1[REDACTED]")
+    .replace(/(set-cookie["'\s:=]+)[^\n<]+/gi, "$1[REDACTED]")
+    .replace(/((?:access_token|auth_token|session_token|csrf_token|_csrf|token)["']?\s*[:=]\s*["'])[^"']+(["'])/gi, "$1[REDACTED]$2")
+    .replace(/((?:sessionid|sid|remember_token)=)[^;"'\s<]+/gi, "$1[REDACTED]");
+}
+
+function sanitizeBrowserArtifact(content: string, accessContext: AccessContext): string {
+  return accessContext.artifactHandling === "standard" ? content : sanitizeSensitiveArtifactText(content);
+}
 
 function slugify(value: string): string {
   return value
@@ -277,14 +297,18 @@ export class BrowserClient {
     let traceStarted = false;
 
     try {
+      const allowHeavyEvidence = shouldPersistHeavyBrowserArtifacts(
+        input.captureHeavyEvidence,
+        input.accessContext.artifactHandling
+      );
       context = await this.newContext(
         browser,
         materializedSession.browserPath,
-        input.captureHeavyEvidence ? harPath : undefined
+        allowHeavyEvidence ? harPath : undefined
       );
       await this.injectCookies(context, input.accessContext.profileId, input.accessContext.cookieFile);
 
-      if (input.captureHeavyEvidence) {
+      if (allowHeavyEvidence) {
         await context.tracing.start({
           screenshots: true,
           snapshots: true,
@@ -325,14 +349,14 @@ export class BrowserClient {
 
       await page.screenshot({ path: screenshotPath, fullPage: true });
       const html = await page.content();
-      fs.writeFileSync(rawSnapshotPath, html, "utf-8");
+      fs.writeFileSync(rawSnapshotPath, sanitizeBrowserArtifact(html, input.accessContext), "utf-8");
 
       if (materializedSession.browserPath) {
         await context.storageState({ path: materializedSession.browserPath });
         this.authManager.persistSessionState(input.accessContext.profileId, materializedSession.browserPath);
       }
 
-      if (input.captureHeavyEvidence) {
+      if (allowHeavyEvidence) {
         await context.tracing.stop({ path: tracePath });
         traceStarted = false;
       }
@@ -347,8 +371,8 @@ export class BrowserClient {
         preAuthScreenshotPath: captureAuthCheckpoints ? preAuthScreenshotPath : null,
         postAuthScreenshotPath: captureAuthCheckpoints ? postAuthScreenshotPath : null,
         rawSnapshotPath,
-        tracePath: input.captureHeavyEvidence ? tracePath : null,
-        harPath: input.captureHeavyEvidence ? harPath : null,
+        tracePath: allowHeavyEvidence ? tracePath : null,
+        harPath: allowHeavyEvidence ? harPath : null,
         requiresAuthDetected,
         blockedDetected,
         modelUsed: null
@@ -356,7 +380,7 @@ export class BrowserClient {
     } finally {
       materializedSession.cleanup();
       if (context) {
-        if (input.captureHeavyEvidence && traceStarted) {
+        if (shouldPersistHeavyBrowserArtifacts(input.captureHeavyEvidence, input.accessContext.artifactHandling) && traceStarted) {
           try {
             await context.tracing.stop({ path: tracePath });
           } catch (error) {
@@ -490,7 +514,7 @@ export class BrowserClient {
         const screenshotPath = path.join(screenshotsDir, `${baseName}-rendered.png`);
         const rawSnapshotPath = path.join(rawDir, `${baseName}-rendered.html`);
         await page.screenshot({ path: screenshotPath, fullPage: true });
-        fs.writeFileSync(rawSnapshotPath, html, "utf-8");
+        fs.writeFileSync(rawSnapshotPath, sanitizeBrowserArtifact(html, input.accessContext), "utf-8");
         screenshotPaths.push(screenshotPath);
         rawSnapshotPaths.push(rawSnapshotPath);
         const inlineScriptUrls = extractInlineScriptDiscoveredUrls(html, page.url());
@@ -716,7 +740,7 @@ export class BrowserClient {
       await stagehand.page.goto(input.url, { waitUntil: "commit", timeout: timeoutMs });
       await stagehand.page.screenshot({ path: screenshotPath, fullPage: true });
       const html = await stagehand.page.content();
-      fs.writeFileSync(rawSnapshotPath, html, "utf-8");
+      fs.writeFileSync(rawSnapshotPath, sanitizeBrowserArtifact(html, input.accessContext), "utf-8");
 
       const finalUrl = stagehand.page.url();
       const requiresAuthDetected = containsAuthIndicators(html);

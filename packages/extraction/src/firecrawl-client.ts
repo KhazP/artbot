@@ -1,7 +1,15 @@
 import FirecrawlApp from "@mendable/firecrawl-js";
 import type { FetchResult } from "./http-fetch.js";
 
+function firecrawlEnabledByEnv(): boolean {
+  return process.env.FIRECRAWL_ENABLED?.trim().toLowerCase() === "true";
+}
+
 export async function firecrawlScrape(url: string): Promise<FetchResult | null> {
+  if (!firecrawlEnabledByEnv()) {
+    return null;
+  }
+
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
     return null;

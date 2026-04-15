@@ -1,12 +1,23 @@
 import { z } from "zod";
 import type {
   AcceptanceReason,
+  AccessMode,
+  ArtifactHandling,
   PriceType,
   SourceAccessStatus,
+  SourceLegalPosture,
   SourcePageType,
   ValuationLane,
   VenueType
 } from "./enums.js";
+import {
+  artifactHandlingSchema,
+  crawlLaneSchema,
+  priceVisibilitySchema,
+  saleChannelSchema,
+  sourceLegalPostureSchema,
+  sourceSurfaceSchema
+} from "./operations.js";
 
 export const priceRecordSchema = z.object({
   artist_name: z.string(),
@@ -28,8 +39,20 @@ export const priceRecordSchema = z.object({
   city: z.string().nullable(),
   country: z.string().nullable(),
   source_name: z.string(),
+  source_family: z.string().nullable().optional(),
   source_url: z.string().url(),
   source_page_type: z.enum(["lot", "artist_page", "price_db", "listing", "article", "other"]),
+  source_surface: sourceSurfaceSchema.optional(),
+  crawl_lane: crawlLaneSchema.optional(),
+  sale_channel: saleChannelSchema.optional(),
+  price_visibility: priceVisibilitySchema.optional(),
+  access_mode: z.enum(["anonymous", "authorized", "licensed"]).optional(),
+  source_legal_posture: sourceLegalPostureSchema.optional(),
+  access_provenance_label: z.string().nullable().optional(),
+  session_identity: z.string().nullable().optional(),
+  browser_identity: z.string().nullable().optional(),
+  proxy_identity: z.string().nullable().optional(),
+  artifact_handling: artifactHandlingSchema.optional(),
   sale_or_listing_date: z.string().nullable(),
   lot_number: z.string().nullable(),
   price_type: z.enum([
@@ -87,17 +110,33 @@ export const priceRecordSchema = z.object({
   source_access_status: z
     .enum(["public_access", "auth_required", "licensed_access", "blocked", "price_hidden"])
     .default("public_access"),
+  acceptance_explanation: z.string().nullable().optional(),
+  next_step_hint: z.string().nullable().optional(),
   notes: z.array(z.string())
 });
 
 export type PriceRecord = z.infer<typeof priceRecordSchema>;
 
 export interface PriceRecordInput
-  extends Omit<PriceRecord, "venue_type" | "source_page_type" | "price_type" | "source_access_status" | "valuation_lane" | "acceptance_reason"> {
+  extends Omit<
+    PriceRecord,
+    | "venue_type"
+    | "source_page_type"
+    | "price_type"
+    | "source_access_status"
+    | "valuation_lane"
+    | "acceptance_reason"
+    | "access_mode"
+    | "source_legal_posture"
+    | "artifact_handling"
+  > {
   venue_type: VenueType;
   source_page_type: SourcePageType;
   price_type: PriceType;
   source_access_status: SourceAccessStatus;
   valuation_lane: ValuationLane;
   acceptance_reason: AcceptanceReason;
+  access_mode?: AccessMode;
+  source_legal_posture?: SourceLegalPosture;
+  artifact_handling?: ArtifactHandling;
 }

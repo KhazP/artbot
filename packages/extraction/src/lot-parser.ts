@@ -35,6 +35,10 @@ interface JsonLdFields {
 }
 
 interface ScriptPayloadFields {
+  title: string | null;
+  artistName: string | null;
+  medium: string | null;
+  year: string | null;
   lotNumber: string | null;
   estimateLow: number | null;
   estimateHigh: number | null;
@@ -42,6 +46,7 @@ interface ScriptPayloadFields {
   priceType: PriceType;
   currency: string | null;
   saleDate: string | null;
+  priceHidden: boolean;
 }
 
 interface CurrencyAmountMatch {
@@ -427,57 +432,83 @@ function matchFirst(scriptContent: string, patterns: RegExp[]): RegExpMatchArray
   return null;
 }
 
+function captureMatchValue(match: RegExpMatchArray | null): string {
+  if (!match) {
+    return "";
+  }
+  return (match[1] ?? match[2] ?? "").trim();
+}
+
 function extractScriptPayloadFields(content: string): ScriptPayloadFields {
   const fallback: ScriptPayloadFields = {
+    title: null,
+    artistName: null,
+    medium: null,
+    year: null,
     lotNumber: null,
     estimateLow: null,
     estimateHigh: null,
     priceAmount: null,
     priceType: "unknown",
     currency: null,
-    saleDate: null
+    saleDate: null,
+    priceHidden: false
   };
 
   const scripts = content.match(/<script\b[^>]*>([\s\S]*?)<\/script>/gi) ?? [];
-  if (scripts.length === 0) {
-    return fallback;
-  }
-
-  const scriptBlob = scripts
-    .map((script) => script.replace(/<script\b[^>]*>/i, "").replace(/<\/script>/i, ""))
-    .join("\n")
+  const scriptBlob = (scripts.length > 0
+    ? scripts.map((script) => script.replace(/<script\b[^>]*>/i, "").replace(/<\/script>/i, "")).join("\n")
+    : content)
     .replace(/\\u20ba/gi, "₺")
     .replace(/\\u20ac/gi, "€")
     .replace(/\\u00a3/gi, "£");
 
+  if (scriptBlob.trim().length === 0) {
+    return fallback;
+  }
+
   const lotNumber =
     matchFirst(scriptBlob, [
+      /"(?:lotno|lotNo|lotNO)"\s*:\s*"([^"]{1,32})"/i,
+      /'(?:lotno|lotNo|lotNO)'\s*:\s*'([^']{1,32})'/i,
       /"(?:lotNumber|lotNo|lot_no|lot_number|lotId)"\s*:\s*"([^"]{1,32})"/i,
       /'(?:lotNumber|lotNo|lot_no|lot_number|lotId)'\s*:\s*'([^']{1,32})'/i
     ])?.[1] ?? null;
-  const estimateLow =
-    normalizeNumber(
-      matchFirst(scriptBlob, [
-        /"(?:estimateLow|lowEstimate|minEstimate|estimate_from|startingPrice)"\s*:\s*"?([^"}\]]+)"/i,
-        /'(?:estimateLow|lowEstimate|minEstimate|estimate_from|startingPrice)'\s*:\s*'?([^'}\]]+)'?/i
-      ])?.[1] ?? ""
-    ) ?? null;
-  const estimateHigh =
-    normalizeNumber(
-      matchFirst(scriptBlob, [
-        /"(?:estimateHigh|highEstimate|maxEstimate|estimate_to)"\s*:\s*"?([^"}\]]+)"/i,
-        /'(?:estimateHigh|highEstimate|maxEstimate|estimate_to)'\s*:\s*'?([^'}\]]+)'?/i
-      ])?.[1] ?? ""
-    ) ?? null;
+  const estimateLowPrimary = matchFirst(scriptBlob, [
+    /"(?:estimatedMin|estimate_min)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:estimatedMin|estimate_min)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i,
+    /"(?:estimateLow|lowEstimate|minEstimate|estimate_from|startingPrice)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:estimateLow|lowEstimate|minEstimate|estimate_from|startingPrice)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i
+  ]);
+  const estimateLowFallback = matchFirst(scriptBlob, [
+    /"(?:GBPLowEstimate|gbpLowEstimate|lowEstimateGBP)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:GBPLowEstimate|gbpLowEstimate|lowEstimateGBP)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i
+  ]);
+  const estimateLow = normalizeNumber(captureMatchValue(estimateLowPrimary ?? estimateLowFallback)) ?? null;
+  const estimateHighPrimary = matchFirst(scriptBlob, [
+    /"(?:estimatedMax|estimate_max)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:estimatedMax|estimate_max)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i,
+    /"(?:estimateHigh|highEstimate|maxEstimate|estimate_to)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:estimateHigh|highEstimate|maxEstimate|estimate_to)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i
+  ]);
+  const estimateHighFallback = matchFirst(scriptBlob, [
+    /"(?:GBPHighEstimate|gbpHighEstimate|highEstimateGBP)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:GBPHighEstimate|gbpHighEstimate|highEstimateGBP)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i
+  ]);
+  const estimateHigh = normalizeNumber(captureMatchValue(estimateHighPrimary ?? estimateHighFallback)) ?? null;
 
   const priceMatch = matchFirst(scriptBlob, [
-    /"(?:realizedPrice|soldPrice|salePrice|finalPrice|hammerPrice|currentBid|lastBid|priceAmount|amount|price)"\s*:\s*"?([^"}\]]+)"/i,
-    /'(?:realizedPrice|soldPrice|salePrice|finalPrice|hammerPrice|currentBid|lastBid|priceAmount|amount|price)'\s*:\s*'?([^'}\]]+)'?/i
+    /"(?:auction_price|auctionPrice|opening_price|openingPrice)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:auction_price|auctionPrice|opening_price|openingPrice)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i,
+    /"(?:realizedPrice|soldPrice|salePrice|finalPrice|hammerPrice|currentBid|lastBid|priceAmount|amount|startingBidAmount)"\s*:\s*(?:"([^"]+)"|([^,}\]]+))/i,
+    /'(?:realizedPrice|soldPrice|salePrice|finalPrice|hammerPrice|currentBid|lastBid|priceAmount|amount|startingBidAmount)'\s*:\s*(?:'([^']+)'|([^,}\]]+))/i
   ]);
-  const priceAmount = normalizeNumber(priceMatch?.[1] ?? "");
+  const priceAmount = normalizeNumber(captureMatchValue(priceMatch));
 
   const currencyToken =
     matchFirst(scriptBlob, [
+      /"(?:code)"\s*:\s*"([A-Za-z]{3})"/i,
+      /'(?:code)'\s*:\s*'([A-Za-z]{3})'/i,
       /"(?:priceCurrency|currencyCode|currency)"\s*:\s*"([A-Za-z$€£₺]{1,5})"/i,
       /'(?:priceCurrency|currencyCode|currency)'\s*:\s*'([A-Za-z$€£₺]{1,5})'/i
     ])?.[1] ?? inferCurrency(scriptBlob);
@@ -488,12 +519,33 @@ function extractScriptPayloadFields(content: string): ScriptPayloadFields {
       /'(?:saleDate|auctionDate|datePublished|publishedDate|eventDate|startDate|endDate|date)'\s*:\s*'([^']{8,32})'/i
     ])?.[1] ?? null;
 
+  const title =
+    matchFirst(scriptBlob, [
+      /"(?:name|title)"\s*:\s*"([^"]{2,200})"/i,
+      /'(?:name|title)'\s*:\s*'([^']{2,200})'/i
+    ])?.[1] ?? null;
+  const artistName =
+    matchFirst(scriptBlob, [
+      /"(?:artistName|artist_name|artist)"\s*:\s*"([^"]{2,200})"/i,
+      /'(?:artistName|artist_name|artist)'\s*:\s*'([^']{2,200})'/i
+    ])?.[1] ?? null;
+  const medium =
+    matchFirst(scriptBlob, [
+      /"(?:short_desc|short_description|medium|material)"\s*:\s*"([^"]{2,300})"/i,
+      /'(?:short_desc|short_description|medium|material)'\s*:\s*'([^']{2,300})'/i
+    ])?.[1] ?? null;
+  const year = scriptBlob.match(/\b((?:18|19|20)\d{2})\b/)?.[1] ?? null;
+  const hiddenPriceMarker = matchFirst(scriptBlob, [
+    /"(?:isShowPrice)"\s*:\s*(false|0)/i,
+    /'(?:isShowPrice)'\s*:\s*(false|0)/i
+  ]);
+
   let priceType: PriceType = "unknown";
   const lowerBlob = scriptBlob.toLowerCase();
   if (estimateLow !== null || estimateHigh !== null) {
     priceType = "estimate";
   } else if (priceAmount !== null) {
-    if (/hammerprice|hammer_price|hammer/.test(lowerBlob)) {
+    if (/auction_price|hammerprice|hammer_price|hammer/.test(lowerBlob)) {
       priceType = "hammer_price";
     } else if (/realizedprice|soldprice|saleprice|finalprice|realized|sold/.test(lowerBlob)) {
       priceType = "realized_price";
@@ -505,13 +557,18 @@ function extractScriptPayloadFields(content: string): ScriptPayloadFields {
   }
 
   return {
+    title: sanitizeTitle(title),
+    artistName: firstString(artistName),
+    medium: firstString(medium),
+    year,
     lotNumber,
     estimateLow,
     estimateHigh,
     priceAmount,
     priceType,
     currency: normalizeCurrencyToken(currencyToken),
-    saleDate
+    saleDate,
+    priceHidden: Boolean(hiddenPriceMarker)
   };
 }
 
@@ -524,6 +581,7 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
   const text = content.replace(/\s+/g, " ").trim();
   const jsonLd = parseJsonLd(content);
   const scriptPayload = extractScriptPayloadFields(content);
+  const hiddenBySourceFlag = scriptPayload.priceHidden;
 
   const lotMatch = text.match(/(?:lot no|lot nr|lot#|lot numarası|\blot\b)\s*[:#]?\s*([a-z0-9-]+)/i);
   const estMatch = text.match(
@@ -555,18 +613,24 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
   }
 
   if (realizedMatch) {
-    priceAmount = normalizeNumber(realizedMatch[1]);
-    const lowerText = text.toLowerCase();
-    if (/hammer|çekiç|cekic/.test(lowerText)) {
-      priceType = "hammer_price";
-    } else if (
-      /buyers?\s*premium|buyer's premium|alıcı primi|alici primi/.test(lowerText) &&
-      /(included|dahil)/.test(lowerText)
-    ) {
-      priceType = "realized_with_buyers_premium";
-      buyersPremiumIncluded = true;
-    } else {
-      priceType = "realized_price";
+    const realizedAmount = normalizeNumber(realizedMatch[1]);
+    const hasEstimateSignal = estimateLow !== null || estimateHigh !== null;
+    if (realizedAmount !== null && realizedAmount > 0) {
+      priceAmount = realizedAmount;
+      const lowerText = text.toLowerCase();
+      if (/hammer|çekiç|cekic/.test(lowerText)) {
+        priceType = "hammer_price";
+      } else if (
+        /buyers?\s*premium|buyer's premium|alıcı primi|alici primi/.test(lowerText) &&
+        /(included|dahil)/.test(lowerText)
+      ) {
+        priceType = "realized_with_buyers_premium";
+        buyersPremiumIncluded = true;
+      } else {
+        priceType = "realized_price";
+      }
+    } else if (!hasEstimateSignal) {
+      priceAmount = realizedAmount;
     }
   } else if (askMatch && !inquiryOnly && priceType === "unknown") {
     priceType = "asking_price";
@@ -654,8 +718,12 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
     currency = null;
   }
 
+  if (hiddenBySourceFlag && priceType === "unknown") {
+    priceType = "asking_price";
+  }
+
   const hasResolvedNumericSignal = priceAmount !== null || estimateLow !== null || estimateHigh !== null;
-  if (!hasResolvedNumericSignal && priceType !== "inquiry_only") {
+  if (!hasResolvedNumericSignal && priceType !== "inquiry_only" && !hiddenBySourceFlag) {
     priceType = "unknown";
     currency = null;
   }
@@ -671,11 +739,11 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
   const normalizedLotFromText = lotFromText && !/^number$/i.test(lotFromText) ? lotFromText : null;
 
   return {
-    title: jsonLd.title ?? extractTitle(content),
-    artistName: jsonLd.artistName ?? (artistMatch ? artistMatch[1].trim() : null),
-    medium: jsonLd.medium ?? (mediumMatch ? mediumMatch[1].trim() : null),
+    title: jsonLd.title ?? scriptPayload.title ?? extractTitle(content),
+    artistName: jsonLd.artistName ?? scriptPayload.artistName ?? (artistMatch ? artistMatch[1].trim() : null),
+    medium: jsonLd.medium ?? scriptPayload.medium ?? (mediumMatch ? mediumMatch[1].trim() : null),
     dimensionsText: jsonLd.dimensionsText ?? (dimensionsMatch ? dimensionsMatch[1].trim() : null),
-    year: jsonLd.year ?? (yearMatch ? yearMatch[1] : null),
+    year: jsonLd.year ?? scriptPayload.year ?? (yearMatch ? yearMatch[1] : null),
     imageUrl: extractImageUrl(content, baseUrl),
     lotNumber: normalizedLotFromText ?? jsonLd.lotNumber ?? scriptPayload.lotNumber,
     estimateLow,
@@ -684,7 +752,7 @@ export function parseGenericLotFields(content: string, baseUrl?: string): Generi
     priceType,
     currency,
     saleDate: saleDateMatch ? saleDateMatch[1] : jsonLd.saleDate ?? scriptPayload.saleDate,
-    priceHidden: inquiryOnly,
+    priceHidden: inquiryOnly || hiddenBySourceFlag,
     buyersPremiumIncluded
   };
 }

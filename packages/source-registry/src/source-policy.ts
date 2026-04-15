@@ -1,4 +1,4 @@
-import type { ResearchQuery } from "@artbot/shared-types";
+import type { ResearchQuery, SourceLegalPosture } from "@artbot/shared-types";
 import type { SourceAdapter } from "@artbot/source-adapters";
 
 export type SourcePolicyClass = "public_archive" | "public_auth_mixed" | "licensed_only" | "probe";
@@ -6,6 +6,7 @@ export type SourcePolicyClass = "public_archive" | "public_auth_mixed" | "licens
 export interface SourcePolicyDecision {
   allowed: boolean;
   policyClass: SourcePolicyClass;
+  legalPosture: SourceLegalPosture;
   reason: string;
 }
 
@@ -37,13 +38,28 @@ function inferPolicyClass(adapter: SourceAdapter): SourcePolicyClass {
   return "public_archive";
 }
 
+function legalPostureForPolicyClass(policyClass: SourcePolicyClass): SourceLegalPosture {
+  switch (policyClass) {
+    case "public_archive":
+      return "public_permitted";
+    case "public_auth_mixed":
+      return "public_contract_sensitive";
+    case "licensed_only":
+      return "licensed_only";
+    case "probe":
+      return "operator_assisted_only";
+  }
+}
+
 export function evaluateSourcePolicy(adapter: SourceAdapter, query: ResearchQuery): SourcePolicyDecision {
   const policyClass = inferPolicyClass(adapter);
+  const legalPosture = legalPostureForPolicyClass(policyClass);
 
   if (policyClass === "probe" && process.env.ENABLE_OPTIONAL_PROBE_ADAPTERS !== "true") {
     return {
       allowed: false,
       policyClass,
+      legalPosture,
       reason: "Disabled by source policy (probe adapters are opt-in via ENABLE_OPTIONAL_PROBE_ADAPTERS=true)."
     };
   }
@@ -53,6 +69,7 @@ export function evaluateSourcePolicy(adapter: SourceAdapter, query: ResearchQuer
       return {
         allowed: false,
         policyClass,
+        legalPosture,
         reason: "Disabled by source policy (licensed source requires --allow-licensed)."
       };
     }
@@ -61,6 +78,7 @@ export function evaluateSourcePolicy(adapter: SourceAdapter, query: ResearchQuer
       return {
         allowed: false,
         policyClass,
+        legalPosture,
         reason: `Disabled by source policy (licensed integration "${adapter.sourceName}" not explicitly allowed).`
       };
     }
@@ -69,6 +87,7 @@ export function evaluateSourcePolicy(adapter: SourceAdapter, query: ResearchQuer
   return {
     allowed: true,
     policyClass,
+    legalPosture,
     reason: `Allowed by source policy (${policyClass}).`
   };
 }

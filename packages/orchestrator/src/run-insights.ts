@@ -1,4 +1,5 @@
 import type {
+  DiscoveryProviderDiagnostics,
   EvaluationMetrics,
   HostHealthRecord,
   RecommendedAction,
@@ -14,6 +15,11 @@ function isPricedAttempt(attempt: SourceAttempt): boolean {
   );
 }
 
+function toThreshold(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function isRunnableSelection(item: SourcePlanItem): boolean {
   return item.selection_state === "selected";
 }
@@ -23,10 +29,14 @@ export function buildEvaluationMetrics(input: {
   sourcePlan: SourcePlanItem[];
   acceptedRecords: number;
   valuationEligibleRecords: number;
+  pricedRecordCount?: number;
+  corePriceEvidenceCount?: number;
+  uniqueArtworkCount?: number;
+  blockedAccessShare?: number;
   manualOverrideCount?: number;
   coverageTarget?: number;
 }): EvaluationMetrics {
-  const coverageTarget = input.coverageTarget ?? 0.75;
+  const coverageTarget = input.coverageTarget ?? 0.85;
   const runnableAttempts = input.attempts.filter(
     (attempt) => attempt.source_access_status !== "blocked" && attempt.source_access_status !== "auth_required"
   );
@@ -48,13 +58,57 @@ export function buildEvaluationMetrics(input: {
     input.acceptedRecords === 0 ? 0 : Number((input.valuationEligibleRecords / input.acceptedRecords).toFixed(4));
   const manualOverrideRate =
     input.acceptedRecords === 0 ? 0 : Number((manualOverrideCount / input.acceptedRecords).toFixed(4));
-  const coverageTargetMet = valuationReadinessRatio >= coverageTarget;
+  const pricedRecordCount = input.pricedRecordCount ?? input.valuationEligibleRecords;
+  const corePriceEvidenceCount = input.corePriceEvidenceCount
+    ?? input.attempts.filter((attempt) => isPricedAttempt(attempt) && (attempt.accepted_for_evidence ?? attempt.accepted)).length;
+  const selectedFamilies = new Set(
+    input.sourcePlan.filter((item) => item.selection_state === "selected").map((item) => item.source_family)
+  );
+  const pricedFamilies = new Set(
+    input.attempts.filter((attempt) => isPricedAttempt(attempt)).map((attempt) => attempt.source_family ?? attempt.source_name)
+  );
+  let coveredFamilyCount = 0;
+  for (const family of selectedFamilies) {
+    if (pricedFamilies.has(family)) {
+      coveredFamilyCount += 1;
+    }
+  }
+  const familyCoverageRatio = selectedFamilies.size === 0
+    ? 0
+    : Number((coveredFamilyCount / selectedFamilies.size).toFixed(4));
+  const uniqueArtworkCount = input.uniqueArtworkCount ?? input.acceptedRecords;
+  const blockedAccessShare = input.blockedAccessShare
+    ?? Number(
+      (
+        input.attempts.filter(
+          (attempt) => attempt.source_access_status === "blocked" || attempt.source_access_status === "auth_required"
+        ).length / Math.max(1, input.attempts.length)
+      ).toFixed(4)
+    );
+
+  const minPricedRecordCount = toThreshold(process.env.COVERAGE_MIN_PRICED_RECORD_COUNT, 120);
+  const minCorePriceEvidenceCount = toThreshold(process.env.COVERAGE_MIN_CORE_PRICE_EVIDENCE_COUNT, 80);
+  const minFamilyCoverageRatio = toThreshold(process.env.COVERAGE_MIN_FAMILY_COVERAGE_RATIO, 0.7);
+  const minUniqueArtworkCount = toThreshold(process.env.COVERAGE_MIN_UNIQUE_ARTWORK_COUNT, 150);
+  const maxBlockedAccessShare = toThreshold(process.env.COVERAGE_MAX_BLOCKED_ACCESS_SHARE, 0.25);
+  const coverageTargetMet =
+    valuationReadinessRatio >= coverageTarget &&
+    pricedRecordCount >= minPricedRecordCount &&
+    corePriceEvidenceCount >= minCorePriceEvidenceCount &&
+    familyCoverageRatio >= minFamilyCoverageRatio &&
+    uniqueArtworkCount >= minUniqueArtworkCount &&
+    blockedAccessShare < maxBlockedAccessShare;
 
   return {
     accepted_record_precision: acceptedRecordPrecision,
     priced_source_recall: pricedSourceRecall,
     source_completeness_ratio: sourceCompletenessRatio,
     valuation_readiness_ratio: valuationReadinessRatio,
+    priced_record_count: pricedRecordCount,
+    core_price_evidence_count: corePriceEvidenceCount,
+    family_coverage_ratio: familyCoverageRatio,
+    unique_artwork_count: uniqueArtworkCount,
+    blocked_access_share: blockedAccessShare,
     manual_override_rate: manualOverrideRate,
     coverage_target: coverageTarget,
     coverage_target_met: coverageTargetMet
@@ -66,6 +120,7 @@ export function buildRecommendedActions(input: {
   attempts: SourceAttempt[];
   acceptedRecords: number;
   discoveredCandidates: number;
+  discoveryDiagnostics?: DiscoveryProviderDiagnostics[];
   hostHealth: HostHealthRecord[];
   evaluationMetrics?: EvaluationMetrics | null;
 }): RecommendedAction[] {
@@ -112,21 +167,34 @@ export function buildRecommendedActions(input: {
     });
   }
 
-  if (input.discoveredCandidates === 0) {
+  const discoveryDiagnostics = input.discoveryDiagnostics ?? [];
+  const discoveryConfigured = discoveryDiagnostics.some((item) => item.enabled);
+  const discoveryYieldedCandidates = discoveryDiagnostics.some((item) => item.candidates_kept > 0);
+  const discoveryFailover = discoveryDiagnostics.some((item) => item.failover_invoked);
+  if (input.discoveredCandidates === 0 && !discoveryConfigured) {
     actions.push({
       title: "Enable multi-provider discovery",
-      reason: "No discovery expansion was recorded for this run; add or enable a secondary discovery provider.",
+      reason: "No discovery provider was enabled for this run; configure a primary provider and a failover provider.",
+      severity: "info"
+    });
+  } else if (discoveryConfigured && !discoveryYieldedCandidates) {
+    actions.push({
+      title: "Tune discovery provider yield",
+      reason: discoveryFailover
+        ? "Discovery providers ran but produced no usable candidates after failover; inspect diagnostics, caps, and host filters."
+        : "Discovery providers ran but produced no usable candidates; add a failover provider or relax discovery caps.",
       severity: "info"
     });
   }
 
   if (
     input.evaluationMetrics
-    && input.evaluationMetrics.valuation_readiness_ratio < input.evaluationMetrics.coverage_target
+    && !input.evaluationMetrics.coverage_target_met
   ) {
     actions.push({
       title: "Improve priced evidence coverage",
-      reason: `Priced evidence coverage is ${(input.evaluationMetrics.valuation_readiness_ratio * 100).toFixed(0)}%, below the ${(input.evaluationMetrics.coverage_target * 100).toFixed(0)}% target.`,
+      reason:
+        `Composite gate unmet: readiness ${(input.evaluationMetrics.valuation_readiness_ratio * 100).toFixed(0)}%, priced ${input.evaluationMetrics.priced_record_count}, family coverage ${(input.evaluationMetrics.family_coverage_ratio * 100).toFixed(0)}%, blocked ${(input.evaluationMetrics.blocked_access_share * 100).toFixed(0)}%.`,
       severity: "critical"
     });
   }

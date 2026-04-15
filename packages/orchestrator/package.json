@@ -22,6 +22,7 @@
     "@artbot/source-registry": "workspace:*",
     "@artbot/storage": "workspace:*",
     "@artbot/valuation": "workspace:*",
-    "jimp": "^1.6.0"
+    "jimp": "^1.6.0",
+    "zod": "^3.24.2"
   }
 }

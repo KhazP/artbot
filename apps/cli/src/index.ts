@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -11,25 +12,37 @@ import picocolors from "picocolors";
 import { ZodError } from "zod";
 import type {
   AcceptanceReason,
+  CanaryResult,
+  DiscoveryProviderDiagnostics,
   PriceRecord,
   RunEntity,
   RunDetailsResponsePayload,
   RunStatus,
   RunSummary,
+  SourceHealthRecord,
+  SourceLegalPosture,
+  SourcePageType,
   SourceAttempt
 } from "@artbot/shared-types";
 import { researchQuerySchema } from "@artbot/shared-types";
 import { AuthManager } from "@artbot/auth-manager";
 import { parseGenericLotFields } from "@artbot/extraction";
-import { evaluateAcceptance } from "@artbot/source-adapters";
-import { runArtifactGc } from "@artbot/storage";
+import { evaluateAcceptance, evaluateFixtureContract } from "@artbot/source-adapters";
+import {
+  ArtbotStorage,
+  ensureWorkspaceRuntimeStoragePaths,
+  resolveWorkspaceRelativePath,
+  runArtifactGc
+} from "@artbot/storage";
 import {
   assessLocalSetup,
   buildAuthCaptureCommand,
   defaultSourceUrlForProfile,
+  detectWorkspaceRoot,
   inspectLocalBackendStatus,
   loadWorkspaceEnv,
   resolveAuthProfilesFromEnv,
+  resolveLocalRuntimePaths,
   startLocalBackendServices,
   stopLocalBackendServices,
   type LocalBackendStatus,
@@ -112,14 +125,38 @@ interface ReplayAttemptOptions {
   runId: string;
   source?: string;
   index?: string;
+  artifact?: string;
+}
+
+interface ReviewQueueOptions {
+  runId: string;
+  status?: string;
+  source?: string;
+}
+
+interface ReviewDecideOptions {
+  runId: string;
+  itemId: string;
+  decision: string;
+}
+
+interface GraphExplainOptions {
+  runId: string;
+  clusterId: string;
 }
 
 interface ArtifactGcOptions {
   runsRoot?: string;
+  dryRun?: boolean;
 }
 
 interface CanaryRunOptions {
   fixturesRoot?: string;
+}
+
+interface CanaryHistoryOptions {
+  family?: string;
+  limit?: string;
 }
 
 interface GlobalOptions {
@@ -138,6 +175,7 @@ interface SourcePlanPreviewResponse {
     venue_name: string;
     source_family: string;
     source_access_status: string;
+    legal_posture?: string | null;
     candidate_count: number;
     selection_state: string;
     selection_reason: string | null;
@@ -146,11 +184,106 @@ interface SourcePlanPreviewResponse {
   }>;
   candidate_cap: number;
   totals: Record<string, number>;
+  discovery_provider_diagnostics?: DiscoveryProviderDiagnostics[];
 }
 
 interface RunsListResponse {
   runs: RunEntity[];
 }
+
+interface CanaryFixtureDefinition {
+  family: string;
+  sourceName: string;
+  fixture: string;
+  sourcePageType: SourcePageType;
+  legalPosture: SourceLegalPosture;
+  passMode?: "priced_signal" | "listing_expansion";
+  expectedPriceType: string | null;
+}
+
+const PRIORITY_CANARY_FIXTURES: CanaryFixtureDefinition[] = [
+  {
+    family: "muzayede",
+    sourceName: "Muzayede App",
+    fixture: "muzayedeapp/lot.html",
+    sourcePageType: "lot",
+    legalPosture: "public_permitted",
+    expectedPriceType: "realized_price"
+  },
+  {
+    family: "muzayede",
+    sourceName: "Muzayede App",
+    fixture: "muzayedeapp/listing.html",
+    sourcePageType: "listing",
+    legalPosture: "public_permitted",
+    passMode: "listing_expansion",
+    expectedPriceType: null
+  },
+  {
+    family: "bayrak",
+    sourceName: "Bayrak",
+    fixture: "bayrak/listing.html",
+    sourcePageType: "listing",
+    legalPosture: "public_permitted",
+    expectedPriceType: "estimate"
+  },
+  {
+    family: "turel",
+    sourceName: "Türel",
+    fixture: "turel/listing.html",
+    sourcePageType: "listing",
+    legalPosture: "public_permitted",
+    expectedPriceType: "inquiry_only"
+  },
+  {
+    family: "clar",
+    sourceName: "Clar",
+    fixture: "clar/archive.html",
+    sourcePageType: "listing",
+    legalPosture: "public_permitted",
+    expectedPriceType: "realized_price"
+  },
+  {
+    family: "portakal",
+    sourceName: "Portakal",
+    fixture: "portakal/listing.html",
+    sourcePageType: "listing",
+    legalPosture: "public_permitted",
+    expectedPriceType: "asking_price"
+  },
+  {
+    family: "antikasa",
+    sourceName: "Antik A.S.",
+    fixture: "antikasa/lot.html",
+    sourcePageType: "lot",
+    legalPosture: "public_permitted",
+    expectedPriceType: "realized_price"
+  },
+  {
+    family: "sanatfiyat",
+    sourceName: "Sanatfiyat",
+    fixture: "sanatfiyat/licensed.html",
+    sourcePageType: "listing",
+    legalPosture: "licensed_only",
+    expectedPriceType: "realized_with_buyers_premium"
+  },
+  {
+    family: "invaluable",
+    sourceName: "Invaluable",
+    fixture: "invaluable/lot.html",
+    sourcePageType: "lot",
+    legalPosture: "public_contract_sensitive",
+    expectedPriceType: "realized_price"
+  },
+  {
+    family: "liveauctioneers",
+    sourceName: "LiveAuctioneers",
+    fixture: "liveauctioneers/lot.html",
+    sourcePageType: "lot",
+    legalPosture: "public_contract_sensitive",
+    expectedPriceType: "realized_price"
+  }
+];
 
 interface SpinnerLike {
   text: string;
@@ -441,6 +574,22 @@ export function renderSummaryTable(summary: RunSummary): string {
     table.push(["Priced Source Coverage (Attempted)", `${Math.round(summary.priced_source_coverage_ratio * 100)}%`]);
   }
 
+  if (summary.cluster_count != null) {
+    table.push(["Cluster Count", summary.cluster_count]);
+  }
+  if (summary.review_item_count != null) {
+    table.push(["Review Queue Count", summary.review_item_count]);
+  }
+  if (summary.local_ai_analysis) {
+    table.push(
+      ["Local AI Accepted", summary.local_ai_analysis.decisions.accepted],
+      ["Local AI Queued", summary.local_ai_analysis.decisions.queued],
+      ["Local AI Rejected", summary.local_ai_analysis.decisions.rejected],
+      ["Local AI Deterministic Vetos", summary.local_ai_analysis.deterministic_veto_count],
+      ["Local AI Model", summary.local_ai_analysis.model ?? "n/a"]
+    );
+  }
+
   return table.toString();
 }
 
@@ -458,7 +607,7 @@ export function renderBreakdownTable(title: string, values: Record<string, numbe
 
 export function renderSourcePlanTable(preview: SourcePlanPreviewResponse, limit = 12): string {
   const table = new Table({
-    head: ["#", "Source", "Family", "State", "Access", "Candidates", "Reason"],
+    head: ["#", "Source", "Family", "State", "Access", "Legal", "Candidates", "Reason"],
     wordWrap: true
   });
 
@@ -469,12 +618,167 @@ export function renderSourcePlanTable(preview: SourcePlanPreviewResponse, limit 
       item.source_family,
       item.selection_state,
       item.source_access_status,
+      item.legal_posture ?? "-",
       `${item.candidate_count}/${preview.candidate_cap}`,
       item.selection_reason ?? item.skip_reason ?? "-"
     ]);
   }
 
   return table.toString();
+}
+
+export function renderSourceMetricsTable(metrics: SourceHealthRecord[], limit = 8): string {
+  const table = new Table({
+    head: ["Source", "Family", "Reliable", "Evidence", "Valuation", "Blocked", "Auth", "Last"]
+  });
+
+  for (const item of metrics.slice(0, limit)) {
+    table.push([
+      item.source_name,
+      item.source_family,
+      `${Math.round(item.reliability_score * 100)}%`,
+      `${item.accepted_for_evidence_count}/${item.total_attempts}`,
+      `${item.valuation_ready_count}/${item.total_attempts}`,
+      item.blocked_count,
+      item.auth_required_count,
+      item.last_status
+    ]);
+  }
+
+  return table.toString();
+}
+
+export function renderCanaryTable(canaries: CanaryResult[], limit = 8): string {
+  const table = new Table({
+    head: ["Family", "Source", "Status", "Observed", "Expected", "Acceptance", "Fixture"]
+  });
+
+  for (const item of canaries.slice(0, limit)) {
+    table.push([
+      item.family,
+      item.source_name,
+      item.status,
+      item.observed_price_type,
+      item.expected_price_type ?? "-",
+      item.acceptance_reason,
+      item.fixture
+    ]);
+  }
+
+  return table.toString();
+}
+
+type ReviewQueueFilterStatus = "open" | "resolved" | undefined;
+type ReviewDecision = "merge" | "keep_separate";
+
+function parseReviewQueueStatus(value: string | undefined): ReviewQueueFilterStatus {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "open") return "open";
+  if (normalized === "resolved") return "resolved";
+  throw new InputValidationError(`Invalid review status "${value}". Use open or resolved.`);
+}
+
+function parseReviewDecision(value: string): ReviewDecision {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "merge") return "merge";
+  if (normalized === "keep_separate") return "keep_separate";
+  throw new InputValidationError(`Invalid review decision "${value}". Use merge or keep_separate.`);
+}
+
+function renderReviewQueueTable(
+  items: Array<{
+    left_record_key: string;
+    right_record_key: string;
+    status: string;
+    recommended_action: string;
+    confidence: number;
+    reasons: string[];
+    source_pair: string;
+  }>
+): string {
+  const table = new Table({
+    head: ["Left", "Right", "Status", "Action", "Confidence", "Sources", "Reasons"],
+    wordWrap: true
+  });
+
+  for (const item of items) {
+    table.push([
+      item.left_record_key,
+      item.right_record_key,
+      item.status,
+      item.recommended_action,
+      item.confidence.toFixed(2),
+      item.source_pair,
+      item.reasons.join("; ")
+    ]);
+  }
+
+  return table.toString();
+}
+
+function renderGraphMembershipTable(
+  rows: Array<{
+    record_key: string;
+    source_name: string;
+    status: string;
+    confidence: number;
+    reasons: string[];
+  }>
+): string {
+  const table = new Table({
+    head: ["Record", "Source", "Status", "Confidence", "Reasons"],
+    wordWrap: true
+  });
+  for (const row of rows) {
+    table.push([row.record_key, row.source_name, row.status, row.confidence.toFixed(2), row.reasons.join("; ")]);
+  }
+  return table.toString();
+}
+
+interface LocalStorageResolution {
+  dbPath: string;
+  runsRoot: string;
+  workspaceRoot: string | null;
+  manifestPath: string | null;
+}
+
+function resolveLocalStoragePaths(): LocalStorageResolution {
+  loadWorkspaceEnv();
+  const workspaceRoot = detectWorkspaceRoot(process.cwd());
+  const configuredDbPath = process.env.DATABASE_PATH?.trim();
+  const configuredRunsRoot = process.env.RUNS_ROOT?.trim();
+
+  if (workspaceRoot && !process.env.ARTBOT_HOME?.trim()) {
+    const dbPath = resolveWorkspaceRelativePath(configuredDbPath, workspaceRoot, "var/data/artbot.db");
+    const runsRoot = resolveWorkspaceRelativePath(configuredRunsRoot, workspaceRoot, "var/runs");
+    const guard = ensureWorkspaceRuntimeStoragePaths("cli", workspaceRoot, dbPath, runsRoot);
+    return {
+      dbPath,
+      runsRoot,
+      workspaceRoot,
+      manifestPath: guard.manifestPath
+    };
+  }
+
+  const runtimePaths = resolveLocalRuntimePaths(process.env);
+  const runtimeRoot = runtimePaths.homeDir;
+  return {
+    dbPath:
+      configuredDbPath && configuredDbPath.length > 0
+        ? path.isAbsolute(configuredDbPath)
+          ? path.resolve(configuredDbPath)
+          : path.resolve(runtimeRoot, configuredDbPath)
+        : path.resolve(runtimePaths.dbPath),
+    runsRoot:
+      configuredRunsRoot && configuredRunsRoot.length > 0
+        ? path.isAbsolute(configuredRunsRoot)
+          ? path.resolve(configuredRunsRoot)
+          : path.resolve(runtimeRoot, configuredRunsRoot)
+        : path.resolve(runtimePaths.runsRoot),
+    workspaceRoot: null,
+    manifestPath: null
+  };
 }
 
 function renderSetupAssessment(assessment: SetupAssessment): string {
@@ -494,6 +798,14 @@ function renderSetupAssessment(assessment: SetupAssessment): string {
       : assessment.localBackendMode === "bundled"
         ? assessment.localBackendPath ?? "Bundled runtime home unavailable"
         : "No local backend runtime detected";
+  const localUnlimitedProfileActive =
+    assessment.webDiscoveryEnabled && assessment.webDiscoveryProvider === "searxng" && !assessment.firecrawlEnabled;
+  const discoveryStatus = localUnlimitedProfileActive
+    ? picocolors.green("local-unlimited")
+    : picocolors.yellow("custom");
+  const discoveryDetail = assessment.webDiscoveryEnabled
+    ? `${assessment.webDiscoveryProvider} -> duckduckgo_html fallback`
+    : "disabled";
 
   table.push(
     [
@@ -515,6 +827,21 @@ function renderSetupAssessment(assessment: SetupAssessment): string {
       "Config",
       picocolors.green("env"),
       assessment.envPath
+    ],
+    [
+      "Discovery Profile",
+      discoveryStatus,
+      discoveryDetail
+    ],
+    [
+      "SearXNG",
+      assessment.searxngHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
+      assessment.searxngHealth.reason ?? assessment.searxngBaseUrl
+    ],
+    [
+      "Firecrawl",
+      assessment.firecrawlEnabled ? picocolors.yellow("enabled") : picocolors.green("disabled"),
+      assessment.firecrawlEnabled ? "Optional paid extractor is active." : "Optional paid extractor is disabled."
     ],
     [
       "Auth Profiles",
@@ -632,9 +959,38 @@ function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: 
       logInfo(
         globals,
         ctx,
-        `- ${item.source_name}: ${item.selection_state} · ${item.source_access_status} · ${item.candidate_count} candidates${item.selection_reason ? ` · ${item.selection_reason}` : item.skip_reason ? ` · ${item.skip_reason}` : ""}`
+        `- ${item.source_name}: ${item.selection_state} · ${item.source_access_status} · ${item.candidate_count} candidates${item.legal_posture ? ` · ${item.legal_posture}` : ""}${item.selection_reason ? ` · ${item.selection_reason}` : item.skip_reason ? ` · ${item.skip_reason}` : ""}`
       );
     }
+  }
+  if (details.summary.discovery_provider_diagnostics && details.summary.discovery_provider_diagnostics.length > 0) {
+    logInfo(globals, ctx, "");
+    logInfo(globals, ctx, "Discovery providers:");
+    for (const item of details.summary.discovery_provider_diagnostics) {
+      logInfo(
+        globals,
+        ctx,
+        `- ${item.provider}: ${item.enabled ? "enabled" : "disabled"} · requests ${item.requests_used} · results ${item.results_returned} · kept ${item.candidates_kept} · failover ${item.failover_invoked ? "yes" : "no"} · caps ${item.trimmed_by_caps ? "trimmed" : "ok"}${item.reason ? ` · ${item.reason}` : ""}`
+      );
+    }
+  }
+  if (details.summary.local_ai_analysis) {
+    logInfo(globals, ctx, "");
+    logInfo(
+      globals,
+      ctx,
+      `Local AI: accepted ${details.summary.local_ai_analysis.decisions.accepted} · queued ${details.summary.local_ai_analysis.decisions.queued} · rejected ${details.summary.local_ai_analysis.decisions.rejected} · vetoes ${details.summary.local_ai_analysis.deterministic_veto_count}${details.summary.local_ai_analysis.model ? ` · model ${details.summary.local_ai_analysis.model}` : ""}`
+    );
+  }
+  if (details.persisted_source_metrics && details.persisted_source_metrics.length > 0) {
+    logInfo(globals, ctx, "");
+    logInfo(globals, ctx, "Source metrics:");
+    logInfo(globals, ctx, renderSourceMetricsTable(details.persisted_source_metrics));
+  }
+  if (details.recent_canaries && details.recent_canaries.length > 0) {
+    logInfo(globals, ctx, "");
+    logInfo(globals, ctx, "Recent canaries:");
+    logInfo(globals, ctx, renderCanaryTable(details.recent_canaries));
   }
   if (details.run.runType === "artist_market_inventory") {
     logInfo(globals, ctx, "");
@@ -657,18 +1013,112 @@ function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: 
 }
 
 function resolveRunsRootLocal(): string {
-  loadWorkspaceEnv();
-  return process.env.RUNS_ROOT ?? path.resolve(process.cwd(), "var/runs");
+  return resolveLocalStoragePaths().runsRoot;
 }
 
 function summarizeReplayAcceptance(reason: AcceptanceReason): string {
   return reason.replace(/_/g, " ");
 }
 
+type ReplayArtifactMode = "auto" | "raw" | "har";
+
+function parseReplayArtifactMode(value: string | undefined): ReplayArtifactMode {
+  const normalized = (value ?? "auto").trim().toLowerCase();
+  if (normalized === "auto" || normalized === "raw" || normalized === "har") {
+    return normalized;
+  }
+  throw new InputValidationError(`Unsupported replay artifact mode "${value}". Use auto, raw, or har.`);
+}
+
+function hasReplayArtifact(attempt: SourceAttempt, mode: ReplayArtifactMode): boolean {
+  if (mode === "raw") return Boolean(attempt.raw_snapshot_path);
+  if (mode === "har") return Boolean(attempt.har_path);
+  return Boolean(attempt.raw_snapshot_path || attempt.har_path);
+}
+
+function decodeReplayHarContent(input: string, encoding: string | null | undefined): string {
+  if (encoding?.toLowerCase() === "base64") {
+    return Buffer.from(input, "base64").toString("utf-8");
+  }
+  return input;
+}
+
+function extractReplayHtmlFromHar(harPath: string, preferredUrl: string): { html: string; matchedUrl: string | null } {
+  const parsed = JSON.parse(readFileSync(harPath, "utf-8")) as {
+    log?: {
+      entries?: Array<{
+        request?: { url?: string };
+        response?: {
+          content?: { mimeType?: string; text?: string; encoding?: string };
+          headers?: Array<{ name?: string; value?: string }>;
+        };
+      }>;
+    };
+  };
+  const entries = parsed.log?.entries ?? [];
+  const htmlEntries = entries
+    .map((entry) => {
+      const mimeType =
+        entry.response?.content?.mimeType
+        ?? entry.response?.headers?.find((header) => header.name?.toLowerCase() === "content-type")?.value
+        ?? "";
+      const text = entry.response?.content?.text;
+      if (!text || !/text\/html|application\/xhtml\+xml/i.test(mimeType)) {
+        return null;
+      }
+      return {
+        url: entry.request?.url ?? null,
+        html: decodeReplayHarContent(text, entry.response?.content?.encoding)
+      };
+    })
+    .filter((entry): entry is { url: string | null; html: string } => Boolean(entry));
+
+  const matched = htmlEntries.find((entry) => entry.url === preferredUrl) ?? htmlEntries[0];
+  if (!matched) {
+    throw new InputValidationError(`HAR file ${harPath} does not contain embedded replayable HTML.`);
+  }
+  return {
+    html: matched.html,
+    matchedUrl: matched.url
+  };
+}
+
+function resolveReplayArtifact(
+  attempt: SourceAttempt,
+  mode: ReplayArtifactMode
+): { kind: "raw_snapshot" | "har"; path: string; html: string; matchedUrl: string | null } {
+  if ((mode === "auto" || mode === "raw") && attempt.raw_snapshot_path) {
+    return {
+      kind: "raw_snapshot",
+      path: attempt.raw_snapshot_path,
+      html: readFileSync(attempt.raw_snapshot_path, "utf-8"),
+      matchedUrl: attempt.source_url
+    };
+  }
+  if ((mode === "auto" || mode === "har") && attempt.har_path) {
+    const replay = extractReplayHtmlFromHar(attempt.har_path, attempt.canonical_url ?? attempt.source_url);
+    return {
+      kind: "har",
+      path: attempt.har_path,
+      html: replay.html,
+      matchedUrl: replay.matchedUrl
+    };
+  }
+
+  if (mode === "raw") {
+    throw new InputValidationError(`No replayable raw snapshot found for run ${attempt.run_id}.`);
+  }
+  if (mode === "har") {
+    throw new InputValidationError(`No replayable HAR file found for run ${attempt.run_id}.`);
+  }
+  throw new InputValidationError(`No replayable raw snapshot or HAR file found for run ${attempt.run_id}.`);
+}
+
 async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
+  const artifactMode = parseReplayArtifactMode(options.artifact);
   const details = await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`);
-  const candidates = details.attempts.filter((attempt) => attempt.raw_snapshot_path);
+  const candidates = details.attempts.filter((attempt) => hasReplayArtifact(attempt, artifactMode));
   const selected =
     (options.source
       ? candidates.find((attempt) => attempt.source_name.toLowerCase().includes(options.source!.toLowerCase()))
@@ -676,12 +1126,12 @@ async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOption
     ?? candidates[toPositiveInt(options.index, 1) - 1]
     ?? candidates[0];
 
-  if (!selected?.raw_snapshot_path) {
-    throw new InputValidationError(`No replayable raw snapshot found for run ${options.runId}.`);
+  if (!selected) {
+    throw new InputValidationError(`No replayable attempt found for run ${options.runId}.`);
   }
 
-  const html = readFileSync(selected.raw_snapshot_path, "utf-8");
-  const parsed = parseGenericLotFields(html, selected.source_url);
+  const replayArtifact = resolveReplayArtifact(selected, artifactMode);
+  const parsed = parseGenericLotFields(replayArtifact.html, replayArtifact.matchedUrl ?? selected.source_url);
   const acceptance = evaluateAcceptance(parsed, parsed.priceHidden ? "price_hidden" : selected.source_access_status, {
     sourceName: selected.source_name,
     sourcePageType: "lot"
@@ -690,9 +1140,22 @@ async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOption
     run_id: options.runId,
     source_name: selected.source_name,
     source_url: selected.source_url,
-    raw_snapshot_path: selected.raw_snapshot_path,
-    parsed,
-    acceptance
+    original_attempt: {
+      parser_used: selected.parser_used,
+      source_access_status: selected.source_access_status,
+      acceptance_reason: selected.acceptance_reason,
+      confidence_score: selected.confidence_score,
+      fetched_at: selected.fetched_at,
+      raw_snapshot_path: selected.raw_snapshot_path ?? null,
+      har_path: selected.har_path ?? null
+    },
+    replay: {
+      artifact_kind: replayArtifact.kind,
+      artifact_path: replayArtifact.path,
+      matched_url: replayArtifact.matchedUrl,
+      parsed,
+      acceptance
+    }
   };
   printJson(globals, ctx, payload);
   if (globals.json) {
@@ -700,23 +1163,208 @@ async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOption
   }
 
   logInfo(globals, ctx, `Replay source: ${selected.source_name}`);
-  logInfo(globals, ctx, `Snapshot: ${selected.raw_snapshot_path}`);
-  logInfo(globals, ctx, `Price type: ${parsed.priceType}`);
-  logInfo(globals, ctx, `Acceptance: ${summarizeReplayAcceptance(acceptance.acceptanceReason)}`);
+  logInfo(globals, ctx, `Artifact: ${replayArtifact.kind} (${replayArtifact.path})`);
+  logInfo(globals, ctx, `Original parser: ${selected.parser_used}`);
+  logInfo(globals, ctx, `Original acceptance: ${summarizeReplayAcceptance(selected.acceptance_reason)}`);
+  logInfo(globals, ctx, `Replayed price type: ${parsed.priceType}`);
+  logInfo(globals, ctx, `Replayed acceptance: ${summarizeReplayAcceptance(acceptance.acceptanceReason)}`);
 }
 
 async function handleArtifactGc(ctx: CliContext, options: ArtifactGcOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const runsRoot = options.runsRoot ? path.resolve(options.runsRoot) : resolveRunsRootLocal();
-  const result = runArtifactGc(runsRoot);
+  const result = runArtifactGc(runsRoot, undefined, { dryRun: Boolean(options.dryRun) });
   printJson(globals, ctx, { runsRoot, ...result });
   if (globals.json) {
     return;
   }
   logInfo(globals, ctx, `Runs root: ${runsRoot}`);
+  logInfo(globals, ctx, `Mode: ${result.dry_run ? "dry-run" : "apply"}`);
   logInfo(globals, ctx, `Scanned items: ${result.scanned_items}`);
-  logInfo(globals, ctx, `Deleted items: ${result.deleted_items}`);
+  logInfo(globals, ctx, `${result.dry_run ? "Planned deletions" : "Deleted items"}: ${result.deleted_items}`);
+  logInfo(
+    globals,
+    ctx,
+    `By reason: duplicate ${result.deleted_by_reason.duplicate}, expired ${result.deleted_by_reason.expired}, watermark ${result.deleted_by_reason.watermark}`
+  );
+  logInfo(
+    globals,
+    ctx,
+    `By class: accepted ${result.deleted_by_retention_class.accepted_evidence}, disputed ${result.deleted_by_retention_class.disputed_evidence}, heavy ${result.deleted_by_retention_class.heavy_debug}, ephemeral ${result.deleted_by_retention_class.ephemeral}`
+  );
   logInfo(globals, ctx, `Reclaimed bytes: ${result.reclaimed_bytes}`);
+  logInfo(globals, ctx, `Remaining bytes: ${result.remaining_bytes}`);
+}
+
+async function handleReviewQueue(ctx: CliContext, options: ReviewQueueOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const details = await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`);
+  const statusFilter = parseReviewQueueStatus(options.status);
+  const sourceNeedle = options.source?.trim().toLowerCase();
+  const inventoryRows = details.inventory ?? [];
+  const sourceByRecord = new Map(
+    inventoryRows.map((row) => [row.record_key, row.payload?.source_name ?? row.source_host ?? "unknown"])
+  );
+
+  const rows = (details.review_queue ?? [])
+    .filter((item) => (statusFilter === "open" ? item.status === "pending" : statusFilter === "resolved" ? item.status !== "pending" : true))
+    .map((item) => {
+      const leftSource = sourceByRecord.get(item.left_record_key) ?? "unknown";
+      const rightSource = sourceByRecord.get(item.right_record_key) ?? "unknown";
+      return {
+        id: item.id,
+        left_record_key: item.left_record_key,
+        right_record_key: item.right_record_key,
+        status: item.status,
+        recommended_action: item.recommended_action,
+        confidence: item.confidence,
+        reasons: item.reasons,
+        source_pair: `${leftSource} <> ${rightSource}`
+      };
+    })
+    .filter((item) => !sourceNeedle || item.source_pair.toLowerCase().includes(sourceNeedle));
+
+  const payload = {
+    run_id: options.runId,
+    status: statusFilter ?? "all",
+    source: options.source ?? null,
+    count: rows.length,
+    items: rows
+  };
+
+  printJson(globals, ctx, payload);
+  if (globals.json) return;
+
+  if (rows.length === 0) {
+    logInfo(globals, ctx, "No review queue items matched the selected filters.");
+    return;
+  }
+
+  logInfo(globals, ctx, `Review queue items (${rows.length})`);
+  logInfo(globals, ctx, renderReviewQueueTable(rows));
+}
+
+async function handleReviewDecide(ctx: CliContext, options: ReviewDecideOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const decision = parseReviewDecision(options.decision);
+  const payload = await requestJson<{ run_id: string; review_item: unknown }>(
+    ctx,
+    globals,
+    "POST",
+    `/runs/${options.runId}/review-queue/${options.itemId}/adjudicate`,
+    { decision }
+  );
+  printJson(globals, ctx, payload);
+  if (globals.json) {
+    return;
+  }
+  logInfo(globals, ctx, `Review item ${options.itemId} resolved as ${decision}.`);
+}
+
+async function handleGraphExplain(ctx: CliContext, options: GraphExplainOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const details = await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`);
+  const cluster = (details.clusters ?? []).find((item) => item.id === options.clusterId);
+  if (!cluster) {
+    throw new InputValidationError(`Cluster ${options.clusterId} was not found in run ${options.runId}.`);
+  }
+
+  const memberships = (details.cluster_memberships ?? []).filter((item) => item.cluster_id === options.clusterId);
+  const inventoryByRecord = new Map((details.inventory ?? []).map((row) => [row.record_key, row]));
+  const rows = memberships.map((membership) => {
+    const inventoryRow = inventoryByRecord.get(membership.record_key);
+    return {
+      record_key: membership.record_key,
+      source_name: inventoryRow?.payload?.source_name ?? inventoryRow?.source_host ?? "unknown",
+      status: membership.status,
+      confidence: membership.confidence,
+      reasons: membership.reasons,
+      work_title: inventoryRow?.payload?.work_title ?? null,
+      source_url: inventoryRow?.payload?.source_url ?? null
+    };
+  });
+
+  const payload = {
+    run_id: options.runId,
+    cluster,
+    membership_count: memberships.length,
+    memberships: rows
+  };
+  printJson(globals, ctx, payload);
+  if (globals.json) return;
+
+  logInfo(
+    globals,
+    ctx,
+    `Cluster ${cluster.id}: ${cluster.title} · status=${cluster.cluster_status} · confidence=${cluster.confidence.toFixed(2)}`
+  );
+  if (rows.length === 0) {
+    logInfo(globals, ctx, "No cluster memberships found.");
+    return;
+  }
+  logInfo(globals, ctx, renderGraphMembershipTable(rows));
+}
+
+function openLocalStorage(): { storage: ArtbotStorage; resolved: LocalStorageResolution } {
+  const resolved = resolveLocalStoragePaths();
+  return {
+    storage: new ArtbotStorage(resolved.dbPath, resolved.runsRoot),
+    resolved
+  };
+}
+
+function sourceStatusForCanary(definition: CanaryFixtureDefinition): SourceAttempt["source_access_status"] {
+  return definition.legalPosture === "licensed_only" ? "licensed_access" : "public_access";
+}
+
+function buildCanaryResult(fixturesRoot: string, definition: CanaryFixtureDefinition): CanaryResult {
+  const filePath = path.join(fixturesRoot, definition.fixture);
+  const html = readFileSync(filePath, "utf-8");
+  const evaluated = evaluateFixtureContract(
+    {
+      sourceName: definition.sourceName,
+      sourcePageType: definition.sourcePageType,
+      html,
+      url: `https://fixture.local/${definition.fixture}`
+    },
+    sourceStatusForCanary(definition)
+  );
+  const observedPriceType = evaluated.parsed.priceType;
+  const listingExpansionReady = /\/(?:lot|eser|urun)\//i.test(html);
+  const expectsListingExpansion = definition.passMode === "listing_expansion";
+  const status =
+    expectsListingExpansion
+      ? (listingExpansionReady ? "pass" : "fail")
+      : (
+        (definition.expectedPriceType == null || observedPriceType === definition.expectedPriceType)
+        && evaluated.acceptance.acceptedForEvidence
+      )
+        ? "pass"
+        : "fail";
+
+  return {
+    id: randomUUID(),
+    family: definition.family,
+    source_name: definition.sourceName,
+    fixture: definition.fixture,
+    source_page_type: definition.sourcePageType,
+    legal_posture: definition.legalPosture,
+    expected_price_type: definition.expectedPriceType,
+    observed_price_type: observedPriceType,
+    acceptance_reason: evaluated.acceptance.acceptanceReason,
+    accepted_for_evidence: evaluated.acceptance.acceptedForEvidence,
+    accepted_for_valuation: evaluated.acceptance.acceptedForValuation,
+    status,
+    details:
+      status === "pass"
+        ? expectsListingExpansion
+          ? "Listing expansion links were present."
+          : `Parsed ${observedPriceType} with ${evaluated.acceptance.acceptanceReason}.`
+        : expectsListingExpansion
+          ? "Listing expansion links were not detected."
+          : `Observed ${observedPriceType} with ${evaluated.acceptance.acceptanceReason}; expected ${definition.expectedPriceType ?? "any priced signal"}.`,
+    recorded_at: new Date().toISOString()
+  };
 }
 
 async function handleCanariesRun(ctx: CliContext, options: CanaryRunOptions, command: Command): Promise<void> {
@@ -724,45 +1372,65 @@ async function handleCanariesRun(ctx: CliContext, options: CanaryRunOptions, com
   const fixturesRoot = options.fixturesRoot
     ? path.resolve(options.fixturesRoot)
     : path.resolve(process.cwd(), "data/fixtures/adapters");
-  const priorityFixtures = [
-    "muzayedeapp/lot.html",
-    "portakal/listing.html",
-    "clar/archive.html",
-    "antikasa/lot.html",
-    "sanatfiyat/licensed.html",
-    "invaluable/lot.html",
-    "liveauctioneers/lot.html"
-  ];
+  const { storage, resolved } = openLocalStorage();
+  const results = PRIORITY_CANARY_FIXTURES.map((definition) => storage.saveCanaryResult(buildCanaryResult(fixturesRoot, definition)));
+  const summary = {
+    pass: results.filter((item) => item.status === "pass").length,
+    fail: results.filter((item) => item.status === "fail").length
+  };
 
-  const results = priorityFixtures.map((relativePath) => {
-    const filePath = path.join(fixturesRoot, relativePath);
-    const html = readFileSync(filePath, "utf-8");
-    const parsed = parseGenericLotFields(html, `https://fixture.local/${relativePath}`);
-    const hasSignal =
-      parsed.priceHidden
-      || parsed.priceType !== "unknown"
-      || typeof parsed.priceAmount === "number"
-      || typeof parsed.estimateLow === "number"
-      || typeof parsed.estimateHigh === "number";
-    return {
-      fixture: relativePath,
-      ok: hasSignal,
-      failure: hasSignal ? null : "missing_price_signal",
-      priceType: parsed.priceType
-    };
+  printJson(globals, ctx, {
+    fixturesRoot,
+    storage: {
+      dbPath: resolved.dbPath,
+      runsRoot: resolved.runsRoot,
+      workspaceRoot: resolved.workspaceRoot,
+      manifestPath: resolved.manifestPath
+    },
+    summary,
+    results
   });
-
-  printJson(globals, ctx, { fixturesRoot, results });
   if (globals.json) {
     return;
   }
-  for (const result of results) {
-    logInfo(
-      globals,
-      ctx,
-      `${result.ok ? "PASS" : "FAIL"} ${result.fixture} · ${result.priceType}${result.failure ? ` · ${result.failure}` : ""}`
-    );
+  logInfo(globals, ctx, `Runtime storage: db=${resolved.dbPath} · runs=${resolved.runsRoot}`);
+  if (resolved.manifestPath) {
+    logInfo(globals, ctx, `Runtime path guard manifest: ${resolved.manifestPath}`);
   }
+  logInfo(globals, ctx, `Canary pack: ${summary.pass} pass · ${summary.fail} fail`);
+  logInfo(globals, ctx, renderCanaryTable(results, results.length));
+}
+
+async function handleCanariesHistory(ctx: CliContext, options: CanaryHistoryOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const { storage, resolved } = openLocalStorage();
+  const limit = toPositiveInt(options.limit, 20);
+  const canaries = storage.listCanaryResults(limit, options.family);
+
+  printJson(globals, ctx, {
+    storage: {
+      dbPath: resolved.dbPath,
+      runsRoot: resolved.runsRoot,
+      workspaceRoot: resolved.workspaceRoot,
+      manifestPath: resolved.manifestPath
+    },
+    canaries
+  });
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Runtime storage: db=${resolved.dbPath} · runs=${resolved.runsRoot}`);
+  if (resolved.manifestPath) {
+    logInfo(globals, ctx, `Runtime path guard manifest: ${resolved.manifestPath}`);
+  }
+
+  if (canaries.length === 0) {
+    logInfo(globals, ctx, "No canary history found.");
+    return;
+  }
+
+  logInfo(globals, ctx, renderCanaryTable(canaries, limit));
 }
 
 async function waitForRunTerminal(
@@ -841,6 +1509,18 @@ async function handleResearch(
         ctx,
         `Selected: ${preview.totals.selected ?? 0} · Deprioritized: ${preview.totals.deprioritized ?? 0} · Skipped: ${preview.totals.skipped ?? 0} · Blocked: ${preview.totals.blocked ?? 0}`
       );
+      if (preview.discovery_provider_diagnostics && preview.discovery_provider_diagnostics.length > 0) {
+        logInfo(
+          globals,
+          ctx,
+          `Discovery: ${preview.discovery_provider_diagnostics
+            .map(
+              (item) =>
+                `${item.provider}=${item.enabled ? "on" : "off"} requests=${item.requests_used} results=${item.results_returned}${item.reason ? ` (${item.reason})` : ""}`
+            )
+            .join(" · ")}`
+        );
+      }
       logInfo(globals, ctx, "");
     }
   }
@@ -1100,7 +1780,7 @@ function addCommonResearchFlags(command: Command, withOptionalTitle: boolean): C
     .option("--manual-login", "Enable manual login checkpoint")
     .option("--allow-licensed", "Allow licensed integrations")
     .option("--licensed-integrations <list>", "Comma-separated source names")
-    .option("--discovery-providers <list>", "Comma-separated discovery providers (brave,tavily)")
+    .option("--discovery-providers <list>", "Comma-separated discovery providers (searxng,brave,tavily)")
     .option("--refresh", "Run an incremental refresh instead of a full backfill")
     .option("--preview-only", "Show the source plan without creating the run")
     .option("--wait", "Wait until run reaches terminal state")
@@ -1280,8 +1960,40 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .requiredOption("--run-id <id>", "Run identifier")
     .option("--source <name>", "Source name substring")
     .option("--index <number>", "1-based replay attempt index", "1")
+    .option("--artifact <mode>", "Replay artifact mode: auto, raw, or har", "auto")
     .action(async (options: ReplayAttemptOptions, command: Command) => {
       await handleReplayAttempt(ctx, options, command);
+    });
+
+  const reviewGroup = program.command("review").description("Review queue inspection commands");
+  reviewGroup
+    .command("queue")
+    .description("List review queue items for a run")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .option("--status <status>", "open or resolved")
+    .option("--source <name>", "Filter by source name in the record pair")
+    .action(async (options: ReviewQueueOptions, command: Command) => {
+      await handleReviewQueue(ctx, options, command);
+    });
+
+  reviewGroup
+    .command("decide")
+    .description("Adjudicate one review queue item")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .requiredOption("--item-id <id>", "Review item identifier")
+    .requiredOption("--decision <value>", "merge or keep_separate")
+    .action(async (options: ReviewDecideOptions, command: Command) => {
+      await handleReviewDecide(ctx, options, command);
+    });
+
+  const graphGroup = program.command("graph").description("Canonical entity graph inspection commands");
+  graphGroup
+    .command("explain")
+    .description("Explain one cluster and its membership evidence")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .requiredOption("--cluster-id <id>", "Cluster identifier")
+    .action(async (options: GraphExplainOptions, command: Command) => {
+      await handleGraphExplain(ctx, options, command);
     });
 
   const opsGroup = program.command("ops").description("Operational maintenance commands");
@@ -1289,6 +2001,7 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .command("gc")
     .description("Run artifact retention and garbage collection over run artifacts")
     .option("--runs-root <path>", "Runs root to scan")
+    .option("--dry-run", "Report what GC would delete without mutating artifacts")
     .action(async (options: ArtifactGcOptions, command: Command) => {
       await handleArtifactGc(ctx, options, command);
     });
@@ -1296,10 +2009,19 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
   const canaryGroup = program.command("canaries").description("Fixture-backed canary checks");
   canaryGroup
     .command("run")
-    .description("Run lightweight canaries for top fixture families")
+    .description("Run fixture-backed canaries for priority source families and persist results")
     .option("--fixtures-root <path>", "Fixture root override")
     .action(async (options: CanaryRunOptions, command: Command) => {
       await handleCanariesRun(ctx, options, command);
+    });
+
+  canaryGroup
+    .command("history")
+    .description("Show recent persisted canary history")
+    .option("--family <name>", "Filter by source family")
+    .option("--limit <number>", "Maximum number of canary rows", "20")
+    .action(async (options: CanaryHistoryOptions, command: Command) => {
+      await handleCanariesHistory(ctx, options, command);
     });
 }
 
@@ -1375,7 +2097,7 @@ function formatError(error: unknown): string {
 
 export function createProgram(ctx: CliContext): Command {
   const program = new Command();
-  program.name("artbot").description("Turkish art price research agent CLI").version(CLI_VERSION);
+  program.name("artbot").description("ArtBot market research CLI").version(CLI_VERSION);
 
   program
     .showHelpAfterError()

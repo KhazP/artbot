@@ -59,6 +59,15 @@ export type FailureClass =
 
 export type AccessMode = "anonymous" | "authorized" | "licensed";
 
+export type SourceLegalPosture =
+  | "public_permitted"
+  | "public_contract_sensitive"
+  | "auth_required"
+  | "licensed_only"
+  | "operator_assisted_only";
+
+export type ArtifactHandling = "standard" | "scrubbed_sensitive" | "internal_only";
+
 export type RunStatus = "pending" | "running" | "completed" | "failed";
 
 export type RunType = "artist" | "work" | "artist_market_inventory";

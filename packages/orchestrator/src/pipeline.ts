@@ -6,23 +6,52 @@ import { isTransportError, parseGenericLotFields, TransportErrorKind } from "@ar
 import { logger } from "@artbot/observability";
 import { applyConfidenceModel, dedupeRecords, FxRateProvider, normalizeRecordCurrencies } from "@artbot/normalization";
 import { buildPerPaintingStats, renderMarkdownReport, writeJsonFile } from "@artbot/report-generation";
-import { buildDiscoveryConfigFromEnv, buildSourcePlanItems, planSources, SourceRegistry, type PlannedSource } from "@artbot/source-registry";
+import {
+  buildDiscoveryConfigFromEnv,
+  buildSourcePlanItems,
+  inferSourceFamilyBucket,
+  planSourcesWithDiagnostics,
+  SourceRegistry,
+  type PlannedSource,
+  type SourceFamilyBucket
+} from "@artbot/source-registry";
 import { evaluateAcceptance, type SourceCandidate } from "@artbot/source-adapters";
 import { ArtbotStorage, buildDefaultGcPolicyFromEnv, buildRunArtifactManifest, writeArtifactManifest } from "@artbot/storage";
 import {
   acceptanceReasonList,
+  type CanaryResult,
+  type DiscoveryProviderDiagnostics,
   failureClassList,
   type AcceptanceReason,
+  type CrawlLane,
   type FailureClass,
   type HostHealthRecord,
+  type LocalAiDecisionTrace,
+  type PriceVisibility,
   type PriceRecord,
   type RunEntity,
   type RunSummary,
+  type SaleChannel,
   type SourceAccessStatus,
-  type SourceAttempt
+  type SourceSurface,
+  type SourceAttempt,
+  type SourceHealthRecord
 } from "@artbot/shared-types";
 import { buildValuation, rankComparablesWithScores } from "@artbot/valuation";
 import { processArtistMarketInventoryRun } from "./artist-market-inventory.js";
+import {
+  applyRuntimeAttemptToFairnessStats,
+  buildFairnessConfig,
+  createRuntimeFairnessStats,
+  scoreFrontierItem
+} from "./frontier-fairness.js";
+import { applyMergedLaneOutcome, captureLaneOutcome, mergeLaneOutcome, type LaneOutcome } from "./lane-outcomes.js";
+import {
+  buildLocalAiAnalysisSummary,
+  buildLocalAiRelevanceConfigFromEnv,
+  evaluateDiscoveryCandidateWithLocalAi,
+  type LocalAiRelevanceConfig
+} from "./local-ai-relevance.js";
 import { buildEvaluationMetrics, buildRecommendedActions } from "./run-insights.js";
 
 export interface OrchestratorOptions {
@@ -47,12 +76,15 @@ interface CandidateTaskOutcome {
   gap?: string;
   transportKind?: TransportErrorKind;
   transportHost?: string;
+  recoveryTrigger?: string;
   succeeded: boolean;
 }
 
 interface SourceWorkState {
   planned: PlannedSource;
   sourceName: string;
+  sourceFamily: string;
+  sourceFamilyBucket: SourceFamilyBucket;
   queue: SourceCandidate[];
   seen: Set<string>;
 }
@@ -91,6 +123,29 @@ function toPositiveInt(value: string | undefined, fallback: number): number {
   return Math.floor(parsed);
 }
 
+function toBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+  return value.trim().toLowerCase() === "true";
+}
+
+interface CrawleeRecoveryConfig {
+  enabled: boolean;
+  maxPagesPerCandidate: number;
+  maxDiscoveredLinks: number;
+  timeoutMs: number;
+}
+
+function buildCrawleeRecoveryConfigFromEnv(): CrawleeRecoveryConfig {
+  return {
+    enabled: toBoolean(process.env.CRAWLEE_FALLBACK_ENABLED, true),
+    maxPagesPerCandidate: toPositiveInt(process.env.CRAWLEE_MAX_PAGES_PER_CANDIDATE, 4),
+    maxDiscoveredLinks: toPositiveInt(process.env.CRAWLEE_MAX_DISCOVERED_LINKS, 150),
+    timeoutMs: toPositiveInt(process.env.CRAWLEE_TIMEOUT_MS, 45_000)
+  };
+}
+
 function hostFromUrl(url: string): string | null {
   try {
     return new URL(url).hostname.toLowerCase();
@@ -117,7 +172,7 @@ function inferSourcePageType(url: string): SourceCandidate["sourcePageType"] {
     || /\/search\/artwork-detail\//.test(lower)
     || /\/artist\/artist-result\//.test(lower)
     ||
-    /(\/lot\/|\/lots\/|\/auction\/lot|\/auction-lot\/|\/item\/\d+|\/lot-|\/(?:en\/)?products\/|\/urun\/)/.test(lower)
+    /(\/lot\/|\/lots\/|\/auction\/lot|\/auction-lot\/|\/item\/\d+|\/lot-|\/(?:en\/)?products\/|\/urun\/|\/eser\/)/.test(lower)
     || /\/hemen-al\/[^/?#]+\/\d+/i.test(lower)
     || /\/hemen-al\/\d+\//i.test(lower)
     || /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i.test(lower)
@@ -504,6 +559,13 @@ export function shouldQueueDiscoveredCandidate(candidate: SourceCandidate, query
     return true;
   }
 
+  const discoveredFromReferencesQuery = candidate.discoveredFromUrl
+    ? (
+      urlReferencesQueryEntity(candidate.discoveredFromUrl, query)
+      || searchParamsReferenceQueryEntity(candidate.discoveredFromUrl, query)
+    )
+    : false;
+
   if (discoveredUrlLooksLikeAccessCheckpoint(candidate.url)) {
     return false;
   }
@@ -543,7 +605,37 @@ export function shouldQueueDiscoveredCandidate(candidate: SourceCandidate, query
     return true;
   }
 
+  if (discoveredFromReferencesQuery && !discoveredUrlLooksLikeDifferentEntity(candidate.url, query)) {
+    return true;
+  }
+
   return !discoveredUrlLooksLikeDifferentEntity(candidate.url, query);
+}
+
+export async function decideDiscoveredCandidateAction(input: {
+  candidate: SourceCandidate;
+  query: RunEntity["query"];
+  sourceName: string;
+  localAiConfig?: LocalAiRelevanceConfig;
+}): Promise<{ keep: boolean; trace: LocalAiDecisionTrace }> {
+  const deterministicAllowed = shouldQueueDiscoveredCandidate(input.candidate, input.query);
+  const trace = await evaluateDiscoveryCandidateWithLocalAi(
+    input.localAiConfig ?? buildLocalAiRelevanceConfigFromEnv(),
+    {
+      candidate: input.candidate,
+      query: input.query,
+      sourceName: input.sourceName,
+      deterministicAllowed,
+      deterministicReason: deterministicAllowed
+        ? null
+        : "deterministic_guardrail_rejected_candidate"
+    }
+  );
+
+  return {
+    keep: trace.outcome !== "reject_candidate",
+    trace
+  };
 }
 
 export function classifyFailureClass(transport: TransportMetadata | null, blockerReason?: string | null): FailureClass {
@@ -638,6 +730,148 @@ export function shouldExitProcessingLoop(options: {
     return true;
   }
   return !options.hasPendingCandidates;
+}
+
+export function shouldCaptureHeavyEvidenceForOutcome(
+  result: { attempt: SourceAttempt; record: PriceRecord | null; needsBrowserVerification?: boolean },
+  mode = process.env.EVIDENCE_TRACE_MODE ?? "selective"
+): boolean {
+  const normalizedMode = mode.toLowerCase();
+  if (normalizedMode === "always") {
+    return true;
+  }
+  if (normalizedMode === "off" || normalizedMode === "none") {
+    return false;
+  }
+
+  if (!(result.attempt.accepted_for_evidence ?? result.attempt.accepted)) {
+    return true;
+  }
+  if (result.needsBrowserVerification && result.attempt.acceptance_reason === "generic_shell_page") {
+    return true;
+  }
+  if (!result.record) {
+    return true;
+  }
+  return result.record.overall_confidence < 0.6;
+}
+
+function sourceSurfaceForCandidate(candidate: SourceCandidate): SourceSurface {
+  if (candidate.sourcePageType === "lot") {
+    return "auction_result";
+  }
+  if (candidate.sourcePageType === "artist_page") {
+    return "artist_page";
+  }
+  if (candidate.sourcePageType === "price_db") {
+    return "price_db";
+  }
+  if (candidate.sourcePageType === "listing") {
+    return "auction_catalog";
+  }
+  return "aggregator";
+}
+
+function saleChannelForAttempt(attempt: Pick<SourceAttempt, "acceptance_reason" | "extracted_fields">): SaleChannel {
+  const extracted = attempt.extracted_fields as { price_type?: string } | undefined;
+  const priceType = extracted?.price_type ?? "";
+  if (priceType === "hammer_price" || priceType === "realized_price") return "hammer";
+  if (priceType === "realized_with_buyers_premium") return "bp_inclusive";
+  if (priceType === "estimate") return "estimate";
+  if (priceType === "asking_price") return "asking";
+  if (priceType === "inquiry_only") return "private_sale_poa";
+  if (attempt.acceptance_reason === "price_hidden_evidence") return "sold_no_price";
+  return "unknown";
+}
+
+function priceVisibilityForAttempt(
+  attempt: Pick<SourceAttempt, "source_access_status" | "acceptance_reason">
+): PriceVisibility {
+  if (attempt.source_access_status === "price_hidden" || attempt.acceptance_reason === "price_hidden_evidence") {
+    return "hidden";
+  }
+  if (attempt.acceptance_reason === "inquiry_only_evidence") {
+    return "sold_no_price";
+  }
+  if (attempt.source_access_status === "public_access" || attempt.source_access_status === "licensed_access") {
+    return "visible";
+  }
+  return "unknown";
+}
+
+function annotateAttemptLaneAndSurface(attempt: SourceAttempt, candidate: SourceCandidate, lane: CrawlLane): void {
+  attempt.crawl_lane = lane;
+  attempt.source_surface = sourceSurfaceForCandidate(candidate);
+  attempt.sale_channel = saleChannelForAttempt(attempt);
+  attempt.price_visibility = priceVisibilityForAttempt(attempt);
+}
+
+function annotateRecordLaneAndSurface(record: PriceRecord, candidate: SourceCandidate, lane: CrawlLane): void {
+  record.crawl_lane = lane;
+  record.source_surface = sourceSurfaceForCandidate(candidate);
+  record.sale_channel = record.price_type === "estimate"
+    ? "estimate"
+    : record.price_type === "asking_price"
+      ? "asking"
+      : record.price_type === "hammer_price" || record.price_type === "realized_price"
+        ? "hammer"
+        : record.price_type === "realized_with_buyers_premium"
+          ? "bp_inclusive"
+          : record.price_type === "inquiry_only"
+            ? "private_sale_poa"
+            : "unknown";
+  record.price_visibility = record.price_hidden ? "hidden" : "visible";
+}
+
+function isDataInsufficientAcceptanceReason(reason: AcceptanceReason): boolean {
+  return (
+    reason === "generic_shell_page"
+    || reason === "missing_numeric_price"
+    || reason === "missing_currency"
+    || reason === "missing_estimate_range"
+    || reason === "unknown_price_type"
+  );
+}
+
+export function shouldTriggerCrawleeRecoveryForTransport(
+  transportKind: TransportErrorKind | undefined,
+  accessStatus: SourceAccessStatus
+): boolean {
+  if (!transportKind) {
+    return false;
+  }
+  if (transportKind === TransportErrorKind.AUTH_INVALID || transportKind === TransportErrorKind.LEGAL_BLOCK) {
+    return false;
+  }
+  if (accessStatus === "blocked" || accessStatus === "auth_required") {
+    return false;
+  }
+  return (
+    transportKind === TransportErrorKind.DNS_FAILED
+    || transportKind === TransportErrorKind.TCP_TIMEOUT
+    || transportKind === TransportErrorKind.TCP_REFUSED
+    || transportKind === TransportErrorKind.TLS_FAILED
+    || transportKind === TransportErrorKind.RATE_LIMITED
+    || transportKind === TransportErrorKind.WAF_BLOCK
+    || transportKind === TransportErrorKind.UNKNOWN_NETWORK
+    || transportKind === TransportErrorKind.HTTP_ERROR
+  );
+}
+
+export function shouldTriggerCrawleeRecoveryForAttempt(
+  attempt: SourceAttempt,
+  candidate: SourceCandidate
+): boolean {
+  if (attempt.source_access_status === "blocked" || attempt.source_access_status === "auth_required") {
+    return false;
+  }
+  if (isDataInsufficientAcceptanceReason(attempt.acceptance_reason)) {
+    return true;
+  }
+  if (attempt.acceptance_reason === "entity_mismatch" && candidate.sourcePageType !== "lot") {
+    return true;
+  }
+  return false;
 }
 
 export class HostCircuitRegistry {
@@ -801,7 +1035,13 @@ export class ResearchOrchestrator {
       concurrency: this.concurrency
     });
 
-    const plannedSources = await planSources(run.query, this.registry.list(), this.authManager, this.storage.listHostHealth(50));
+    const planning = await planSourcesWithDiagnostics(
+      run.query,
+      this.registry.list(),
+      this.authManager,
+      this.storage.listHostHealth(50)
+    );
+    const plannedSources = planning.plannedSources;
     const maxDiscoveredCandidatesPerSource = buildDiscoveryConfigFromEnv(run.query.analysisMode).maxCandidatesPerSource;
     const sourcePlan = buildSourcePlanItems(plannedSources, maxDiscoveredCandidatesPerSource, run.query.analysisMode);
     const selectedSourceIds = new Set(
@@ -809,19 +1049,33 @@ export class ResearchOrchestrator {
     );
 
     const sourceCandidateBreakdown: Record<string, number> = {};
+    const localAiConfig = buildLocalAiRelevanceConfigFromEnv();
+    const localAiDecisions: LocalAiDecisionTrace[] = [];
     let discoveredCandidates = 0;
 
     const runnableSources = plannedSources.filter((planned) => selectedSourceIds.has(planned.adapter.id));
+    const fairnessConfig = buildFairnessConfig(run.query.analysisMode ?? "balanced");
+    const fairnessStats = createRuntimeFairnessStats();
 
     const sources: SourceWorkState[] = runnableSources.map((planned) => {
       const queue = [...planned.candidates];
       const sourceName = planned.adapter.sourceName;
+      const sourceFamily = planned.adapter.capabilities.source_family;
+      const sourceFamilyBucket = inferSourceFamilyBucket({
+        sourceFamily,
+        sourceName,
+        hosts: queue
+          .map((candidate) => hostFromUrl(candidate.url))
+          .filter((host): host is string => Boolean(host))
+      });
       sourceCandidateBreakdown[sourceName] = queue.length;
       discoveredCandidates += queue.filter((candidate) => candidate.provenance !== "seed").length;
 
       return {
         planned,
         sourceName,
+        sourceFamily,
+        sourceFamilyBucket,
         queue,
         seen: new Set(queue.map((candidate) => candidate.url))
       };
@@ -832,7 +1086,6 @@ export class ResearchOrchestrator {
     const gaps: string[] = [];
     let acceptedFromDiscovery = 0;
     let rrCursor = 0;
-
     const hostBreakers = new HostCircuitRegistry(this.hostBreakerThreshold);
     const networkHealth = new NetworkHealthTracker();
     let stopScheduling = false;
@@ -844,23 +1097,66 @@ export class ResearchOrchestrator {
 
     const dequeueTask = (): CandidateTask | null => {
       if (sources.length === 0) return null;
-
-      for (let i = 0; i < sources.length; i += 1) {
-        const index = (rrCursor + i) % sources.length;
-        const source = sources[index];
-        const candidate = source.queue.shift();
-        if (!candidate) {
-          continue;
+      if (!fairnessConfig.enabled) {
+        for (let i = 0; i < sources.length; i += 1) {
+          const index = (rrCursor + i) % sources.length;
+          const source = sources[index];
+          const candidate = source.queue.shift();
+          if (!candidate) {
+            continue;
+          }
+          rrCursor = (index + 1) % sources.length;
+          return {
+            source,
+            candidate,
+            host: hostFromUrl(candidate.url)
+          };
         }
-        rrCursor = (index + 1) % sources.length;
-        return {
-          source,
-          candidate,
-          host: hostFromUrl(candidate.url)
-        };
+        return null;
       }
 
-      return null;
+      const scored = sources
+        .map((source) => {
+          const candidate = source.queue[0] ?? null;
+          if (!candidate) {
+            return null;
+          }
+          const host = hostFromUrl(candidate.url);
+          if (!host) {
+            return null;
+          }
+          const score = scoreFrontierItem(
+            {
+              sourceFamilyBucket: source.sourceFamilyBucket,
+              sourceHost: host,
+              sourcePageType: candidate.sourcePageType,
+              provenance: candidate.provenance,
+              baseScore: candidate.score,
+              isPreverifiedLot: candidate.sourcePageType === "lot" && candidate.provenance === "direct_lot"
+            },
+            fairnessStats,
+            fairnessConfig
+          );
+          return {
+            source,
+            candidate,
+            host,
+            score
+          };
+        })
+        .filter((item): item is { source: SourceWorkState; candidate: SourceCandidate; host: string; score: number } => Boolean(item))
+        .sort((left, right) => right.score - left.score);
+
+      const selected = scored[0];
+      if (!selected) {
+        return null;
+      }
+      selected.source.queue.shift();
+      return {
+        source: selected.source,
+        candidate: selected.candidate,
+        host: selected.host
+      };
     };
 
     const scheduleTask = (task: CandidateTask): void => {
@@ -882,6 +1178,13 @@ export class ResearchOrchestrator {
           const trippedAttempt = this.buildHostCircuitAttempt(run.id, nextTask);
           attempts.push(trippedAttempt);
           this.storage.saveAttempt(run.id, trippedAttempt);
+          applyRuntimeAttemptToFairnessStats(fairnessStats, {
+            sourceFamilyBucket: nextTask.source.sourceFamilyBucket,
+            sourceHost: nextTask.host,
+            acceptedForEvidence: false,
+            pricedAcceptance: false,
+            sourceAccessStatus: trippedAttempt.source_access_status
+          });
           continue;
         }
 
@@ -906,6 +1209,7 @@ export class ResearchOrchestrator {
 
       attempts.push(outcome.attempt);
       this.storage.saveAttempt(run.id, outcome.attempt);
+      this.storage.recordSourceAttempt(outcome.attempt);
       if (outcome.transportHost) {
         this.storage.recordHostAttempt(outcome.transportHost, outcome.attempt);
       } else if (outcome.attempt.transport_host) {
@@ -913,6 +1217,13 @@ export class ResearchOrchestrator {
       } else if (outcome.task.host) {
         this.storage.recordHostAttempt(outcome.task.host, outcome.attempt);
       }
+      applyRuntimeAttemptToFairnessStats(fairnessStats, {
+        sourceFamilyBucket: outcome.task.source.sourceFamilyBucket,
+        sourceHost: outcome.task.host ?? outcome.attempt.transport_host ?? "unknown",
+        acceptedForEvidence: Boolean(outcome.attempt.accepted_for_evidence ?? outcome.attempt.accepted),
+        pricedAcceptance: isPricedAcceptanceReason(outcome.attempt.acceptance_reason),
+        sourceAccessStatus: outcome.attempt.source_access_status
+      });
 
       if (outcome.gap) {
         gaps.push(outcome.gap);
@@ -946,9 +1257,14 @@ export class ResearchOrchestrator {
 
       if (!stopScheduling && outcome.discoveredCandidates.length > 0) {
         for (const discovered of outcome.discoveredCandidates) {
-          if (!shouldQueueDiscoveredCandidate(discovered, run.query)) {
-            continue;
-          }
+          const decision = await decideDiscoveredCandidateAction({
+            candidate: discovered,
+            query: run.query,
+            sourceName: outcome.task.source.sourceName,
+            localAiConfig
+          });
+          localAiDecisions.push(decision.trace);
+          if (!decision.keep) continue;
           if (outcome.task.source.seen.has(discovered.url)) {
             continue;
           }
@@ -997,17 +1313,23 @@ export class ResearchOrchestrator {
     const perPaintingStats = buildPerPaintingStats(rankedRecords);
     const valuationEligibleRecords = rankedRecords.filter((record) => record.accepted_for_valuation).length;
     const persistedHostHealth = this.storage.listHostHealth(12);
+    const persistedSourceMetrics = this.storage.listSourceHealth(12);
+    const recentCanaries = this.storage.listCanaryResults(8);
     const evaluationMetrics = buildEvaluationMetrics({
       attempts,
       sourcePlan,
       acceptedRecords: rankedRecords.length,
-      valuationEligibleRecords
+      valuationEligibleRecords,
+      pricedRecordCount: valuationEligibleRecords,
+      corePriceEvidenceCount: valuationEligibleRecords,
+      uniqueArtworkCount: rankedRecords.length
     });
     const recommendedActions = buildRecommendedActions({
       sourcePlan,
       attempts,
       acceptedRecords: rankedRecords.length,
       discoveredCandidates,
+      discoveryDiagnostics: planning.discoveryDiagnostics,
       hostHealth: persistedHostHealth,
       evaluationMetrics
     });
@@ -1016,13 +1338,18 @@ export class ResearchOrchestrator {
       rankedRecords.length,
       valuationEligibleRecords,
       attempts,
+      duplicates.length,
       valuation.generated,
       valuation.reason,
       discoveredCandidates,
       acceptedFromDiscovery,
       sourceCandidateBreakdown,
       persistedHostHealth,
-      sourcePlan
+      persistedSourceMetrics,
+      sourcePlan,
+      planning.discoveryDiagnostics,
+      recentCanaries,
+      buildLocalAiAnalysisSummary(localAiDecisions)
     );
 
     const resultsPath = path.join(runRoot, "results.json");
@@ -1050,13 +1377,20 @@ export class ResearchOrchestrator {
       per_painting_stats: perPaintingStats,
       source_plan: sourcePlan,
       recommended_actions: recommendedActions,
+      local_ai_decisions: localAiDecisions,
       persisted_source_health: persistedHostHealth,
+      persisted_source_metrics: persistedSourceMetrics,
+      recent_canaries: recentCanaries,
       attempts,
       gaps
     };
 
     writeJsonFile(resultsPath, payload);
-    fs.writeFileSync(reportPath, renderMarkdownReport(rankedRecords, summary, valuation, gaps, recommendedActions), "utf-8");
+    fs.writeFileSync(
+      reportPath,
+      renderMarkdownReport(rankedRecords, summary, valuation, gaps, recommendedActions, sourcePlan),
+      "utf-8"
+    );
     const artifactManifest = buildRunArtifactManifest({
       runId: run.id,
       runRoot,
@@ -1096,11 +1430,27 @@ export class ResearchOrchestrator {
           attemptCount: 1
         }
       });
+      annotateAttemptLaneAndSurface(result.attempt, task.candidate, "cheap_fetch");
+      if (result.record) {
+        annotateRecordLaneAndSurface(result.record, task.candidate, "cheap_fetch");
+      }
+      let bestLaneOutcome: LaneOutcome | null = captureLaneOutcome(
+        result.attempt.crawl_lane ?? "cheap_fetch",
+        result.attempt,
+        result.record
+      );
+
+      const crawleeConfig = buildCrawleeRecoveryConfigFromEnv();
+      const crawleeTriggeredByAttempt =
+        crawleeConfig.enabled && shouldTriggerCrawleeRecoveryForAttempt(result.attempt, task.candidate);
 
       const shouldDiscoverRenderedArtifacts =
-        task.source.planned.adapter.crawlStrategies.includes("rendered_dom") ||
-        task.candidate.sourcePageType !== "lot" ||
-        result.attempt.acceptance_reason === "generic_shell_page";
+        crawleeConfig.enabled && (
+          task.source.planned.adapter.crawlStrategies.includes("rendered_dom") ||
+          task.candidate.sourcePageType !== "lot" ||
+          result.attempt.acceptance_reason === "generic_shell_page" ||
+          crawleeTriggeredByAttempt
+        );
       const renderedArtifacts = shouldDiscoverRenderedArtifacts
         ? await this.browserClient.discoverRenderedArtifacts({
             traceId,
@@ -1109,9 +1459,21 @@ export class ResearchOrchestrator {
             runId: run.id,
             evidenceDir,
             accessContext: task.source.planned.accessContext,
-            maxPages: task.candidate.sourcePageType === "listing" ? 4 : 2
+            timeoutMs: crawleeConfig.timeoutMs,
+            maxLinks: crawleeConfig.maxDiscoveredLinks,
+            maxPages:
+              task.candidate.sourcePageType === "listing"
+                ? crawleeConfig.maxPagesPerCandidate
+                : Math.max(2, Math.min(3, crawleeConfig.maxPagesPerCandidate))
           })
         : null;
+
+      if (renderedArtifacts) {
+        annotateAttemptLaneAndSurface(result.attempt, task.candidate, "crawlee");
+        if (result.record) {
+          annotateRecordLaneAndSurface(result.record, task.candidate, "crawlee");
+        }
+      }
 
       if (!result.attempt.screenshot_path && renderedArtifacts?.screenshotPaths[0]) {
         result.attempt.screenshot_path = renderedArtifacts.screenshotPaths[0];
@@ -1126,13 +1488,89 @@ export class ResearchOrchestrator {
         result.record.raw_snapshot_path = renderedArtifacts.rawSnapshotPaths[0];
       }
 
+      if (renderedArtifacts?.requiresAuthDetected) {
+        const gatedReason = gatedContentReasonForAccessMode(task.source.planned.accessContext.mode);
+        result.attempt.source_access_status = gatedReason.status;
+        result.attempt.failure_class = gatedReason.failureClass;
+        result.attempt.accepted = false;
+        result.attempt.accepted_for_evidence = false;
+        result.attempt.accepted_for_valuation = false;
+        result.attempt.valuation_lane = "none";
+        result.attempt.acceptance_reason = "blocked_access";
+        result.attempt.rejection_reason = gatedReason.rejectionReason;
+        result.attempt.valuation_eligibility_reason = gatedReason.valuationReason;
+        result.attempt.blocker_reason = gatedReason.blockerReason;
+        annotateAttemptLaneAndSurface(result.attempt, task.candidate, "crawlee");
+        if (result.record) {
+          result.record.source_access_status = gatedReason.status;
+          result.record.accepted_for_evidence = false;
+          result.record.accepted_for_valuation = false;
+          result.record.valuation_lane = "none";
+          result.record.acceptance_reason = "blocked_access";
+          result.record.rejection_reason = gatedReason.rejectionReason;
+          result.record.valuation_eligibility_reason = gatedReason.valuationReason;
+          result.record.valuation_confidence = 0;
+          result.record.overall_confidence = Math.min(result.record.overall_confidence, 0.35);
+          annotateRecordLaneAndSurface(result.record, task.candidate, "crawlee");
+        }
+      } else if (renderedArtifacts?.blockedDetected) {
+        result.attempt.source_access_status = "blocked";
+        result.attempt.failure_class = "waf_challenge";
+        result.attempt.accepted = false;
+        result.attempt.accepted_for_evidence = false;
+        result.attempt.accepted_for_valuation = false;
+        result.attempt.valuation_lane = "none";
+        result.attempt.acceptance_reason = "blocked_access";
+        result.attempt.rejection_reason = "Access blocked or anti-bot page detected.";
+        result.attempt.valuation_eligibility_reason = "Technical blocking detected.";
+        result.attempt.blocker_reason = "Technical blocking detected.";
+        annotateAttemptLaneAndSurface(result.attempt, task.candidate, "crawlee");
+        if (result.record) {
+          result.record.source_access_status = "blocked";
+          result.record.accepted_for_evidence = false;
+          result.record.accepted_for_valuation = false;
+          result.record.valuation_lane = "none";
+          result.record.acceptance_reason = "blocked_access";
+          result.record.rejection_reason = "Access blocked or anti-bot page detected.";
+          result.record.valuation_eligibility_reason = "Technical blocking detected.";
+          result.record.valuation_confidence = 0;
+          result.record.overall_confidence = Math.min(result.record.overall_confidence, 0.2);
+          annotateRecordLaneAndSurface(result.record, task.candidate, "crawlee");
+        }
+      } else if (renderedArtifacts?.rawSnapshotPaths[0]) {
+        const shouldReevaluateRenderedSnapshot =
+          !result.record
+          || isDataInsufficientAcceptanceReason(result.attempt.acceptance_reason)
+          || (result.attempt.acceptance_reason === "entity_mismatch" && task.candidate.sourcePageType !== "lot");
+        if (shouldReevaluateRenderedSnapshot) {
+          result.record = this.tryRecoverPriceFromBrowserSnapshot(
+            task,
+            run,
+            result,
+            renderedArtifacts.rawSnapshotPaths[0]
+          );
+          annotateAttemptLaneAndSurface(result.attempt, task.candidate, "crawlee");
+          if (result.record) {
+            annotateRecordLaneAndSurface(result.record, task.candidate, "crawlee");
+          }
+        }
+      }
+
+      const postCrawleeMerge = mergeLaneOutcome(
+        bestLaneOutcome,
+        captureLaneOutcome(result.attempt.crawl_lane ?? "cheap_fetch", result.attempt, result.record)
+      );
+      applyMergedLaneOutcome(result, postCrawleeMerge.outcome);
+      bestLaneOutcome = postCrawleeMerge.outcome;
+
       const renderedCandidates = (renderedArtifacts?.discoveredUrls ?? [])
         .map((url) => toRenderedDiscoveredCandidate(url, task.candidate.url, task.source.planned.adapter.id, run.query))
         .filter((candidate): candidate is SourceCandidate => Boolean(candidate));
 
       const captureAcceptedValuation = process.env.CAPTURE_BROWSER_FOR_ACCEPTED_VALUATION === "true";
       const acceptedForValuation = Boolean(result.attempt.accepted_for_valuation ?? result.record?.accepted_for_valuation);
-      if (result.needsBrowserVerification || (captureAcceptedValuation && acceptedForValuation)) {
+      const skipBrowserTruthLane = this.shouldSkipBrowserTruthLane(task, result);
+      if (!skipBrowserTruthLane && (result.needsBrowserVerification || (captureAcceptedValuation && acceptedForValuation))) {
         const browserCapture = await this.browserClient.withRetries(
           () =>
             this.browserClient.capture({
@@ -1142,7 +1580,11 @@ export class ResearchOrchestrator {
               runId: run.id,
               evidenceDir,
               accessContext: task.source.planned.accessContext,
-              captureHeavyEvidence: this.shouldCaptureHeavyEvidence(result)
+              captureHeavyEvidence: this.shouldCaptureHeavyEvidence({
+                attempt: result.attempt,
+                record: result.record,
+                needsBrowserVerification: result.needsBrowserVerification
+              })
             }),
           3,
           1_000,
@@ -1157,6 +1599,7 @@ export class ResearchOrchestrator {
         result.attempt.har_path = browserCapture.harPath;
         result.attempt.canonical_url = browserCapture.finalUrl;
         result.attempt.model_used = browserCapture.modelUsed;
+        annotateAttemptLaneAndSurface(result.attempt, task.candidate, "browser");
 
         if (browserCapture.requiresAuthDetected) {
           const gatedReason = gatedContentReasonForAccessMode(task.source.planned.accessContext.mode);
@@ -1183,7 +1626,12 @@ export class ResearchOrchestrator {
           }
         }
 
-        if (browserCapture.blockedDetected) {
+        const preservePriorValuationAcceptance =
+          Boolean(result.attempt.accepted_for_valuation)
+          && result.attempt.source_access_status !== "blocked"
+          && result.attempt.source_access_status !== "auth_required";
+
+        if (browserCapture.blockedDetected && !preservePriorValuationAcceptance) {
           result.attempt.source_access_status = "blocked";
           result.attempt.failure_class = "waf_challenge";
           result.attempt.accepted = false;
@@ -1205,11 +1653,16 @@ export class ResearchOrchestrator {
             result.record.valuation_confidence = 0;
             result.record.overall_confidence = Math.min(result.record.overall_confidence, 0.2);
           }
+        } else if (browserCapture.blockedDetected && preservePriorValuationAcceptance) {
+          // Keep valuation-ready extraction from deterministic/cheap lane when browser truth is challenged.
+          result.attempt.failure_class = result.attempt.failure_class ?? "waf_challenge";
+          result.attempt.blocker_reason = result.attempt.blocker_reason ?? "Browser lane encountered anti-bot challenge.";
         }
 
         if (result.record) {
           result.record.screenshot_path = browserCapture.screenshotPath;
           result.record.raw_snapshot_path = browserCapture.rawSnapshotPath;
+          annotateRecordLaneAndSurface(result.record, task.candidate, "browser");
         }
 
         if (
@@ -1218,7 +1671,18 @@ export class ResearchOrchestrator {
           && !browserCapture.requiresAuthDetected
         ) {
           result.record = this.tryRecoverPriceFromBrowserSnapshot(task, run, result, browserCapture.rawSnapshotPath);
+          annotateAttemptLaneAndSurface(result.attempt, task.candidate, "browser");
+          if (result.record) {
+            annotateRecordLaneAndSurface(result.record, task.candidate, "browser");
+          }
         }
+
+        const postBrowserMerge = mergeLaneOutcome(
+          bestLaneOutcome,
+          captureLaneOutcome(result.attempt.crawl_lane ?? "browser", result.attempt, result.record)
+        );
+        applyMergedLaneOutcome(result, postBrowserMerge.outcome);
+        bestLaneOutcome = postBrowserMerge.outcome;
       }
 
       const acceptedForEvidence = Boolean(result.attempt.accepted_for_evidence ?? result.attempt.accepted);
@@ -1227,6 +1691,7 @@ export class ResearchOrchestrator {
         attempt: result.attempt,
         acceptedRecord: result.record && acceptedForEvidence ? result.record : null,
         discoveredCandidates: [...(result.discoveredCandidates ?? []), ...renderedCandidates],
+        recoveryTrigger: crawleeTriggeredByAttempt ? `acceptance:${result.attempt.acceptance_reason}` : undefined,
         succeeded: true
       };
     } catch (error) {
@@ -1234,12 +1699,23 @@ export class ResearchOrchestrator {
       const failedAttempt = this.buildFailedAttempt(run.id, task, error, transport);
       const gapReason = error instanceof Error ? error.message : String(error);
 
-      const recovery = transport?.kind === TransportErrorKind.TCP_TIMEOUT
+      const crawleeRecovery = shouldTriggerCrawleeRecoveryForTransport(
+        transport?.kind,
+        failedAttempt.source_access_status
+      )
+        ? await this.attemptCrawleeRecovery(task, run, traceId, evidenceDir, failedAttempt, transport?.kind)
+        : null;
+
+      if (crawleeRecovery) {
+        return crawleeRecovery;
+      }
+
+      const browserRecovery = transport?.kind === TransportErrorKind.TCP_TIMEOUT
         ? await this.attemptBrowserTimeoutRecovery(task, run, traceId, evidenceDir, failedAttempt)
         : null;
 
-      if (recovery) {
-        return recovery;
+      if (browserRecovery) {
+        return browserRecovery;
       }
 
       return {
@@ -1250,6 +1726,7 @@ export class ResearchOrchestrator {
         gap: `${task.source.sourceName}: ${gapReason}`,
         transportKind: transport?.kind,
         transportHost: transport?.host,
+        recoveryTrigger: transport?.kind ? `transport:${transport.kind}` : undefined,
         succeeded: false
       };
     }
@@ -1349,6 +1826,7 @@ export class ResearchOrchestrator {
     evidenceDir: string,
     failedAttempt: SourceAttempt
   ): Promise<CandidateTaskOutcome | null> {
+    const crawleeConfig = buildCrawleeRecoveryConfigFromEnv();
     const shouldTryBrowserRecovery =
       task.candidate.sourcePageType !== "lot"
       || task.source.planned.adapter.crawlStrategies.includes("rendered_dom")
@@ -1366,13 +1844,19 @@ export class ResearchOrchestrator {
         runId: run.id,
         evidenceDir,
         accessContext: task.source.planned.accessContext,
-        maxPages: task.candidate.sourcePageType === "listing" ? 4 : 2
+        timeoutMs: crawleeConfig.timeoutMs,
+        maxLinks: crawleeConfig.maxDiscoveredLinks,
+        maxPages:
+          task.candidate.sourcePageType === "listing"
+            ? crawleeConfig.maxPagesPerCandidate
+            : Math.max(2, Math.min(3, crawleeConfig.maxPagesPerCandidate))
       });
 
       failedAttempt.screenshot_path = renderedArtifacts.screenshotPaths[0] ?? null;
       failedAttempt.raw_snapshot_path = renderedArtifacts.rawSnapshotPaths[0] ?? null;
       failedAttempt.canonical_url = renderedArtifacts.finalUrl;
       failedAttempt.parser_used = "browser-timeout-recovery";
+      annotateAttemptLaneAndSurface(failedAttempt, task.candidate, "browser");
       failedAttempt.failure_class = renderedArtifacts.blockedDetected ? "waf_challenge" : undefined;
       failedAttempt.rejection_reason = renderedArtifacts.blockedDetected
         ? "Access blocked or anti-bot page detected."
@@ -1438,6 +1922,9 @@ export class ResearchOrchestrator {
       const recoveredRecord = failedAttempt.raw_snapshot_path && !renderedArtifacts.blockedDetected
         ? this.tryRecoverPriceFromBrowserSnapshot(task, run, recoveredResult, failedAttempt.raw_snapshot_path)
         : null;
+      if (recoveredRecord) {
+        annotateRecordLaneAndSurface(recoveredRecord, task.candidate, "browser");
+      }
 
       return {
         task,
@@ -1445,6 +1932,137 @@ export class ResearchOrchestrator {
         acceptedRecord: recoveredRecord && recoveredResult.attempt.accepted_for_evidence ? recoveredRecord : null,
         discoveredCandidates: renderedCandidates,
         gap: renderedArtifacts.blockedDetected || renderedArtifacts.requiresAuthDetected ? undefined : `${task.source.sourceName}: recovered after transport timeout via browser render.`,
+        succeeded: true
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async attemptCrawleeRecovery(
+    task: CandidateTask,
+    run: RunEntity,
+    traceId: string,
+    evidenceDir: string,
+    failedAttempt: SourceAttempt,
+    transportKind?: TransportErrorKind
+  ): Promise<CandidateTaskOutcome | null> {
+    const config = buildCrawleeRecoveryConfigFromEnv();
+    if (!config.enabled) {
+      return null;
+    }
+
+    const shouldTryRecovery =
+      task.candidate.sourcePageType !== "lot"
+      || task.source.planned.adapter.crawlStrategies.includes("rendered_dom")
+      || task.source.planned.adapter.capabilities.browser_support !== "never"
+      || shouldTriggerCrawleeRecoveryForAttempt(failedAttempt, task.candidate);
+    if (!shouldTryRecovery) {
+      return null;
+    }
+
+    try {
+      const renderedArtifacts = await this.browserClient.discoverRenderedArtifacts({
+        traceId,
+        sourceName: task.source.planned.adapter.id,
+        url: task.candidate.url,
+        runId: run.id,
+        evidenceDir,
+        accessContext: task.source.planned.accessContext,
+        timeoutMs: config.timeoutMs,
+        maxLinks: config.maxDiscoveredLinks,
+        maxPages:
+          task.candidate.sourcePageType === "listing"
+            ? config.maxPagesPerCandidate
+            : Math.max(2, Math.min(3, config.maxPagesPerCandidate))
+      });
+
+      failedAttempt.screenshot_path = renderedArtifacts.screenshotPaths[0] ?? failedAttempt.screenshot_path;
+      failedAttempt.raw_snapshot_path = renderedArtifacts.rawSnapshotPaths[0] ?? failedAttempt.raw_snapshot_path;
+      failedAttempt.canonical_url = renderedArtifacts.finalUrl;
+      failedAttempt.parser_used = "crawlee-recovery";
+      failedAttempt.extracted_fields = {
+        ...failedAttempt.extracted_fields,
+        recovery_trigger: transportKind ? `transport:${transportKind}` : `acceptance:${failedAttempt.acceptance_reason}`
+      };
+      annotateAttemptLaneAndSurface(failedAttempt, task.candidate, "crawlee");
+
+      if (renderedArtifacts.requiresAuthDetected) {
+        const gatedReason = gatedContentReasonForAccessMode(task.source.planned.accessContext.mode);
+        failedAttempt.source_access_status = gatedReason.status;
+        failedAttempt.failure_class = gatedReason.failureClass;
+        failedAttempt.blocker_reason = gatedReason.blockerReason;
+        failedAttempt.acceptance_reason = "blocked_access";
+        failedAttempt.rejection_reason = gatedReason.rejectionReason;
+      } else if (renderedArtifacts.blockedDetected) {
+        failedAttempt.source_access_status = "blocked";
+        failedAttempt.failure_class = "waf_challenge";
+        failedAttempt.blocker_reason = "Technical blocking detected.";
+        failedAttempt.acceptance_reason = "blocked_access";
+        failedAttempt.rejection_reason = "Access blocked or anti-bot page detected.";
+      } else if (failedAttempt.raw_snapshot_path) {
+        try {
+          const html = fs.readFileSync(failedAttempt.raw_snapshot_path, "utf-8");
+          const parsed = parseGenericLotFields(html);
+          const recoveredSourceStatus: SourceAccessStatus = parsed.priceHidden
+            ? "price_hidden"
+            : task.source.planned.accessContext.sourceAccessStatus;
+          const acceptance = evaluateAcceptance(parsed, recoveredSourceStatus, {
+            sourceName: failedAttempt.source_name,
+            sourcePageType: task.candidate.sourcePageType,
+            candidateUrl: task.candidate.url,
+            queryArtist: run.query.artist,
+            queryTitle: run.query.title
+          });
+
+          failedAttempt.source_access_status = recoveredSourceStatus;
+          failedAttempt.accepted = acceptance.acceptedForEvidence;
+          failedAttempt.accepted_for_evidence = acceptance.acceptedForEvidence;
+          failedAttempt.accepted_for_valuation = acceptance.acceptedForValuation;
+          failedAttempt.valuation_lane = acceptance.valuationLane;
+          failedAttempt.acceptance_reason = acceptance.acceptanceReason;
+          failedAttempt.rejection_reason = acceptance.rejectionReason;
+          failedAttempt.valuation_eligibility_reason = acceptance.valuationEligibilityReason;
+          failedAttempt.failure_class = undefined;
+          failedAttempt.blocker_reason = acceptance.rejectionReason;
+          failedAttempt.extracted_fields = {
+            ...failedAttempt.extracted_fields,
+            lot_number: parsed.lotNumber,
+            estimate_low: parsed.estimateLow,
+            estimate_high: parsed.estimateHigh,
+            price_type: parsed.priceType,
+            price_amount: parsed.priceAmount,
+            currency: parsed.currency,
+            buyers_premium_included: parsed.buyersPremiumIncluded
+          };
+          failedAttempt.sale_channel = saleChannelForAttempt(failedAttempt);
+          failedAttempt.price_visibility = priceVisibilityForAttempt(failedAttempt);
+        } catch {
+          // Best-effort crawlee recovery parse.
+        }
+      }
+
+      const renderedCandidates = (renderedArtifacts.discoveredUrls ?? [])
+        .map((url) => toRenderedDiscoveredCandidate(url, task.candidate.url, task.source.planned.adapter.id, run.query))
+        .filter((candidate): candidate is SourceCandidate => Boolean(candidate));
+
+      const recoveredResult = { attempt: failedAttempt, record: null as PriceRecord | null };
+      const recoveredRecord = failedAttempt.raw_snapshot_path && !renderedArtifacts.blockedDetected
+        ? this.tryRecoverPriceFromBrowserSnapshot(task, run, recoveredResult, failedAttempt.raw_snapshot_path)
+        : null;
+      if (recoveredRecord) {
+        annotateRecordLaneAndSurface(recoveredRecord, task.candidate, "crawlee");
+      }
+
+      return {
+        task,
+        attempt: recoveredResult.attempt,
+        acceptedRecord: recoveredRecord && recoveredResult.attempt.accepted_for_evidence ? recoveredRecord : null,
+        discoveredCandidates: renderedCandidates,
+        recoveryTrigger: transportKind ? `transport:${transportKind}` : `acceptance:${failedAttempt.acceptance_reason}`,
+        gap: renderedArtifacts.blockedDetected || renderedArtifacts.requiresAuthDetected
+          ? undefined
+          : `${task.source.sourceName}: crawlee recovery lane executed.`,
         succeeded: true
       };
     } catch {
@@ -1487,10 +2105,16 @@ export class ResearchOrchestrator {
     return {
       run_id: runId,
       source_name: task.source.sourceName,
+      source_family: task.source.planned.adapter.capabilities.source_family,
+      venue_name: task.source.planned.adapter.venueName,
       source_url: task.candidate.url,
       canonical_url: task.candidate.url,
       access_mode: task.source.planned.accessContext.mode,
       source_access_status: sourceAccessStatus,
+      source_surface: sourceSurfaceForCandidate(task.candidate),
+      crawl_lane: "cheap_fetch",
+      sale_channel: "unknown",
+      price_visibility: sourceAccessStatus === "price_hidden" ? "hidden" : "unknown",
       failure_class: failureClass,
       access_reason: task.source.planned.accessContext.accessReason ?? "Unexpected adapter failure.",
       blocker_reason: blockerReason,
@@ -1540,10 +2164,16 @@ export class ResearchOrchestrator {
     return {
       run_id: runId,
       source_name: task.source.sourceName,
+      source_family: task.source.planned.adapter.capabilities.source_family,
+      venue_name: task.source.planned.adapter.venueName,
       source_url: task.candidate.url,
       canonical_url: task.candidate.url,
       access_mode: task.source.planned.accessContext.mode,
       source_access_status: "blocked",
+      source_surface: sourceSurfaceForCandidate(task.candidate),
+      crawl_lane: "deterministic",
+      sale_channel: "unknown",
+      price_visibility: "unknown",
       failure_class: "host_circuit",
       access_reason: task.source.planned.accessContext.accessReason ?? "Source skipped due host circuit breaker.",
       blocker_reason: "target_unreachable:host_circuit_open",
@@ -1758,6 +2388,10 @@ export class ResearchOrchestrator {
       source_name: task.source.sourceName,
       source_url: attempt.canonical_url ?? attempt.source_url,
       source_page_type: task.candidate.sourcePageType,
+      source_surface: sourceSurfaceForCandidate(task.candidate),
+      crawl_lane: attempt.crawl_lane ?? "browser",
+      sale_channel: "unknown",
+      price_visibility: parsed.priceHidden ? "hidden" : "visible",
       sale_or_listing_date: parsed.saleDate,
       lot_number: parsed.lotNumber,
       price_type: parsed.priceType,
@@ -1796,22 +2430,26 @@ export class ResearchOrchestrator {
     };
   }
 
-  private shouldCaptureHeavyEvidence(result: { attempt: SourceAttempt; record: PriceRecord | null }): boolean {
-    const mode = (process.env.EVIDENCE_TRACE_MODE ?? "selective").toLowerCase();
-    if (mode === "always") {
-      return true;
-    }
-    if (mode === "off" || mode === "none") {
-      return false;
-    }
+  private shouldCaptureHeavyEvidence(
+    result: { attempt: SourceAttempt; record: PriceRecord | null; needsBrowserVerification?: boolean }
+  ): boolean {
+    return shouldCaptureHeavyEvidenceForOutcome(result);
+  }
 
-    if (!(result.attempt.accepted_for_evidence ?? result.attempt.accepted)) {
-      return true;
-    }
-    if (!result.record) {
-      return true;
-    }
-    return result.record.overall_confidence < 0.6;
+  private shouldSkipBrowserTruthLane(
+    task: CandidateTask,
+    result: { attempt: SourceAttempt; record: PriceRecord | null; needsBrowserVerification?: boolean }
+  ): boolean {
+    const family = task.source.planned.adapter.capabilities.source_family.toLowerCase();
+    const highTrustFamily =
+      task.source.planned.adapter.tier <= 2 &&
+      !family.includes("open-web") &&
+      !task.source.planned.adapter.sourceName.toLowerCase().includes("web discovery");
+    const valuationReady = Boolean(result.attempt.accepted_for_valuation ?? result.record?.accepted_for_valuation);
+    const noAuthOrBlockSignals =
+      result.attempt.source_access_status !== "blocked" && result.attempt.source_access_status !== "auth_required";
+    const confidence = result.record?.overall_confidence ?? result.attempt.confidence_score;
+    return highTrustFamily && valuationReady && noAuthOrBlockSignals && confidence >= 0.78;
   }
 
   private buildSummary(
@@ -1819,13 +2457,18 @@ export class ResearchOrchestrator {
     acceptedEvidenceRecords: number,
     valuationEligibleRecords: number,
     attempts: SourceAttempt[],
+    duplicateListingCount: number,
     valuationGenerated: boolean,
     valuationReason: string,
     discoveredCandidates: number,
     acceptedFromDiscovery: number,
     sourceCandidateBreakdown: Record<string, number>,
     persistedSourceHealth: HostHealthRecord[],
-    sourcePlan: import("@artbot/shared-types").SourcePlanItem[]
+    persistedSourceMetrics: SourceHealthRecord[],
+    sourcePlan: import("@artbot/shared-types").SourcePlanItem[],
+    discoveryProviderDiagnostics: DiscoveryProviderDiagnostics[],
+    recentCanaries: CanaryResult[],
+    localAiAnalysis?: RunSummary["local_ai_analysis"]
   ): RunSummary {
     const sourceStatusBreakdown: Record<SourceAccessStatus, number> = {
       public_access: 0,
@@ -1863,6 +2506,35 @@ export class ResearchOrchestrator {
       unknown_price_type: 0,
       blocked_access: 0
     };
+    const crawlLaneBreakdown: Record<CrawlLane, number> = {
+      deterministic: 0,
+      cheap_fetch: 0,
+      crawlee: 0,
+      browser: 0
+    };
+    const priceVisibilityBreakdown: Record<PriceVisibility, number> = {
+      visible: 0,
+      hidden: 0,
+      sold_no_price: 0,
+      unknown: 0
+    };
+    const scrapeRecoveryByTrigger: Record<string, number> = {};
+    const scrapeRecoveryByTransportKind: Record<string, number> = {};
+    const scrapeRecoveryByAcceptanceReason: Record<string, number> = {};
+    let scrapeRecoveryAttempted = 0;
+    let scrapeRecoverySucceeded = 0;
+    let browserOverwritePreventedCount = 0;
+    const sourceFamilyCoverage: NonNullable<RunSummary["source_family_coverage"]> = {};
+    const confidenceMix: NonNullable<RunSummary["confidence_mix"]> = {
+      high: 0,
+      medium: 0,
+      low: 0
+    };
+    const freshnessMix: NonNullable<RunSummary["freshness_mix"]> = {
+      fresh: 0,
+      stale: 0,
+      undated: 0
+    };
 
     for (const attempt of attempts) {
       sourceStatusBreakdown[attempt.source_access_status] += 1;
@@ -1873,7 +2545,136 @@ export class ResearchOrchestrator {
       if (attempt.acceptance_reason && acceptanceReasonList.includes(attempt.acceptance_reason)) {
         acceptanceReasonBreakdown[attempt.acceptance_reason] += 1;
       }
+      const lane = attempt.crawl_lane ?? "cheap_fetch";
+      crawlLaneBreakdown[lane] += 1;
+      priceVisibilityBreakdown[attempt.price_visibility ?? "unknown"] += 1;
+      if ((attempt.extracted_fields as { browser_overwrite_prevented?: unknown } | undefined)?.browser_overwrite_prevented === true) {
+        browserOverwritePreventedCount += 1;
+      }
+      if (attempt.accepted_for_evidence ?? attempt.accepted) {
+        if (attempt.confidence_score >= 0.75) {
+          confidenceMix.high += 1;
+        } else if (attempt.confidence_score >= 0.45) {
+          confidenceMix.medium += 1;
+        } else {
+          confidenceMix.low += 1;
+        }
+      }
+      const dateCandidate =
+        (attempt.extracted_fields as { sale_or_listing_date?: unknown; sale_date?: unknown; listed_date?: unknown } | undefined)
+          ?.sale_or_listing_date
+        ?? (attempt.extracted_fields as { sale_or_listing_date?: unknown; sale_date?: unknown; listed_date?: unknown } | undefined)
+          ?.sale_date
+        ?? (attempt.extracted_fields as { sale_or_listing_date?: unknown; sale_date?: unknown; listed_date?: unknown } | undefined)
+          ?.listed_date;
+      if (typeof dateCandidate === "string") {
+        const parsed = Date.parse(dateCandidate);
+        if (Number.isFinite(parsed)) {
+          const ageMs = Date.now() - parsed;
+          const fifteenYearsMs = 15 * 365 * 24 * 60 * 60 * 1000;
+          if (ageMs <= fifteenYearsMs) {
+            freshnessMix.fresh += 1;
+          } else {
+            freshnessMix.stale += 1;
+          }
+        } else {
+          freshnessMix.undated += 1;
+        }
+      } else {
+        freshnessMix.undated += 1;
+      }
+
+      const family = attempt.source_family ?? "unknown";
+      const familyEntry = sourceFamilyCoverage[family] ?? {
+        planned: 0,
+        selected: 0,
+        attempted: 0,
+        accepted: 0
+      };
+      familyEntry.attempted += 1;
+      if (attempt.accepted_for_evidence ?? attempt.accepted) {
+        familyEntry.accepted += 1;
+      }
+      sourceFamilyCoverage[family] = familyEntry;
+
+      if (lane === "crawlee") {
+        scrapeRecoveryAttempted += 1;
+        if (attempt.accepted_for_evidence ?? attempt.accepted) {
+          scrapeRecoverySucceeded += 1;
+        }
+        const trigger =
+          typeof (attempt.extracted_fields as { recovery_trigger?: unknown })?.recovery_trigger === "string"
+            ? String((attempt.extracted_fields as { recovery_trigger?: string }).recovery_trigger)
+            : `acceptance:${attempt.acceptance_reason}`;
+        scrapeRecoveryByTrigger[trigger] = (scrapeRecoveryByTrigger[trigger] ?? 0) + 1;
+        if (attempt.transport_kind) {
+          scrapeRecoveryByTransportKind[attempt.transport_kind] =
+            (scrapeRecoveryByTransportKind[attempt.transport_kind] ?? 0) + 1;
+        }
+        scrapeRecoveryByAcceptanceReason[attempt.acceptance_reason] =
+          (scrapeRecoveryByAcceptanceReason[attempt.acceptance_reason] ?? 0) + 1;
+      }
     }
+
+    for (const item of sourcePlan) {
+      const familyEntry = sourceFamilyCoverage[item.source_family] ?? {
+        planned: 0,
+        selected: 0,
+        attempted: 0,
+        accepted: 0
+      };
+      familyEntry.planned += 1;
+      if (item.selection_state === "selected") {
+        familyEntry.selected += 1;
+      }
+      sourceFamilyCoverage[item.source_family] = familyEntry;
+    }
+
+    const promotionCandidates = Object.entries(
+      attempts.reduce<Record<string, { source_family: string; attempted: number; accepted: number; confidenceSum: number }>>(
+        (acc, attempt) => {
+          const host = attempt.transport_host ?? hostFromUrl(attempt.source_url) ?? "unknown";
+          if (!host) {
+            return acc;
+          }
+          const sourceFamily = attempt.source_family ?? "unknown";
+          const isOpenWebCandidate =
+            sourceFamily.includes("open-web")
+            || sourceFamily.includes("dynamic-web")
+            || attempt.source_name.toLowerCase().includes("web discovery");
+          if (!isOpenWebCandidate) {
+            return acc;
+          }
+          const current = acc[host] ?? {
+            source_family: sourceFamily,
+            attempted: 0,
+            accepted: 0,
+            confidenceSum: 0
+          };
+          current.attempted += 1;
+          if (attempt.accepted_for_evidence ?? attempt.accepted) {
+            current.accepted += 1;
+            current.confidenceSum += attempt.confidence_score;
+          }
+          acc[host] = current;
+          return acc;
+        },
+        {}
+      )
+    )
+      .filter(([, value]) => value.accepted > 0)
+      .map(([host, value]) => ({
+        host,
+        source_family: value.source_family,
+        accepted_attempts: value.accepted,
+        attempted: value.attempted,
+        confidence_avg: Number((value.confidenceSum / Math.max(1, value.accepted)).toFixed(4)),
+        reason: value.accepted >= 2
+          ? "Repeated accepted evidence from dynamic host."
+          : "Dynamic host produced accepted evidence."
+      }))
+      .sort((left, right) => right.accepted_attempts - left.accepted_attempts)
+      .slice(0, 12);
 
     const attemptedSources = new Set(attempts.map((attempt) => attempt.source_name));
     const crawledSources = new Set(
@@ -1888,6 +2689,37 @@ export class ResearchOrchestrator {
       attemptedSources.size === 0 ? 0 : Number((pricedSources.size / attemptedSources.size).toFixed(4));
     const pricedCrawledSourceCoverageRatio =
       crawledSources.size === 0 ? 0 : Number((pricedSources.size / crawledSources.size).toFixed(4));
+    const familyShareBreakdown = Object.fromEntries(
+      Object.entries(
+        attempts.reduce<Record<string, number>>((acc, attempt) => {
+          const sourceFamily = attempt.source_family ?? "unknown";
+          acc[sourceFamily] = (acc[sourceFamily] ?? 0) + 1;
+          return acc;
+        }, {})
+      ).map(([family, count]) => [family, Number((count / Math.max(1, attempts.length)).toFixed(4))])
+    );
+    const laneHostHealthBreakdown = Object.fromEntries(
+      persistedSourceHealth.map((record) => {
+        const dimensions = Object.values((record as HostHealthRecord & { dimensions?: Record<string, unknown> }).dimensions ?? {});
+        const laneTotals = dimensions.reduce<Record<string, number>>((acc, value) => {
+          const lane = typeof (value as { crawl_lane?: unknown }).crawl_lane === "string"
+            ? String((value as { crawl_lane?: string }).crawl_lane)
+            : "unknown";
+          const attemptsForLane = Number((value as { total_attempts?: unknown }).total_attempts ?? 0);
+          acc[lane] = (acc[lane] ?? 0) + attemptsForLane;
+          return acc;
+        }, {});
+        return [record.host, laneTotals];
+      })
+    );
+    const unverifiedSearchSeedCount = attempts.filter((attempt) => {
+      if ((attempt.discovery_provenance ?? "seed") !== "seed") {
+        return false;
+      }
+      const family = (attempt.source_family ?? "").toLowerCase();
+      const isDynamicFamily = family.includes("open-web") || family.includes("dynamic-web") || family.includes("host-fingerprint");
+      return isDynamicFamily && looksLikeSearchUrl(attempt.source_url);
+    }).length;
 
     return {
       run_id: runId,
@@ -1899,6 +2731,7 @@ export class ResearchOrchestrator {
       rejected_candidates: attempts.filter((attempt) => !(attempt.accepted_for_evidence ?? attempt.accepted)).length,
       discovered_candidates: discoveredCandidates,
       accepted_from_discovery: acceptedFromDiscovery,
+      unverified_search_seed_count: unverifiedSearchSeedCount,
       priced_source_coverage_ratio: pricedSourceCoverageRatio,
       priced_crawled_source_coverage_ratio: pricedCrawledSourceCoverageRatio,
       source_candidate_breakdown: sourceCandidateBreakdown,
@@ -1906,13 +2739,38 @@ export class ResearchOrchestrator {
       auth_mode_breakdown: authModeBreakdown,
       failure_class_breakdown: failureClassBreakdown,
       acceptance_reason_breakdown: acceptanceReasonBreakdown,
+      scrape_recovery_diagnostics: {
+        attempted: scrapeRecoveryAttempted,
+        succeeded: scrapeRecoverySucceeded,
+        by_trigger: scrapeRecoveryByTrigger,
+        by_transport_kind: scrapeRecoveryByTransportKind,
+        by_acceptance_reason: scrapeRecoveryByAcceptanceReason
+      },
+      browser_overwrite_prevented_count: browserOverwritePreventedCount,
+      crawl_lane_breakdown: crawlLaneBreakdown,
+      family_share_breakdown: familyShareBreakdown,
+      lane_host_health_breakdown: laneHostHealthBreakdown,
+      source_family_coverage: sourceFamilyCoverage,
+      price_visibility_breakdown: priceVisibilityBreakdown,
+      unique_artwork_count: acceptedEvidenceRecords,
+      duplicate_listing_count: duplicateListingCount,
+      confidence_mix: confidenceMix,
+      freshness_mix: freshnessMix,
+      promotion_candidates: promotionCandidates,
       evaluation_metrics: buildEvaluationMetrics({
         attempts,
         sourcePlan,
         acceptedRecords: acceptedEvidenceRecords,
-        valuationEligibleRecords
+        valuationEligibleRecords,
+        pricedRecordCount: valuationEligibleRecords,
+        corePriceEvidenceCount: valuationEligibleRecords,
+        uniqueArtworkCount: acceptedEvidenceRecords
       }),
+      discovery_provider_diagnostics: discoveryProviderDiagnostics,
+      local_ai_analysis: localAiAnalysis,
       persisted_source_health: persistedSourceHealth,
+      persisted_source_metrics: persistedSourceMetrics,
+      recent_canaries: recentCanaries,
       valuation_generated: valuationGenerated,
       valuation_reason: valuationReason
     };

@@ -14,6 +14,7 @@ export interface DiscoveryConfig {
   webDiscoverySecondaryProvider?: DiscoveryProviderName;
   webDiscoveryApiKey?: string;
   webDiscoverySecondaryApiKey?: string;
+  searxngBaseUrl?: string;
   webDiscoveryDiagnostics?: DiscoveryProviderDiagnostics[];
   webDiscoveryAllowHostRegex?: string;
   webDiscoveryBlockHostTokens: string[];
@@ -45,10 +46,27 @@ interface TavilySearchPayload {
   results?: Array<{ url?: string }>;
 }
 
+interface SearxngSearchPayload {
+  results?: Array<{ url?: string }>;
+}
+
 interface DiscoveryProviderClient {
   name: Exclude<DiscoveryProviderName, "none">;
   configured(config: DiscoveryConfig): boolean;
   search(variant: string, config: DiscoveryConfig, fetchImpl: typeof fetch): Promise<string[]>;
+}
+
+interface ProviderDiagnosticsAccumulator {
+  provider: Exclude<DiscoveryProviderName, "none">;
+  enabled: boolean;
+  reason: string | null;
+  requests_used: number;
+  results_returned: number;
+  candidates_considered: number;
+  candidates_kept: number;
+  failover_invoked: boolean;
+  trimmed_by_caps: boolean;
+  budget_exhausted: boolean;
 }
 
 const PROFILE_DEFAULTS: Record<ResearchQuery["analysisMode"], DiscoveryProfileDefaults> = {
@@ -139,7 +157,10 @@ const TURKEY_PRIORITY_SITE_HOSTS = [
   "artam.com",
   "muzayede.app",
   "sanatfiyat.com",
-  "bayrakmuzayede.com"
+  "bayrakmuzayede.com",
+  "antikasa.com",
+  "alifart.com.tr",
+  "turelart.com"
 ];
 
 const INTERNATIONAL_PRIORITY_SITE_HOSTS = [
@@ -148,7 +169,11 @@ const INTERNATIONAL_PRIORITY_SITE_HOSTS = [
   "sothebys.com",
   "phillips.com",
   "christies.com",
-  "bonhams.com"
+  "bonhams.com",
+  "bidsquare.com",
+  "1stdibs.com",
+  "saatchiart.com",
+  "barnebys.com"
 ];
 
 function unique(values: string[]): string[] {
@@ -194,6 +219,47 @@ function toNumber(value: string | undefined, fallback: number): number {
     return fallback;
   }
   return parsed;
+}
+
+function discoveryRequestTimeoutMs(): number {
+  const parsed = Number(process.env.WEB_DISCOVERY_REQUEST_TIMEOUT_MS ?? 8_000);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 8_000;
+  }
+  return Math.max(1_000, Math.floor(parsed));
+}
+
+async function fetchWithTimeout(
+  fetchImpl: typeof fetch,
+  input: string,
+  init: RequestInit = {}
+): Promise<Response | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), discoveryRequestTimeoutMs());
+  try {
+    return await fetchImpl(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeSearxngBaseUrl(value: string | undefined): string {
+  const fallback = "http://127.0.0.1:8080";
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return trimmed.replace(/\/$/, "");
+  }
 }
 
 function normalizeUrl(candidateUrl: string): string | null {
@@ -294,11 +360,14 @@ function transliterateTurkish(value: string): string {
 
 export function buildDiscoveryConfigFromEnv(analysisMode?: ResearchQuery["analysisMode"]): DiscoveryConfig {
   const profile = PROFILE_DEFAULTS[analysisMode ?? "balanced"] ?? PROFILE_DEFAULTS.balanced;
-  const providerRaw = (process.env.WEB_DISCOVERY_PROVIDER ?? "none").trim().toLowerCase();
+  const providerRaw = (process.env.WEB_DISCOVERY_PROVIDER ?? "searxng").trim().toLowerCase();
   const secondaryProviderRaw = (process.env.WEB_DISCOVERY_SECONDARY_PROVIDER ?? "none").trim().toLowerCase();
-  const provider = providerRaw === "brave" || providerRaw === "tavily" ? providerRaw : "none";
+  const provider =
+    providerRaw === "brave" || providerRaw === "tavily" || providerRaw === "searxng" ? providerRaw : "none";
   const secondaryProvider =
-    secondaryProviderRaw === "brave" || secondaryProviderRaw === "tavily" ? secondaryProviderRaw : "none";
+    secondaryProviderRaw === "brave" || secondaryProviderRaw === "tavily" || secondaryProviderRaw === "searxng"
+      ? secondaryProviderRaw
+      : "none";
   const apiKey =
     provider === "brave"
       ? process.env.BRAVE_SEARCH_API_KEY?.trim()
@@ -313,7 +382,13 @@ export function buildDiscoveryConfigFromEnv(analysisMode?: ResearchQuery["analys
         : undefined;
   const analysisModeResolved = analysisMode ?? "balanced";
   const explicitWebDiscoveryEnabled = parseBoolean(process.env.WEB_DISCOVERY_ENABLED, analysisModeResolved === "comprehensive");
-  const webDiscoveryEnabled = explicitWebDiscoveryEnabled && analysisModeResolved === "comprehensive";
+  const balancedInventoryDiscovery = parseBoolean(process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY, true);
+  const webDiscoveryEnabled =
+    explicitWebDiscoveryEnabled
+    && (
+      analysisModeResolved === "comprehensive"
+      || (analysisModeResolved === "balanced" && balancedInventoryDiscovery)
+    );
 
   return {
     enabled: process.env.DISCOVERY_ENABLED !== "false",
@@ -334,6 +409,7 @@ export function buildDiscoveryConfigFromEnv(analysisMode?: ResearchQuery["analys
     webDiscoverySecondaryProvider: secondaryProvider,
     webDiscoveryApiKey: apiKey || undefined,
     webDiscoverySecondaryApiKey: secondaryApiKey || undefined,
+    searxngBaseUrl: normalizeSearxngBaseUrl(process.env.SEARXNG_BASE_URL),
     webDiscoveryAllowHostRegex: process.env.WEB_DISCOVERY_ALLOW_HOST_REGEX?.trim() || undefined,
     webDiscoveryBlockHostTokens: parseCsv(process.env.WEB_DISCOVERY_BLOCK_HOST_TOKENS, DEFAULT_DISCOVERY_BLOCK_HOST_TOKENS),
     webDiscoveryPreferredHostTokens: parseCsv(
@@ -357,13 +433,13 @@ const BRAVE_PROVIDER: DiscoveryProviderClient = {
     endpoint.searchParams.set("count", "20");
     endpoint.searchParams.set("safesearch", "moderate");
 
-    const response = await fetchImpl(endpoint.toString(), {
+    const response = await fetchWithTimeout(fetchImpl, endpoint.toString(), {
       headers: {
         Accept: "application/json",
         "X-Subscription-Token": config.webDiscoveryApiKey ?? ""
       }
     });
-    if (!response.ok) {
+    if (!response?.ok) {
       return [];
     }
     const payload = (await response.json()) as BraveSearchPayload;
@@ -375,7 +451,7 @@ const TAVILY_PROVIDER: DiscoveryProviderClient = {
   name: "tavily",
   configured: (config) => Boolean(config.webDiscoveryApiKey),
   async search(variant, config, fetchImpl) {
-    const response = await fetchImpl("https://api.tavily.com/search", {
+    const response = await fetchWithTimeout(fetchImpl, "https://api.tavily.com/search", {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -389,7 +465,7 @@ const TAVILY_PROVIDER: DiscoveryProviderClient = {
         max_results: 20
       })
     });
-    if (!response.ok) {
+    if (!response?.ok) {
       return [];
     }
     const payload = (await response.json()) as TavilySearchPayload;
@@ -397,15 +473,51 @@ const TAVILY_PROVIDER: DiscoveryProviderClient = {
   }
 };
 
+const SEARXNG_PROVIDER: DiscoveryProviderClient = {
+  name: "searxng",
+  configured: (config) => Boolean(config.searxngBaseUrl),
+  async search(variant, config, fetchImpl) {
+    const baseUrl = normalizeSearxngBaseUrl(config.searxngBaseUrl);
+    const endpoint = new URL("/search", `${baseUrl}/`);
+    endpoint.searchParams.set("q", variant);
+    endpoint.searchParams.set("format", "json");
+    endpoint.searchParams.set("safesearch", "0");
+    endpoint.searchParams.set("language", "all");
+
+    const response = await fetchWithTimeout(fetchImpl, endpoint.toString(), {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ArtBot/1.0; +https://artbot.local)"
+      }
+    });
+    if (!response?.ok) {
+      return [];
+    }
+    const payload = (await response.json()) as SearxngSearchPayload;
+    return (payload.results ?? []).map((entry) => entry.url ?? "").filter(Boolean);
+  }
+};
+
 function resolveDiscoveryProviders(config: DiscoveryConfig): DiscoveryProviderClient[] {
   const byName: Record<Exclude<DiscoveryProviderName, "none">, DiscoveryProviderClient> = {
     brave: BRAVE_PROVIDER,
-    tavily: TAVILY_PROVIDER
+    tavily: TAVILY_PROVIDER,
+    searxng: SEARXNG_PROVIDER
   };
 
-  return [config.webDiscoveryProvider, config.webDiscoverySecondaryProvider]
+  return unique(
+    [config.webDiscoveryProvider, config.webDiscoverySecondaryProvider]
+      .filter((name): name is Exclude<DiscoveryProviderName, "none"> => Boolean(name && name !== "none"))
+  )
     .filter((name): name is Exclude<DiscoveryProviderName, "none"> => Boolean(name && name !== "none"))
     .map((name) => byName[name]);
+}
+
+function providerMissingConfigReason(provider: Exclude<DiscoveryProviderName, "none">): string {
+  if (provider === "searxng") {
+    return "Missing SearXNG base URL.";
+  }
+  return "Missing API key.";
 }
 
 export function buildQueryVariants(query: ResearchQuery, maxVariants: number): string[] {
@@ -434,6 +546,14 @@ export function buildQueryVariants(query: ResearchQuery, maxVariants: number): s
     "auction result",
     "painting sold",
     "price realized",
+    "estimate range",
+    "hammer price",
+    "bid now",
+    "buy now",
+    "private sale",
+    "gallery inventory",
+    "sold listing",
+    "asking price",
     "hemen al",
     "listing price"
   ];
@@ -464,8 +584,8 @@ function buildWebDiscoveryQueryVariants(query: ResearchQuery, maxVariants: numbe
   const base = buildQueryVariants(query, maxVariants);
   const scopedQuery = [query.artist.trim(), query.title?.trim()].filter(Boolean).join(" ").trim() || query.artist.trim();
   const siteHosts = [
-    ...(query.turkeyFirst ? TURKEY_PRIORITY_SITE_HOSTS.slice(0, 4) : []),
-    ...(query.scope !== "turkey_only" ? INTERNATIONAL_PRIORITY_SITE_HOSTS.slice(0, 4) : [])
+    ...(query.turkeyFirst ? TURKEY_PRIORITY_SITE_HOSTS.slice(0, 8) : []),
+    ...(query.scope !== "turkey_only" ? INTERNATIONAL_PRIORITY_SITE_HOSTS.slice(0, 8) : [])
   ];
   const siteScoped = siteHosts.map((host) => `site:${host} "${scopedQuery}"`);
   if (siteScoped.length === 0) {
@@ -653,7 +773,16 @@ export async function discoverWebCandidates(
 
   const diagnostics: DiscoveryProviderDiagnostics[] = [];
 
-  const pushCandidate = (normalizedUrl: string, index: number, quality: number): void => {
+  const pushCandidate = (
+    normalizedUrl: string,
+    index: number,
+    quality: number,
+    providerState?: ProviderDiagnosticsAccumulator
+  ): void => {
+    if (providerState) {
+      providerState.candidates_considered += 1;
+    }
+
     const host = hostFromUrl(normalizedUrl);
     if (!host || !isHostAllowed(host, config)) {
       return;
@@ -664,6 +793,23 @@ export async function discoverWebCandidates(
 
     const currentDomainCandidates = perDomainUrls.get(host) ?? [];
     if (currentDomainCandidates.length >= config.maxUrlsPerDiscoveredDomain) {
+      if (providerState) {
+        providerState.trimmed_by_caps = true;
+      }
+      return;
+    }
+    if (!perDomainUrls.has(host) && perDomainUrls.size >= config.maxDiscoveredDomainsPerRun) {
+      if (providerState) {
+        providerState.trimmed_by_caps = true;
+        providerState.budget_exhausted = true;
+      }
+      return;
+    }
+    if (seenUrls.size >= config.maxTotalCandidatesPerRun) {
+      if (providerState) {
+        providerState.trimmed_by_caps = true;
+        providerState.budget_exhausted = true;
+      }
       return;
     }
 
@@ -686,9 +832,13 @@ export async function discoverWebCandidates(
       discoveredFromUrl: null
     });
     perDomainUrls.set(host, currentDomainCandidates);
+    if (providerState) {
+      providerState.candidates_kept += 1;
+    }
   };
 
-  for (const provider of providers) {
+  for (let providerIndex = 0; providerIndex < providers.length; providerIndex += 1) {
+    const provider = providers[providerIndex]!;
     const providerConfig =
       provider.name === config.webDiscoveryProvider
         ? config
@@ -697,31 +847,40 @@ export async function discoverWebCandidates(
             webDiscoveryProvider: provider.name,
             webDiscoveryApiKey: config.webDiscoverySecondaryApiKey ?? config.webDiscoveryApiKey
           };
+    const providerState: ProviderDiagnosticsAccumulator = {
+      provider: provider.name,
+      enabled: false,
+      reason: null,
+      requests_used: 0,
+      results_returned: 0,
+      candidates_considered: 0,
+      candidates_kept: 0,
+      failover_invoked: providerIndex > 0,
+      trimmed_by_caps: false,
+      budget_exhausted: false
+    };
 
     if (!provider.configured(providerConfig)) {
-      diagnostics.push({
-        provider: provider.name,
-        enabled: false,
-        reason: "Missing API key.",
-        requests_used: 0,
-        results_returned: 0
-      });
+      providerState.reason = providerMissingConfigReason(provider.name);
+      diagnostics.push(providerState);
       continue;
     }
 
-    let requestsUsed = 0;
-    let resultsReturned = 0;
+    providerState.enabled = true;
+    let providerUnavailable = false;
 
     for (const variant of variants) {
       let results: string[] = [];
       try {
         results = await provider.search(variant, providerConfig, fetchImpl);
-        requestsUsed += 1;
+        providerState.requests_used += 1;
       } catch {
-        continue;
+        providerUnavailable = true;
+        providerState.reason = "Provider request failed.";
+        break;
       }
 
-      resultsReturned += results.length;
+      providerState.results_returned += results.length;
       for (let index = 0; index < results.length; index += 1) {
         const rawUrl = results[index];
         if (!rawUrl) continue;
@@ -735,17 +894,31 @@ export async function discoverWebCandidates(
           continue;
         }
 
-        pushCandidate(normalizedUrl, index, hostQualityScore(host));
+        pushCandidate(normalizedUrl, index, hostQualityScore(host), providerState);
+      }
+
+      if (providerState.budget_exhausted) {
+        break;
       }
     }
 
-    diagnostics.push({
-      provider: provider.name,
-      enabled: true,
-      reason: null,
-      requests_used: requestsUsed,
-      results_returned: resultsReturned
-    });
+    if (!providerUnavailable && providerState.candidates_kept === 0 && providerState.reason == null) {
+      providerState.reason = "No usable discovery candidates returned.";
+    }
+
+    const shouldFailover = providerIndex < providers.length - 1 && providerState.candidates_kept === 0;
+    if (shouldFailover) {
+      providerState.failover_invoked = true;
+      providerState.reason = providerState.reason
+        ? `${providerState.reason} Failed over to ${providers[providerIndex + 1]!.name}.`
+        : `No usable discovery candidates returned; failed over to ${providers[providerIndex + 1]!.name}.`;
+    }
+
+    diagnostics.push(providerState);
+
+    if (providerState.candidates_kept > 0 || providerState.budget_exhausted) {
+      break;
+    }
   }
 
   if (perDomainUrls.size === 0 && variants.length > 0) {
@@ -754,13 +927,13 @@ export async function discoverWebCandidates(
       try {
         const endpoint = new URL("https://html.duckduckgo.com/html/");
         endpoint.searchParams.set("q", variant);
-        const response = await fetchImpl(endpoint.toString(), {
+        const response = await fetchWithTimeout(fetchImpl, endpoint.toString(), {
           headers: {
             Accept: "text/html,application/xhtml+xml",
             "User-Agent": "Mozilla/5.0 (compatible; ArtBot/1.0; +https://artbot.local)"
           }
         });
-        if (!response.ok) {
+        if (!response?.ok) {
           continue;
         }
         html = await response.text();

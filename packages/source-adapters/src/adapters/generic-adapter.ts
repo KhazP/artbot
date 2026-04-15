@@ -8,8 +8,10 @@ import type {
 } from "../types.js";
 import { deriveDefaultSourceCapabilities as buildDefaultCapabilities } from "../types.js";
 import {
+  buildAcceptanceExplanation,
   buildBlockedResult,
   buildRecordFromParsed,
+  buildNextStepHint,
   ensureRawPath,
   evaluateAcceptance,
   evaluateAccessDecision,
@@ -26,7 +28,7 @@ interface GenericAdapterOptions {
   country: string | null;
   city: string | null;
   baseUrl: string;
-  searchPath: string;
+  searchPath?: string | null;
   requiresAuth?: boolean;
   requiresLicense?: boolean;
   supportedAccessModes?: SourceAdapter["supportedAccessModes"];
@@ -49,7 +51,7 @@ export class GenericSourceAdapter implements SourceAdapter {
   public readonly crawlStrategies: SourceAdapter["crawlStrategies"];
   public readonly capabilities: SourceAdapter["capabilities"];
   private readonly baseUrl: string;
-  private readonly searchPath: string;
+  private readonly searchPath: string | null;
 
   constructor(options: GenericAdapterOptions) {
     this.id = options.id;
@@ -61,7 +63,7 @@ export class GenericSourceAdapter implements SourceAdapter {
     this.country = options.country;
     this.city = options.city;
     this.baseUrl = options.baseUrl;
-    this.searchPath = options.searchPath;
+    this.searchPath = options.searchPath ?? null;
     this.requiresAuth = Boolean(options.requiresAuth);
     this.requiresLicense = Boolean(options.requiresLicense);
     this.supportedAccessModes = options.supportedAccessModes ?? ["anonymous", "authorized", "licensed"];
@@ -76,6 +78,18 @@ export class GenericSourceAdapter implements SourceAdapter {
   }
 
   public async discoverCandidates(query: AdapterExtractionContext["query"]): Promise<SourceCandidate[]> {
+    if (!this.searchPath || this.searchPath.trim().length === 0) {
+      return [
+        {
+          url: this.baseUrl,
+          sourcePageType: this.sourcePageType === "lot" ? "listing" : this.sourcePageType,
+          provenance: "seed",
+          score: 0.55,
+          discoveredFromUrl: null
+        }
+      ];
+    }
+
     const q = encodeURIComponent([query.artist, query.title].filter(Boolean).join(" "));
     const url = `${this.baseUrl}${this.searchPath}${q}`;
 
@@ -99,7 +113,7 @@ export class GenericSourceAdapter implements SourceAdapter {
     const fetchedAt = new Date().toISOString();
     const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext);
     const rawSnapshotPath = ensureRawPath(context.evidenceDir, `${this.id}-${Date.now()}-cheap.html`);
-    writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown);
+    writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown, context.accessContext);
 
     const parsed = parseGenericLotFields(`${extracted.markdown} ${extracted.html}`, extracted.url);
     const sourceStatus = parsed.priceHidden ? "price_hidden" : decision.sourceAccessStatus;
@@ -118,7 +132,8 @@ export class GenericSourceAdapter implements SourceAdapter {
         sourceName: this.sourceName,
         city: this.city,
         country: this.country,
-        tier: this.tier
+        tier: this.tier,
+        capabilities: this.capabilities
       },
       candidate,
       context,
@@ -130,9 +145,17 @@ export class GenericSourceAdapter implements SourceAdapter {
     const attempt: SourceAttempt = {
       run_id: context.runId,
       source_name: this.sourceName,
+      source_family: this.capabilities.source_family,
+      venue_name: this.venueName,
       source_url: candidate.url,
       canonical_url: extracted.url,
       access_mode: context.accessContext.mode,
+      source_legal_posture: context.accessContext.legalPosture,
+      access_provenance_label: context.accessContext.accessProvenanceLabel ?? null,
+      session_identity: context.accessContext.sessionIdentity ?? null,
+      browser_identity: context.accessContext.browserIdentity ?? null,
+      proxy_identity: context.accessContext.proxyIdentity ?? null,
+      artifact_handling: context.accessContext.artifactHandling,
       source_access_status: sourceStatus,
       failure_class: undefined,
       access_reason: decision.accessReason,
@@ -177,7 +200,9 @@ export class GenericSourceAdapter implements SourceAdapter {
       valuation_lane: acceptance.valuationLane,
       acceptance_reason: acceptance.acceptanceReason,
       rejection_reason: acceptance.rejectionReason,
-      valuation_eligibility_reason: acceptance.valuationEligibilityReason
+      valuation_eligibility_reason: acceptance.valuationEligibilityReason,
+      acceptance_explanation: buildAcceptanceExplanation(this.sourceName, acceptance, sourceStatus),
+      next_step_hint: buildNextStepHint(this.sourceName, acceptance, sourceStatus)
     };
 
     const shouldEscalateForMissingPrice =

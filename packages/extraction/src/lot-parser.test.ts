@@ -121,6 +121,53 @@ describe("parseGenericLotFields numeric normalization", () => {
     expect(parsed.currency).toBe("USD");
   });
 
+  it("extracts estimate ranges from unquoted Next.js payload fields", () => {
+    const content = `
+      <html>
+        <body>
+          <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"lotData":{"auctionLots":[{"price":{"GBPHighEstimate":52486.05,"GBPLowEstimate":36740.24,"estimateHigh":100000,"estimateLow":70000,"hammerPrice":0}}]}}}}
+          </script>
+        </body>
+      </html>
+    `;
+
+    const parsed = parseGenericLotFields(content);
+    expect(parsed.priceType).toBe("estimate");
+    expect(parsed.estimateLow).toBe(70000);
+    expect(parsed.estimateHigh).toBe(100000);
+  });
+
+  it("parses Artam JSON detail payloads with hidden-price marker", () => {
+    const content = JSON.stringify({
+      status: true,
+      product: {
+        id: 60455,
+        artistName: "Abidin Dino (1913-1993)",
+        name: "Untitled",
+        lotno: "112",
+        auction_price: 0,
+        opening_price: "15000.00",
+        estimatedMin: "60000.00",
+        estimatedMax: "90000.00",
+        isShowPrice: false,
+        currency: {
+          code: "TRY"
+        }
+      }
+    });
+
+    const parsed = parseGenericLotFields(content);
+    expect(parsed.artistName).toContain("Abidin Dino");
+    expect(parsed.title).toBe("Untitled");
+    expect(parsed.lotNumber).toBe("112");
+    expect(parsed.priceType).toBe("estimate");
+    expect(parsed.estimateLow).toBe(60000);
+    expect(parsed.estimateHigh).toBe(90000);
+    expect(parsed.currency).toBe("TRY");
+    expect(parsed.priceHidden).toBe(true);
+  });
+
   it("treats inquiry-only pages with Shopify placeholder pricing as inquiry_only", () => {
     const content = `
       <html>

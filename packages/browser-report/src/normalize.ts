@@ -1,13 +1,17 @@
 import { z } from "zod";
 import type {
+  ReportCanary,
   ResearchRunReportData,
   ResearchRunReportItem,
   ReportAction,
   ReportComparable,
+  ReportDiscoveryDiagnostic,
   ReportDistributionItem,
+  ReportLocalAiAnalysis,
   ReportMetric,
   ReportRange,
   ReportReasonItem,
+  ReportSourceMetric,
   ReportSourcePlanItem,
   ReportTone
 } from "./types.js";
@@ -97,7 +101,13 @@ const externalItemSchema = z.object({
   image_url: z.string().nullable().optional(),
   valuation_confidence: z.number().nullable().optional(),
   accepted_for_valuation: z.boolean().optional(),
-  acceptance_reason: z.string().nullable().optional()
+  acceptance_reason: z.string().nullable().optional(),
+  source_access_status: z.string().nullable().optional(),
+  access_mode: z.string().nullable().optional(),
+  source_legal_posture: z.string().nullable().optional(),
+  access_provenance_label: z.string().nullable().optional(),
+  acceptance_explanation: z.string().nullable().optional(),
+  next_step_hint: z.string().nullable().optional()
 }).passthrough();
 
 const externalReportSchema = z.object({
@@ -141,6 +151,8 @@ const runPayloadSchema = z.object({
     total_attempts: z.number().int().nonnegative().optional(),
     total_records: z.number().int().nonnegative().optional(),
     valuation_eligible_records: z.number().int().nonnegative().optional(),
+    cluster_count: z.number().int().nonnegative().optional(),
+    review_item_count: z.number().int().nonnegative().optional(),
     priced_source_coverage_ratio: z.number().nullable().optional(),
     priced_crawled_source_coverage_ratio: z.number().nullable().optional(),
     evaluation_metrics: z.object({
@@ -148,6 +160,11 @@ const runPayloadSchema = z.object({
       priced_source_recall: z.number(),
       source_completeness_ratio: z.number(),
       valuation_readiness_ratio: z.number(),
+      priced_record_count: z.number().optional(),
+      core_price_evidence_count: z.number().optional(),
+      family_coverage_ratio: z.number().optional(),
+      unique_artwork_count: z.number().optional(),
+      blocked_access_share: z.number().optional(),
       manual_override_rate: z.number(),
       coverage_target: z.number(),
       coverage_target_met: z.boolean()
@@ -155,6 +172,67 @@ const runPayloadSchema = z.object({
     source_status_breakdown: z.record(z.string(), z.number()).default({}),
     acceptance_reason_breakdown: z.record(z.string(), z.number()).default({}),
     failure_class_breakdown: z.record(z.string(), z.number()).optional(),
+    discovery_provider_diagnostics: z.array(z.object({
+      provider: z.string(),
+      enabled: z.boolean(),
+      reason: z.string().nullable().optional(),
+      requests_used: z.number().int().nonnegative(),
+      results_returned: z.number().int().nonnegative(),
+      candidates_considered: z.number().int().nonnegative().default(0),
+      candidates_kept: z.number().int().nonnegative().default(0),
+      failover_invoked: z.boolean().default(false),
+      trimmed_by_caps: z.boolean().default(false),
+      budget_exhausted: z.boolean().default(false)
+    })).optional(),
+    local_ai_analysis: z.object({
+      decisions: z.object({
+        accepted: z.number().int().nonnegative(),
+        queued: z.number().int().nonnegative(),
+        rejected: z.number().int().nonnegative()
+      }),
+      deterministic_veto_count: z.number().int().nonnegative(),
+      confidence_band_counts: z.object({
+        low: z.number().int().nonnegative(),
+        medium: z.number().int().nonnegative(),
+        high: z.number().int().nonnegative()
+      }),
+      provider: z.string().nullable().optional(),
+      model: z.string().nullable().optional(),
+      avg_latency_ms: z.number().nullable().optional()
+    }).optional(),
+    persisted_source_metrics: z.array(z.object({
+      source_name: z.string(),
+      source_family: z.string(),
+      venue_name: z.string(),
+      legal_posture: z.string(),
+      total_attempts: z.number().int().nonnegative(),
+      reachable_count: z.number().int().nonnegative(),
+      parse_success_count: z.number().int().nonnegative(),
+      price_signal_count: z.number().int().nonnegative(),
+      accepted_for_evidence_count: z.number().int().nonnegative(),
+      valuation_ready_count: z.number().int().nonnegative(),
+      blocked_count: z.number().int().nonnegative(),
+      auth_required_count: z.number().int().nonnegative(),
+      failure_count: z.number().int().nonnegative(),
+      reliability_score: z.number(),
+      last_status: z.string(),
+      updated_at: z.string()
+    })).optional(),
+    recent_canaries: z.array(z.object({
+      family: z.string(),
+      source_name: z.string(),
+      fixture: z.string(),
+      source_page_type: z.string(),
+      legal_posture: z.string(),
+      expected_price_type: z.string().nullable().optional(),
+      observed_price_type: z.string(),
+      acceptance_reason: z.string(),
+      accepted_for_evidence: z.boolean(),
+      accepted_for_valuation: z.boolean(),
+      status: z.enum(["pass", "fail"]),
+      details: z.string(),
+      recorded_at: z.string()
+    })).optional(),
     valuation_generated: z.boolean().optional(),
     valuation_reason: z.string().optional()
   }).optional(),
@@ -198,7 +276,12 @@ const runPayloadSchema = z.object({
     overall_confidence: z.number().nullable().optional(),
     acceptance_reason: z.string().nullable().optional(),
     accepted_for_valuation: z.boolean().optional(),
-    source_access_status: z.string().nullable().optional()
+    source_access_status: z.string().nullable().optional(),
+    access_mode: z.string().nullable().optional(),
+    source_legal_posture: z.string().nullable().optional(),
+    access_provenance_label: z.string().nullable().optional(),
+    acceptance_explanation: z.string().nullable().optional(),
+    next_step_hint: z.string().nullable().optional()
   }).passthrough()).optional(),
   inventory: z.array(z.unknown()).optional(),
   attempts: z.array(z.object({
@@ -210,6 +293,7 @@ const runPayloadSchema = z.object({
     source_family: z.string().optional(),
     access_mode: z.string(),
     source_access_status: z.string(),
+    legal_posture: z.string().nullable().optional(),
     candidate_count: z.number().int().nonnegative(),
     status: z.string(),
     selection_state: z.string().optional(),
@@ -283,7 +367,7 @@ function buildOverviewMetrics(data: ResearchRunReportData): ReportMetric[] {
 }
 
 function buildCoverageMetrics(data: ResearchRunReportData): ReportMetric[] {
-  return [
+  const metrics: ReportMetric[] = [
     {
       label: "Total Attempts",
       value: formatInteger(data.metrics.totalAttempts),
@@ -305,6 +389,42 @@ function buildCoverageMetrics(data: ResearchRunReportData): ReportMetric[] {
       tone: toneForStatus(data.status)
     }
   ];
+
+  if (data.metrics.clusterCount != null) {
+    metrics.push({
+      label: "Clusters",
+      value: formatInteger(data.metrics.clusterCount),
+      tone: data.metrics.clusterCount > 0 ? "accent" : "muted"
+    });
+  }
+  if (data.metrics.reviewItemCount != null) {
+    metrics.push({
+      label: "Review Queue",
+      value: formatInteger(data.metrics.reviewItemCount),
+      tone: data.metrics.reviewItemCount > 0 ? "warning" : "success"
+    });
+  }
+  if (data.localAi) {
+    metrics.push(
+      {
+        label: "AI Accepted",
+        value: formatInteger(data.localAi.accepted),
+        tone: data.localAi.accepted > 0 ? "success" : "muted"
+      },
+      {
+        label: "AI Queued",
+        value: formatInteger(data.localAi.queued),
+        tone: data.localAi.queued > 0 ? "warning" : "muted"
+      },
+      {
+        label: "AI Rejected",
+        value: formatInteger(data.localAi.rejected),
+        tone: data.localAi.rejected > 0 ? "danger" : "muted"
+      }
+    );
+  }
+
+  return metrics;
 }
 
 function buildEvaluationMetricItems(
@@ -327,6 +447,27 @@ function buildEvaluationMetricItems(
       tone: metrics.coverage_target_met ? "success" : "danger",
       hint: `Target ${Math.round(metrics.coverage_target * 100)}%`
     },
+    ...(metrics.priced_record_count != null
+      ? [{
+          label: "Priced Records",
+          value: formatInteger(metrics.priced_record_count),
+          tone: metrics.priced_record_count >= 120 ? "success" : "warning"
+        } satisfies ReportMetric]
+      : []),
+    ...(metrics.family_coverage_ratio != null
+      ? [{
+          label: "Family Coverage",
+          value: formatPercent(metrics.family_coverage_ratio),
+          tone: metrics.family_coverage_ratio >= 0.7 ? "success" : "warning"
+        } satisfies ReportMetric]
+      : []),
+    ...(metrics.blocked_access_share != null
+      ? [{
+          label: "Blocked Share",
+          value: formatPercent(metrics.blocked_access_share),
+          tone: metrics.blocked_access_share < 0.25 ? "success" : "danger"
+        } satisfies ReportMetric]
+      : []),
     {
       label: "Priced Source Recall",
       value: formatPercent(metrics.priced_source_recall),
@@ -364,7 +505,12 @@ function normalizeExternalItem(item: z.infer<typeof externalItemSchema>, index: 
     valuationConfidence: item.valuation_confidence ?? null,
     acceptedForValuation: Boolean(item.accepted_for_valuation),
     acceptanceReason: item.acceptance_reason ?? null,
-    sourceAccessStatus: null,
+    sourceAccessStatus: item.source_access_status ?? null,
+    accessMode: item.access_mode ?? null,
+    legalPosture: item.source_legal_posture ?? null,
+    accessProvenanceLabel: item.access_provenance_label ?? null,
+    acceptanceExplanation: item.acceptance_explanation ?? null,
+    nextStepHint: item.next_step_hint ?? null,
     detail: null
   };
 }
@@ -410,6 +556,13 @@ function normalizeRunRecord(item: Record<string, unknown>, index: number): Resea
     acceptedForValuation: Boolean(item.accepted_for_valuation),
     acceptanceReason: typeof item.acceptance_reason === "string" ? item.acceptance_reason : null,
     sourceAccessStatus: typeof item.source_access_status === "string" ? item.source_access_status : null,
+    accessMode: typeof item.access_mode === "string" ? item.access_mode : null,
+    legalPosture: typeof item.source_legal_posture === "string" ? item.source_legal_posture : null,
+    accessProvenanceLabel:
+      typeof item.access_provenance_label === "string" ? item.access_provenance_label : null,
+    acceptanceExplanation:
+      typeof item.acceptance_explanation === "string" ? item.acceptance_explanation : null,
+    nextStepHint: typeof item.next_step_hint === "string" ? item.next_step_hint : null,
     detail: detailParts.length > 0 ? detailParts.join(" · ") : null
   };
 }
@@ -468,6 +621,7 @@ function buildSourcePlanItems(
     source_family?: string;
     access_mode: string;
     source_access_status: string;
+    legal_posture?: string | null;
     candidate_count: number;
     status: string;
     selection_state?: string;
@@ -482,6 +636,7 @@ function buildSourcePlanItems(
     sourceFamily: item.source_family ?? "unknown",
     accessMode: item.access_mode,
     accessStatus: item.source_access_status,
+    legalPosture: item.legal_posture ?? null,
     candidateCount: item.candidate_count,
     status: item.status,
     selectionState: item.selection_state ?? item.status,
@@ -489,6 +644,91 @@ function buildSourcePlanItems(
     priorityRank: item.priority_rank ?? 0,
     skipReason: item.skip_reason ?? null
   }));
+}
+
+function buildSourceMetrics(
+  input: z.infer<typeof runPayloadSchema>["summary"] | undefined
+): ReportSourceMetric[] {
+  return (input?.persisted_source_metrics ?? [])
+    .slice()
+    .sort((left, right) => right.reliability_score - left.reliability_score)
+    .map((item) => ({
+      sourceName: item.source_name,
+      sourceFamily: item.source_family,
+      venueName: item.venue_name,
+      legalPosture: item.legal_posture,
+      reliabilityScore: item.reliability_score,
+      totalAttempts: item.total_attempts,
+      reachableCount: item.reachable_count,
+      parseSuccessCount: item.parse_success_count,
+      priceSignalCount: item.price_signal_count,
+      acceptedForEvidenceCount: item.accepted_for_evidence_count,
+      valuationReadyCount: item.valuation_ready_count,
+      blockedCount: item.blocked_count,
+      authRequiredCount: item.auth_required_count,
+      lastStatus: item.last_status
+    }));
+}
+
+function buildCanaries(
+  input: z.infer<typeof runPayloadSchema>["summary"] | undefined
+): ReportCanary[] {
+  return (input?.recent_canaries ?? []).map((item) => ({
+    family: item.family,
+    sourceName: item.source_name,
+    fixture: item.fixture,
+    sourcePageType: item.source_page_type,
+    legalPosture: item.legal_posture,
+    expectedPriceType: item.expected_price_type ?? null,
+    observedPriceType: item.observed_price_type,
+    acceptanceReason: item.acceptance_reason,
+    acceptedForEvidence: item.accepted_for_evidence,
+    acceptedForValuation: item.accepted_for_valuation,
+    status: item.status,
+    details: item.details,
+    recordedAt: item.recorded_at
+  }));
+}
+
+function buildDiscoveryDiagnostics(
+  input: z.infer<typeof runPayloadSchema>["summary"] | undefined
+): ReportDiscoveryDiagnostic[] {
+  return (input?.discovery_provider_diagnostics ?? []).map((item) => ({
+    provider: item.provider,
+    enabled: item.enabled,
+    reason: item.reason ?? null,
+    requestsUsed: item.requests_used,
+    resultsReturned: item.results_returned,
+    candidatesConsidered: item.candidates_considered ?? 0,
+    candidatesKept: item.candidates_kept ?? 0,
+    failoverInvoked: item.failover_invoked ?? false,
+    trimmedByCaps: item.trimmed_by_caps ?? false,
+    budgetExhausted: item.budget_exhausted ?? false
+  }));
+}
+
+function buildLocalAiAnalysis(
+  input: z.infer<typeof runPayloadSchema>["summary"] | undefined
+): ReportLocalAiAnalysis | null {
+  const localAi = input?.local_ai_analysis;
+  if (!localAi) {
+    return null;
+  }
+
+  return {
+    accepted: localAi.decisions.accepted,
+    queued: localAi.decisions.queued,
+    rejected: localAi.decisions.rejected,
+    deterministicVetoCount: localAi.deterministic_veto_count,
+    confidenceBands: {
+      low: localAi.confidence_band_counts.low,
+      medium: localAi.confidence_band_counts.medium,
+      high: localAi.confidence_band_counts.high
+    },
+    provider: localAi.provider ?? null,
+    model: localAi.model ?? null,
+    avgLatencyMs: localAi.avg_latency_ms ?? null
+  };
 }
 
 function finalizeReport(data: Omit<ResearchRunReportData, "overviewMetrics" | "coverageMetrics" | "sourceHealthItems">): ResearchRunReportData {
@@ -526,7 +766,9 @@ function normalizeExternalReport(input: z.infer<typeof externalReportSchema>): R
       pricedCoverageAttempted: input.metrics.pricedCoverageAttempted ?? null,
       totalAttempts: input.metrics.accepted + input.metrics.rejected,
       totalRecords: records.length,
-      valuationEligible: records.filter((item) => item.acceptedForValuation).length
+      valuationEligible: records.filter((item) => item.acceptedForValuation).length,
+      clusterCount: null,
+      reviewItemCount: null
     },
     sourceHealth,
     valuation: {
@@ -540,6 +782,9 @@ function normalizeExternalReport(input: z.infer<typeof externalReportSchema>): R
     evaluationMetrics: [],
     recommendedActions: [],
     sourcePlan: [],
+    sourceMetrics: [],
+    canaries: [],
+    discoveryDiagnostics: [],
     reasonBreakdown: buildReasonItems(
       records.reduce<Record<string, number>>((acc, item) => {
         if (!item.acceptanceReason) return acc;
@@ -548,6 +793,7 @@ function normalizeExternalReport(input: z.infer<typeof externalReportSchema>): R
       }, {})
     ),
     failureBreakdown: [],
+    localAi: null,
     gaps: [],
     diagnosticsNotes: input.valuation?.generated
       ? []
@@ -578,6 +824,10 @@ function normalizeRunPayload(input: z.infer<typeof runPayloadSchema>): ResearchR
     range("Estimate Lane", input.valuation?.laneRanges?.estimate?.low, input.valuation?.laneRanges?.estimate?.high, "TRY"),
     range("Asking Lane", input.valuation?.laneRanges?.asking?.low, input.valuation?.laneRanges?.asking?.high, "TRY")
   ].filter((entry): entry is ReportRange => Boolean(entry));
+  const sourceMetrics = buildSourceMetrics(summary);
+  const canaries = buildCanaries(summary);
+  const discoveryDiagnostics = buildDiscoveryDiagnostics(summary);
+  const localAi = buildLocalAiAnalysis(summary);
 
   return finalizeReport({
     runId: input.run.id,
@@ -595,7 +845,9 @@ function normalizeRunPayload(input: z.infer<typeof runPayloadSchema>): ResearchR
       pricedCoverageAttempted: summary?.priced_source_coverage_ratio ?? null,
       totalAttempts: summary?.total_attempts ?? records.length,
       totalRecords: summary?.total_records ?? records.length,
-      valuationEligible: summary?.valuation_eligible_records ?? records.filter((item) => item.acceptedForValuation).length
+      valuationEligible: summary?.valuation_eligible_records ?? records.filter((item) => item.acceptedForValuation).length,
+      clusterCount: summary?.cluster_count ?? null,
+      reviewItemCount: summary?.review_item_count ?? null
     },
     sourceHealth,
     valuation: {
@@ -615,11 +867,28 @@ function normalizeRunPayload(input: z.infer<typeof runPayloadSchema>): ResearchR
     evaluationMetrics: buildEvaluationMetricItems(summary),
     recommendedActions: buildActions(input.recommended_actions),
     sourcePlan: buildSourcePlanItems(input.source_plan),
+    sourceMetrics,
+    canaries,
+    discoveryDiagnostics,
     reasonBreakdown: buildReasonItems(summary?.acceptance_reason_breakdown),
     failureBreakdown: buildReasonItems(summary?.failure_class_breakdown),
+    localAi,
     gaps: input.gaps ?? [],
     diagnosticsNotes: [
       ...(input.valuation?.generated ?? summary?.valuation_generated ? [] : [valuationReason]),
+      ...(localAi
+        ? [
+            `Local AI: accepted=${localAi.accepted} queued=${localAi.queued} rejected=${localAi.rejected} veto=${localAi.deterministicVetoCount}${localAi.model ? ` · model=${localAi.model}` : ""}`
+          ]
+        : []),
+      ...discoveryDiagnostics.map(
+        (item) =>
+          `${item.provider}: ${item.enabled ? "enabled" : "disabled"} · requests ${item.requestsUsed} · results ${item.resultsReturned}${item.reason ? ` · ${item.reason}` : ""}`
+      ),
+      ...canaries.slice(0, 4).map(
+        (item) =>
+          `Canary ${item.status.toUpperCase()} · ${item.sourceName} · ${item.observedPriceType}${item.expectedPriceType ? ` vs ${item.expectedPriceType}` : ""}`
+      ),
       ...((input.attempts ?? [])
         .map((attempt) => (isRecord(attempt) && typeof attempt.blocker_reason === "string" ? attempt.blocker_reason : null))
         .filter((entry): entry is string => Boolean(entry))

@@ -13,9 +13,19 @@ import {
 } from "./inventory.js";
 import {
   artifactManifestSchema,
+  canaryResultSchema,
+  crawlLaneSchema,
+  discoveryProviderDiagnosticsSchema,
   evaluationMetricsSchema,
   hostHealthRecordSchema,
+  localAiAnalysisSummarySchema,
+  localAiDecisionTraceSchema,
+  priceVisibilitySchema,
+  promotionCandidateSchema,
   recommendedActionSchema,
+  scrapeRecoveryDiagnosticsSchema,
+  sourceFamilyCoverageSchema,
+  sourceHealthRecordSchema,
   sourcePlanItemSchema
 } from "./operations.js";
 import { researchQuerySchema } from "./query.js";
@@ -45,6 +55,7 @@ export const runSummarySchema = z.object({
   rejected_candidates: z.number().int().nonnegative(),
   discovered_candidates: z.number().int().nonnegative(),
   accepted_from_discovery: z.number().int().nonnegative(),
+  unverified_search_seed_count: z.number().int().nonnegative().optional(),
   priced_source_coverage_ratio: z.number().min(0).max(1).optional(),
   priced_crawled_source_coverage_ratio: z.number().min(0).max(1).optional(),
   price_type_breakdown: z
@@ -92,8 +103,32 @@ export const runSummarySchema = z.object({
       z.number().int().nonnegative()
     )
     .optional(),
+  scrape_recovery_diagnostics: scrapeRecoveryDiagnosticsSchema.optional(),
+  browser_overwrite_prevented_count: z.number().int().nonnegative().optional(),
+  crawl_lane_breakdown: z.record(crawlLaneSchema, z.number().int().nonnegative()).optional(),
+  family_share_breakdown: z.record(z.string(), z.number().min(0).max(1)).optional(),
+  lane_host_health_breakdown: z.record(z.string(), z.record(z.string(), z.number())).optional(),
+  source_family_coverage: sourceFamilyCoverageSchema.optional(),
+  price_visibility_breakdown: z.record(priceVisibilitySchema, z.number().int().nonnegative()).optional(),
+  unique_artwork_count: z.number().int().nonnegative().optional(),
+  duplicate_listing_count: z.number().int().nonnegative().optional(),
+  confidence_mix: z.object({
+    high: z.number().int().nonnegative(),
+    medium: z.number().int().nonnegative(),
+    low: z.number().int().nonnegative()
+  }).optional(),
+  freshness_mix: z.object({
+    fresh: z.number().int().nonnegative(),
+    stale: z.number().int().nonnegative(),
+    undated: z.number().int().nonnegative()
+  }).optional(),
+  promotion_candidates: z.array(promotionCandidateSchema).optional(),
   evaluation_metrics: evaluationMetricsSchema.optional(),
+  discovery_provider_diagnostics: z.array(discoveryProviderDiagnosticsSchema).optional(),
+  local_ai_analysis: localAiAnalysisSummarySchema.optional(),
   persisted_source_health: z.array(hostHealthRecordSchema).optional(),
+  persisted_source_metrics: z.array(sourceHealthRecordSchema).optional(),
+  recent_canaries: z.array(canaryResultSchema).optional(),
   valuation_generated: z.boolean(),
   valuation_reason: z.string()
 });
@@ -119,6 +154,7 @@ export const artistMarketInventoryResultsPayloadSchema = z.object({
   clusters: z.array(artworkClusterSchema),
   cluster_memberships: z.array(clusterMembershipSchema),
   review_queue: z.array(reviewItemSchema),
+  local_ai_decisions: z.array(localAiDecisionTraceSchema).optional(),
   source_hosts: z.array(sourceHostSchema),
   checkpoints: z.array(crawlCheckpointSchema),
   artifacts: artistMarketInventoryArtifactsSchema
@@ -134,6 +170,9 @@ export const runDetailsResponseSchema = z.object({
   recommended_actions: z.array(recommendedActionSchema).optional(),
   artifact_manifest: artifactManifestSchema.optional(),
   persisted_source_health: z.array(hostHealthRecordSchema).optional(),
+  persisted_source_metrics: z.array(sourceHealthRecordSchema).optional(),
+  recent_canaries: z.array(canaryResultSchema).optional(),
+  local_ai_decisions: z.array(localAiDecisionTraceSchema).optional(),
   valuation: z.unknown().optional(),
   duplicates: z.array(priceRecordSchema).optional(),
   per_painting_stats: z.array(z.unknown()).optional(),

@@ -219,3 +219,37 @@ describe("ArtistMarketInventoryOrchestrator buildRunSummary", () => {
     expect(summary.accepted_from_discovery).toBe(1);
   });
 });
+
+describe("ArtistMarketInventoryOrchestrator buildFailureAttempt", () => {
+  it("uses the provided source family instead of adapter id", () => {
+    const run = makeRun();
+    const buildFailureAttempt = (ArtistMarketInventoryOrchestrator.prototype as any).buildFailureAttempt as (
+      run: RunEntity,
+      frontier: any,
+      sourceFamily: string,
+      sourceAccessStatus: SourceAttempt["source_access_status"],
+      error: string
+    ) => SourceAttempt;
+
+    const attempt = buildFailureAttempt.call(
+      {},
+      run,
+      {
+        source_name: "Source",
+        adapter_id: "adapter-id",
+        source_host: "example.com",
+        source_page_type: "listing",
+        provenance: "seed",
+        score: 0.4,
+        discovered_from_url: null,
+        url: "https://example.com/listing",
+      },
+      "artam-auction-family",
+      "public_access",
+      "timeout"
+    );
+
+    expect(attempt.source_family).toBe("artam-auction-family");
+    expect(attempt.source_family).not.toBe("adapter-id");
+  });
+});

@@ -26,6 +26,21 @@ function isFiniteNumber(value: number | null): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function hasValuationNumericSignal(parsed: GenericParsedFields): boolean {
+  if (parsed.priceType === "estimate") {
+    return isFiniteNumber(parsed.estimateLow) || isFiniteNumber(parsed.estimateHigh);
+  }
+  if (
+    parsed.priceType === "asking_price"
+    || parsed.priceType === "hammer_price"
+    || parsed.priceType === "realized_price"
+    || parsed.priceType === "realized_with_buyers_premium"
+  ) {
+    return isFiniteNumber(parsed.priceAmount);
+  }
+  return false;
+}
+
 function normalizeTitle(value: string | null | undefined): string {
   return (value ?? "")
     .toLowerCase()
@@ -198,6 +213,96 @@ function tierAdjustment(tier: 1 | 2 | 3 | 4): number {
   return -0.08;
 }
 
+function sanitizeSensitiveArtifactText(content: string): string {
+  return content
+    .replace(/(authorization["'\s:=]+bearer\s+)[^"'\\\s<]+/gi, "$1[REDACTED]")
+    .replace(/(x-api-key["'\s:=]+)[^"'\\\s<]+/gi, "$1[REDACTED]")
+    .replace(/(set-cookie["'\s:=]+)[^\n<]+/gi, "$1[REDACTED]")
+    .replace(/((?:access_token|auth_token|session_token|csrf_token|_csrf|token)["']?\s*[:=]\s*["'])[^"']+(["'])/gi, "$1[REDACTED]$2")
+    .replace(/((?:sessionid|sid|remember_token)=)[^;"'\s<]+/gi, "$1[REDACTED]");
+}
+
+function describeAcceptanceReason(reason: AcceptanceReason): string {
+  switch (reason) {
+    case "valuation_ready":
+      return "Matched record with a numeric realized price ready for valuation.";
+    case "estimate_range_ready":
+      return "Matched record with a usable estimate range ready for valuation.";
+    case "asking_price_ready":
+      return "Matched record with a usable asking price ready for valuation.";
+    case "inquiry_only_evidence":
+      return "Relevant record was captured, but the venue only exposed inquiry-only pricing.";
+    case "price_hidden_evidence":
+      return "Relevant record was captured, but the numeric price remained hidden.";
+    case "entity_mismatch":
+      return "The extracted page did not match the requested artist or work closely enough.";
+    case "generic_shell_page":
+      return "The fetched page looked like a shell, listing, or navigation page rather than an artwork record.";
+    case "missing_numeric_price":
+      return "The record matched the query, but no reliable numeric price was parsed.";
+    case "missing_currency":
+      return "A price-like value was found, but the currency signal was missing.";
+    case "missing_estimate_range":
+      return "The record looked like an estimate page, but a complete low/high range was not parsed.";
+    case "unknown_price_type":
+      return "The page carried some market signal, but the price type could not be classified confidently.";
+    case "blocked_access":
+      return "The source could not be accessed lawfully or reliably for this attempt.";
+  }
+}
+
+export function buildAcceptanceExplanation(
+  sourceName: string,
+  acceptance: AttemptAcceptanceDetails,
+  sourceStatus: SourceAccessStatus
+): string {
+  const statusSuffix =
+    sourceStatus === "licensed_access"
+      ? " Licensed access was used."
+      : sourceStatus === "auth_required"
+        ? " An authorized session is still required."
+        : sourceStatus === "price_hidden"
+          ? " The venue kept price details hidden."
+          : sourceStatus === "blocked"
+            ? " The source access path was blocked."
+            : "";
+  return `${sourceName}: ${describeAcceptanceReason(acceptance.acceptanceReason)}${statusSuffix}`;
+}
+
+export function buildNextStepHint(
+  sourceName: string,
+  acceptance: AttemptAcceptanceDetails,
+  sourceStatus: SourceAccessStatus
+): string | null {
+  if (sourceStatus === "auth_required") {
+    return `Refresh or capture an authorized session for ${sourceName} before rerunning.`;
+  }
+  if (sourceStatus === "blocked") {
+    return `Review the access path for ${sourceName} before rerunning live traffic.`;
+  }
+  if (acceptance.acceptedForValuation) {
+    return "Keep this record in the priced comparable set unless a human reviewer overrides it.";
+  }
+  switch (acceptance.acceptanceReason) {
+    case "inquiry_only_evidence":
+    case "price_hidden_evidence":
+      return `Keep ${sourceName} as evidence-only and add another priced source family for valuation coverage.`;
+    case "missing_numeric_price":
+    case "missing_currency":
+    case "missing_estimate_range":
+    case "unknown_price_type":
+      return `Replay the stored snapshot for ${sourceName} and repair the source-specific parsing logic.`;
+    case "entity_mismatch":
+      return "Exclude this candidate and refine discovery terms or source-family routing.";
+    case "generic_shell_page":
+      return `Promote a lot-detail URL for ${sourceName} instead of keeping the shell page.`;
+    case "blocked_access":
+      return `Resolve ${sourceName} access gating before retrying this source.`;
+    default:
+      return null;
+  }
+}
+
 export function estimateEntityMatchConfidence(parsedTitle: string | null, queryTitle?: string): number {
   const parsed = normalizeTitle(parsedTitle);
   const query = normalizeTitle(queryTitle);
@@ -286,12 +391,23 @@ export function evaluateAcceptance(
     };
   }
 
-  if (parsed.priceType === "inquiry_only" || parsed.priceHidden) {
+  if (parsed.priceType === "inquiry_only") {
     return {
       acceptedForEvidence: true,
       acceptedForValuation: false,
       valuationLane: "none",
-      acceptanceReason: parsed.priceType === "inquiry_only" ? "inquiry_only_evidence" : "price_hidden_evidence",
+      acceptanceReason: "inquiry_only_evidence",
+      rejectionReason: "Price hidden or inquiry-only record retained only as evidence.",
+      valuationEligibilityReason: "Price hidden / inquiry-only records are excluded from valuation."
+    };
+  }
+
+  if (parsed.priceHidden && !hasValuationNumericSignal(parsed)) {
+    return {
+      acceptedForEvidence: true,
+      acceptedForValuation: false,
+      valuationLane: "none",
+      acceptanceReason: "price_hidden_evidence",
       rejectionReason: "Price hidden or inquiry-only record retained only as evidence.",
       valuationEligibilityReason: "Price hidden / inquiry-only records are excluded from valuation."
     };
@@ -433,13 +549,18 @@ export function ensureRawPath(evidenceDir: string, fileName: string): string {
   return rawPath;
 }
 
-export function writeRawSnapshot(filePath: string, content: string): void {
+export function writeRawSnapshot(
+  filePath: string,
+  content: string,
+  accessContext?: { artifactHandling?: "standard" | "scrubbed_sensitive" | "internal_only" }
+): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, "utf-8");
+  const payload = accessContext?.artifactHandling === "standard" ? content : sanitizeSensitiveArtifactText(content);
+  fs.writeFileSync(filePath, payload, "utf-8");
 }
 
 export function buildBlockedResult(
-  adapter: Pick<SourceAdapter, "sourceName">,
+  adapter: Pick<SourceAdapter, "sourceName" | "venueName" | "capabilities">,
   candidate: SourceCandidate,
   context: AdapterExtractionContext,
   decision: AdapterStatusDecision
@@ -464,15 +585,33 @@ export function buildBlockedResult(
       },
       null,
       2
-    )
+    ),
+    context.accessContext
   );
+
+  const blockedAcceptance: AttemptAcceptanceDetails = {
+    acceptedForEvidence: false,
+    acceptedForValuation: false,
+    valuationLane: "none",
+    acceptanceReason: "blocked_access",
+    rejectionReason: decision.blockerReason ?? decision.accessReason,
+    valuationEligibilityReason: "Source blocked."
+  };
 
   const attempt: SourceAttempt = {
     run_id: context.runId,
     source_name: adapter.sourceName,
+    source_family: adapter.capabilities.source_family,
+    venue_name: adapter.venueName,
     source_url: candidate.url,
     canonical_url: candidate.url,
     access_mode: context.accessContext.mode,
+    source_legal_posture: context.accessContext.legalPosture,
+    access_provenance_label: context.accessContext.accessProvenanceLabel ?? null,
+    session_identity: context.accessContext.sessionIdentity ?? null,
+    browser_identity: context.accessContext.browserIdentity ?? null,
+    proxy_identity: context.accessContext.proxyIdentity ?? null,
+    artifact_handling: context.accessContext.artifactHandling,
     source_access_status: decision.sourceAccessStatus,
     failure_class: "access_blocked",
     access_reason: decision.accessReason,
@@ -505,7 +644,9 @@ export function buildBlockedResult(
     valuation_lane: "none",
     acceptance_reason: "blocked_access",
     rejection_reason: decision.blockerReason ?? decision.accessReason,
-    valuation_eligibility_reason: "Source blocked."
+    valuation_eligibility_reason: "Source blocked.",
+    acceptance_explanation: buildAcceptanceExplanation(adapter.sourceName, blockedAcceptance, decision.sourceAccessStatus),
+    next_step_hint: buildNextStepHint(adapter.sourceName, blockedAcceptance, decision.sourceAccessStatus)
   };
 
   return {
@@ -630,7 +771,7 @@ export function extractHrefCandidates(
 }
 
 export function buildRecordFromParsed(
-  adapter: Pick<SourceAdapter, "venueName" | "venueType" | "sourceName" | "city" | "country" | "tier">,
+  adapter: Pick<SourceAdapter, "venueName" | "venueType" | "sourceName" | "city" | "country" | "tier" | "capabilities">,
   candidate: SourceCandidate,
   context: AdapterExtractionContext,
   parsed: GenericParsedFields,
@@ -665,8 +806,16 @@ export function buildRecordFromParsed(
     city: adapter.city,
     country: adapter.country,
     source_name: adapter.sourceName,
+    source_family: adapter.capabilities.source_family,
     source_url: candidate.url,
     source_page_type: candidate.sourcePageType,
+    access_mode: context.accessContext.mode,
+    source_legal_posture: context.accessContext.legalPosture,
+    access_provenance_label: context.accessContext.accessProvenanceLabel ?? null,
+    session_identity: context.accessContext.sessionIdentity ?? null,
+    browser_identity: context.accessContext.browserIdentity ?? null,
+    proxy_identity: context.accessContext.proxyIdentity ?? null,
+    artifact_handling: context.accessContext.artifactHandling,
     sale_or_listing_date: parsed.saleDate,
     lot_number: parsed.lotNumber,
     price_type: parsed.priceType,
@@ -695,6 +844,16 @@ export function buildRecordFromParsed(
     valuation_eligibility_reason: acceptance.valuationEligibilityReason,
     price_hidden: parsed.priceHidden,
     source_access_status: parsed.priceHidden ? "price_hidden" : context.accessContext.sourceAccessStatus,
+    acceptance_explanation: buildAcceptanceExplanation(
+      adapter.sourceName,
+      acceptance,
+      parsed.priceHidden ? "price_hidden" : context.accessContext.sourceAccessStatus
+    ),
+    next_step_hint: buildNextStepHint(
+      adapter.sourceName,
+      acceptance,
+      parsed.priceHidden ? "price_hidden" : context.accessContext.sourceAccessStatus
+    ),
     notes: [
       `discovery:${candidate.provenance}`,
       context.query.title ? `query_title_hint:${context.query.title}` : "query_title_hint:none"

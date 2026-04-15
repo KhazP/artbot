@@ -41,7 +41,7 @@ describe("buildEvaluationMetrics", () => {
     });
 
     expect(metrics.priced_source_recall).toBe(0.5);
-    expect(metrics.coverage_target_met).toBe(true);
+    expect(metrics.coverage_target_met).toBe(false);
   });
 
   it("keeps source recall separate when priced evidence coverage is healthy", () => {
@@ -78,6 +78,8 @@ describe("buildEvaluationMetrics", () => {
 
     expect(metrics.priced_source_recall).toBe(0.5);
     expect(metrics.valuation_readiness_ratio).toBe(0.75);
-    expect(metrics.coverage_target_met).toBe(true);
+    expect(metrics.coverage_target_met).toBe(false);
+    expect(metrics.priced_record_count).toBe(3);
+    expect(metrics.family_coverage_ratio).toBe(0);
   });
 });

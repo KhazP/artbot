@@ -42,10 +42,12 @@ describe("discovery", () => {
   it("enables Brave web discovery only in comprehensive mode with api key", () => {
     const originalProvider = process.env.WEB_DISCOVERY_PROVIDER;
     const originalEnabled = process.env.WEB_DISCOVERY_ENABLED;
+    const originalBalancedInventory = process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY;
     const originalKey = process.env.BRAVE_SEARCH_API_KEY;
     try {
       process.env.WEB_DISCOVERY_PROVIDER = "brave";
       process.env.WEB_DISCOVERY_ENABLED = "true";
+      process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY = "false";
       process.env.BRAVE_SEARCH_API_KEY = "test-key";
 
       const balanced = buildDiscoveryConfigFromEnv("balanced");
@@ -56,7 +58,23 @@ describe("discovery", () => {
     } finally {
       process.env.WEB_DISCOVERY_PROVIDER = originalProvider;
       process.env.WEB_DISCOVERY_ENABLED = originalEnabled;
+      process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY = originalBalancedInventory;
       process.env.BRAVE_SEARCH_API_KEY = originalKey;
+    }
+  });
+
+  it("can enable web discovery in balanced mode when inventory toggle is enabled", () => {
+    const originalEnabled = process.env.WEB_DISCOVERY_ENABLED;
+    const originalBalancedInventory = process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY;
+    try {
+      process.env.WEB_DISCOVERY_ENABLED = "true";
+      process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY = "true";
+
+      const balanced = buildDiscoveryConfigFromEnv("balanced");
+      expect(balanced.webDiscoveryEnabled).toBe(true);
+    } finally {
+      process.env.WEB_DISCOVERY_ENABLED = originalEnabled;
+      process.env.WEB_DISCOVERY_ENABLE_FOR_BALANCED_INVENTORY = originalBalancedInventory;
     }
   });
 
@@ -71,7 +89,8 @@ describe("discovery", () => {
       const balanced = buildDiscoveryConfigFromEnv("balanced");
 
       expect(comprehensive.webDiscoveryEnabled).toBe(true);
-      expect(comprehensive.webDiscoveryProvider).toBe("none");
+      expect(comprehensive.webDiscoveryProvider).toBe("searxng");
+      expect(comprehensive.searxngBaseUrl).toBe("http://127.0.0.1:8080");
       expect(balanced.webDiscoveryEnabled).toBe(false);
     } finally {
       process.env.WEB_DISCOVERY_PROVIDER = originalProvider;
@@ -250,6 +269,85 @@ describe("discovery", () => {
     expect(candidates.length).toBe(1);
     expect(candidates[0].url).toContain("example-auction.com/lot/123");
     expect(candidates[0].provenance).toBe("web_discovery");
+  });
+
+  it("queries searxng and normalizes usable candidates", async () => {
+    const config = {
+      enabled: true,
+      maxCandidatesPerSource: 10,
+      maxQueryVariants: 1,
+      domainThrottlePerSource: 5,
+      maxDiscoveredDomainsPerRun: 10,
+      maxUrlsPerDiscoveredDomain: 1,
+      maxTotalCandidatesPerRun: 20,
+      webDiscoveryEnabled: true,
+      webDiscoveryProvider: "searxng" as const,
+      searxngBaseUrl: "http://127.0.0.1:8080",
+      webDiscoveryBlockHostTokens: [],
+    };
+
+    const mockFetch: typeof fetch = (async (input: string | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("127.0.0.1:8080/search")) {
+        return {
+          ok: true,
+          json: async () => ({
+            results: [
+              { url: "https://example-auction.com/lot/123?utm_source=searx" },
+              { url: "https://example-auction.com/lot/456" }
+            ]
+          })
+        } as Response;
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    const candidates = await discoverWebCandidates(query, config, mockFetch);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.url).toBe("https://example-auction.com/lot/123");
+    expect(candidates[0]?.provenance).toBe("web_discovery");
+  });
+
+  it("falls back to duckduckgo when searxng is unavailable", async () => {
+    const config: Parameters<typeof discoverWebCandidates>[1] = {
+      enabled: true,
+      maxCandidatesPerSource: 10,
+      maxQueryVariants: 1,
+      domainThrottlePerSource: 5,
+      maxDiscoveredDomainsPerRun: 10,
+      maxUrlsPerDiscoveredDomain: 2,
+      maxTotalCandidatesPerRun: 20,
+      webDiscoveryEnabled: true,
+      webDiscoveryProvider: "searxng" as const,
+      searxngBaseUrl: "http://127.0.0.1:8080",
+      webDiscoveryBlockHostTokens: [],
+    };
+
+    const mockFetch: typeof fetch = (async (input: string | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("127.0.0.1:8080/search")) {
+        throw new Error("searxng offline");
+      }
+      if (url.includes("duckduckgo.com/html")) {
+        return {
+          ok: true,
+          text: async () => `
+            <html>
+              <body>
+                <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rportakal.com%2Fen%2Fproducts%2Fabidin-dino-works">Result</a>
+              </body>
+            </html>
+          `
+        } as Response;
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    const candidates = await discoverWebCandidates({ ...query, analysisMode: "comprehensive" }, config, mockFetch);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.url).toBe("https://www.rportakal.com/en/products/abidin-dino-works");
+    expect(config.webDiscoveryDiagnostics?.[0]?.provider).toBe("searxng");
+    expect(config.webDiscoveryDiagnostics?.[0]?.failover_invoked).toBe(false);
   });
 
   it("falls back to unauthenticated web discovery when providers are selected but api keys are missing", async () => {

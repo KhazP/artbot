@@ -5,7 +5,8 @@ import {
   containsAuthIndicators,
   containsBlockedIndicators,
   didRenderedPaginationAdvance,
-  extractInlineScriptDiscoveredUrls
+  extractInlineScriptDiscoveredUrls,
+  shouldPersistHeavyBrowserArtifacts
 } from "./browser-client.js";
 
 describe("BrowserClient retry policy", () => {
@@ -166,5 +167,17 @@ describe("didRenderedPaginationAdvance", () => {
         }
       )
     ).toBe(false);
+  });
+});
+
+describe("shouldPersistHeavyBrowserArtifacts", () => {
+  it("returns false when heavy evidence is disabled or artifacts are restricted", () => {
+    expect(shouldPersistHeavyBrowserArtifacts(false, "standard")).toBe(false);
+    expect(shouldPersistHeavyBrowserArtifacts(true, "internal_only")).toBe(false);
+    expect(shouldPersistHeavyBrowserArtifacts(true, "scrubbed_sensitive")).toBe(false);
+  });
+
+  it("returns true only for standard artifact handling with heavy evidence enabled", () => {
+    expect(shouldPersistHeavyBrowserArtifacts(true, "standard")).toBe(true);
   });
 });

@@ -1,12 +1,22 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { researchQuerySchema } from "@artbot/shared-types";
+import { buildRunArtifactManifest, writeArtifactManifest } from "@artbot/storage";
 import type { RunDetailsResponse } from "./index.js";
 import { runCli } from "./index.js";
 
-const cliPackageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
+const cliPackageVersion = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
   version: string;
 };
+const cleanupPaths: string[] = [];
+
+afterEach(() => {
+  for (const target of cleanupPaths.splice(0)) {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+});
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -165,6 +175,12 @@ function createSpinnerStub() {
       }
     };
   };
+}
+
+function mkTempDir(prefix: string): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  cleanupPaths.push(root);
+  return root;
 }
 
 describe("artbot cli v2", () => {
@@ -388,5 +404,375 @@ describe("artbot cli v2", () => {
     expect(code).toBe(3);
     expect(stderr).toContain("Cannot reach API endpoint.");
     expect(stderr).toContain("--api-base-url");
+  });
+
+  it("replays from a raw snapshot and returns original plus replay metadata", async () => {
+    const io = createMockIo();
+    const tempRoot = mkTempDir("artbot-cli-replay-raw-");
+    const rawSnapshotPath = path.join(tempRoot, "raw.html");
+    fs.writeFileSync(rawSnapshotPath, "<html><body><span>TRY 120,000</span></body></html>", "utf-8");
+
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        ...buildRunDetails("completed"),
+        attempts: [
+          {
+            run_id: "run-123",
+            source_name: "Clar",
+            source_url: "https://example.com/lot/1",
+            canonical_url: "https://example.com/lot/1",
+            access_mode: "anonymous",
+            source_access_status: "public_access",
+            access_reason: "fixture",
+            blocker_reason: null,
+            extracted_fields: {},
+            screenshot_path: null,
+            raw_snapshot_path: rawSnapshotPath,
+            trace_path: null,
+            har_path: null,
+            fetched_at: "2026-04-14T10:00:00.000Z",
+            parser_used: "fixture",
+            model_used: null,
+            confidence_score: 0.8,
+            accepted: true,
+            acceptance_reason: "valuation_ready"
+          }
+        ]
+      })
+    );
+
+    const code = await runCli(["node", "artbot", "--json", "replay", "attempt", "--run-id", "run-123"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const payload = JSON.parse(io.read().stdout) as any;
+    expect(code).toBe(0);
+    expect(payload.original_attempt.parser_used).toBe("fixture");
+    expect(payload.replay.artifact_kind).toBe("raw_snapshot");
+    expect(payload.replay.artifact_path).toBe(rawSnapshotPath);
+  });
+
+  it("falls back to HAR replay when no raw snapshot is available", async () => {
+    const io = createMockIo();
+    const tempRoot = mkTempDir("artbot-cli-replay-har-");
+    const harPath = path.join(tempRoot, "capture.har");
+    fs.writeFileSync(
+      harPath,
+      JSON.stringify({
+        log: {
+          entries: [
+            {
+              request: { url: "https://example.com/lot/2" },
+              response: {
+                content: {
+                  mimeType: "text/html",
+                  text: "<html><body><span>Estimate 90,000 - 120,000 TRY</span></body></html>"
+                }
+              }
+            }
+          ]
+        }
+      }),
+      "utf-8"
+    );
+
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        ...buildRunDetails("completed"),
+        attempts: [
+          {
+            run_id: "run-123",
+            source_name: "Clar",
+            source_url: "https://example.com/lot/2",
+            canonical_url: "https://example.com/lot/2",
+            access_mode: "anonymous",
+            source_access_status: "public_access",
+            access_reason: "fixture",
+            blocker_reason: null,
+            extracted_fields: {},
+            screenshot_path: null,
+            raw_snapshot_path: null,
+            trace_path: null,
+            har_path: harPath,
+            fetched_at: "2026-04-14T10:00:00.000Z",
+            parser_used: "browser",
+            model_used: null,
+            confidence_score: 0.8,
+            accepted: true,
+            acceptance_reason: "estimate_range_ready"
+          }
+        ]
+      })
+    );
+
+    const code = await runCli(
+      ["node", "artbot", "--json", "replay", "attempt", "--run-id", "run-123", "--artifact", "auto"],
+      {
+        fetchImpl,
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    const payload = JSON.parse(io.read().stdout) as any;
+    expect(code).toBe(0);
+    expect(payload.replay.artifact_kind).toBe("har");
+    expect(payload.replay.artifact_path).toBe(harPath);
+  });
+
+  it("reports gc dry-run results without deleting artifacts", async () => {
+    const io = createMockIo();
+    const runsRoot = mkTempDir("artbot-cli-gc-");
+    const runRoot = path.join(runsRoot, "run-1");
+    fs.mkdirSync(path.join(runRoot, "evidence", "traces"), { recursive: true });
+    const reportPath = path.join(runRoot, "report.md");
+    const resultsPath = path.join(runRoot, "results.json");
+    const tracePath = path.join(runRoot, "evidence", "traces", "old.zip");
+    fs.writeFileSync(reportPath, "report", "utf-8");
+    fs.writeFileSync(resultsPath, JSON.stringify({ ok: true }), "utf-8");
+    fs.writeFileSync(tracePath, "trace", "utf-8");
+    fs.utimesSync(tracePath, new Date("2026-01-01T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"));
+
+    writeArtifactManifest(
+      runRoot,
+      buildRunArtifactManifest({
+        runId: "run-1",
+        runRoot,
+        reportPath,
+        resultsPath,
+        attempts: [
+          {
+            run_id: "run-1",
+            source_name: "Clar",
+            source_url: "https://example.com/lot/1",
+            canonical_url: "https://example.com/lot/1",
+            access_mode: "anonymous",
+            source_access_status: "public_access",
+            access_reason: "fixture",
+            blocker_reason: null,
+            extracted_fields: {},
+            screenshot_path: null,
+            raw_snapshot_path: null,
+            trace_path: tracePath,
+            har_path: null,
+            fetched_at: "2026-04-14T10:00:00.000Z",
+            parser_used: "fixture",
+            model_used: null,
+            confidence_score: 0.8,
+            accepted: true,
+            acceptance_reason: "valuation_ready"
+          }
+        ]
+      })
+    );
+
+    const code = await runCli(["node", "artbot", "--json", "ops", "gc", "--runs-root", runsRoot, "--dry-run"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const payload = JSON.parse(stdout) as any;
+    expect(payload.dry_run).toBe(true);
+    expect(payload.deleted_by_reason.expired).toBeGreaterThanOrEqual(0);
+    expect(fs.existsSync(tracePath)).toBe(true);
+  });
+
+  it("lists filtered review queue items", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        ...buildRunDetails("completed"),
+        run: {
+          ...buildRunDetails("completed").run,
+          runType: "artist_market_inventory"
+        },
+        inventory: [
+          {
+            id: "inv-1",
+            run_id: "run-123",
+            artist_key: "artist",
+            record_key: "record-left",
+            source_host: "example.com",
+            semantic_lane: "asking",
+            cluster_id: "cluster-1",
+            payload: {
+              source_name: "Clar"
+            }
+          },
+          {
+            id: "inv-2",
+            run_id: "run-123",
+            artist_key: "artist",
+            record_key: "record-right",
+            source_host: "example.com",
+            semantic_lane: "asking",
+            cluster_id: "cluster-1",
+            payload: {
+              source_name: "Portakal"
+            }
+          }
+        ],
+        review_queue: [
+          {
+            id: "review-1",
+            run_id: "run-123",
+            artist_key: "artist",
+            review_type: "cluster_match",
+            status: "pending",
+            left_record_key: "record-left",
+            right_record_key: "record-right",
+            recommended_action: "keep_separate",
+            confidence: 0.78,
+            reasons: ["title_similarity:0.62"],
+            created_at: "2026-04-14T10:00:00.000Z",
+            updated_at: "2026-04-14T10:00:00.000Z"
+          },
+          {
+            id: "review-2",
+            run_id: "run-123",
+            artist_key: "artist",
+            review_type: "cluster_match",
+            status: "accepted",
+            left_record_key: "record-left",
+            right_record_key: "record-right",
+            recommended_action: "merge",
+            confidence: 0.92,
+            reasons: ["identical_image_sha256"],
+            created_at: "2026-04-14T10:00:00.000Z",
+            updated_at: "2026-04-14T10:00:00.000Z"
+          }
+        ]
+      })
+    );
+
+    const code = await runCli(
+      ["node", "artbot", "--json", "review", "queue", "--run-id", "run-123", "--status", "open", "--source", "clar"],
+      {
+        fetchImpl,
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    const payload = JSON.parse(io.read().stdout) as any;
+    expect(code).toBe(0);
+    expect(payload.count).toBe(1);
+    expect(payload.items[0]?.status).toBe("pending");
+  });
+
+  it("adjudicates review queue items via API", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe(JSON.stringify({ decision: "merge" }));
+      return jsonResponse({
+        run_id: "run-123",
+        review_item: {
+          id: "review-1",
+          status: "accepted",
+          recommended_action: "merge"
+        }
+      });
+    });
+
+    const code = await runCli(
+      ["node", "artbot", "--json", "review", "decide", "--run-id", "run-123", "--item-id", "review-1", "--decision", "merge"],
+      {
+        fetchImpl,
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    const payload = JSON.parse(io.read().stdout) as any;
+    expect(code).toBe(0);
+    expect(payload.review_item.status).toBe("accepted");
+    expect(payload.review_item.recommended_action).toBe("merge");
+  });
+
+  it("explains cluster membership for graph command", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        ...buildRunDetails("completed"),
+        run: {
+          ...buildRunDetails("completed").run,
+          runType: "artist_market_inventory"
+        },
+        clusters: [
+          {
+            id: "cluster-1",
+            run_id: "run-123",
+            artist_key: "artist",
+            title: "Untitled",
+            year: null,
+            medium: null,
+            cluster_status: "auto_confirmed",
+            confidence: 0.88,
+            record_count: 2,
+            auto_match_count: 1,
+            created_at: "2026-04-14T10:00:00.000Z",
+            updated_at: "2026-04-14T10:00:00.000Z"
+          }
+        ],
+        cluster_memberships: [
+          {
+            id: "membership-1",
+            run_id: "run-123",
+            artist_key: "artist",
+            cluster_id: "cluster-1",
+            record_key: "record-left",
+            status: "auto_confirmed",
+            confidence: 0.88,
+            reasons: ["strict_exact_work_match"],
+            created_at: "2026-04-14T10:00:00.000Z",
+            updated_at: "2026-04-14T10:00:00.000Z"
+          }
+        ],
+        inventory: [
+          {
+            id: "inv-1",
+            run_id: "run-123",
+            artist_key: "artist",
+            record_key: "record-left",
+            source_host: "example.com",
+            semantic_lane: "asking",
+            cluster_id: "cluster-1",
+            payload: {
+              source_name: "Clar",
+              work_title: "Untitled",
+              source_url: "https://example.com/lot/1"
+            }
+          }
+        ]
+      })
+    );
+
+    const code = await runCli(
+      ["node", "artbot", "--json", "graph", "explain", "--run-id", "run-123", "--cluster-id", "cluster-1"],
+      {
+        fetchImpl,
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    const payload = JSON.parse(io.read().stdout) as any;
+    expect(code).toBe(0);
+    expect(payload.cluster.id).toBe("cluster-1");
+    expect(payload.membership_count).toBe(1);
+    expect(payload.memberships[0]?.source_name).toBe("Clar");
   });
 });

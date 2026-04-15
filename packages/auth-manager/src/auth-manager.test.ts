@@ -32,6 +32,11 @@ describe("AuthManager", () => {
 
     expect(resolved.mode).toBe("anonymous");
     expect(resolved.sourceAccessStatus).toBe("public_access");
+    expect(resolved.legalPosture).toBe("public_permitted");
+    expect(resolved.artifactHandling).toBe("standard");
+    expect(resolved.sessionIdentity).toBe("session:anonymous");
+    expect(resolved.browserIdentity).toBe("browser:ephemeral");
+    expect(resolved.proxyIdentity).toBe("proxy:direct");
   });
 
   it("returns auth_required when auth source has no profile", () => {
@@ -62,6 +67,38 @@ describe("AuthManager", () => {
 
     expect(resolved.sourceAccessStatus).toBe("licensed_access");
     expect(resolved.mode).toBe("licensed");
+    expect(resolved.legalPosture).toBe("licensed_only");
+    expect(resolved.artifactHandling).toBe("internal_only");
+    expect(resolved.accessProvenanceLabel).toContain("Licensed access");
+    expect(resolved.sessionIdentity).toBe("session:askart-license");
+    expect(resolved.browserIdentity).toBe("browser:askart-license");
+  });
+
+  it("separates session, browser, and proxy identities for authorized access", () => {
+    const manager = new AuthManager([
+      {
+        id: "sanatfiyat-auth",
+        mode: "authorized",
+        sourcePatterns: ["sanatfiyat"],
+        browserIdentity: "browser:licensed-pool-a",
+        proxyIdentity: "proxy:residential-tr-1"
+      }
+    ]);
+
+    const resolved = manager.resolveAccess({
+      sourceName: "Sanatfiyat",
+      sourceUrl: "https://sanatfiyat.com",
+      sourceRequiresAuth: true,
+      sourceRequiresLicense: false,
+      legalPosture: "public_contract_sensitive"
+    });
+
+    expect(resolved.mode).toBe("authorized");
+    expect(resolved.artifactHandling).toBe("scrubbed_sensitive");
+    expect(resolved.sessionIdentity).toBe("session:sanatfiyat-auth");
+    expect(resolved.browserIdentity).toBe("browser:licensed-pool-a");
+    expect(resolved.proxyIdentity).toBe("proxy:residential-tr-1");
+    expect(resolved.accessProvenanceLabel).toContain("Authorized session");
   });
 
   it("supports session directory creation and cookie loading", () => {

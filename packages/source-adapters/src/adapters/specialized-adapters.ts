@@ -3,8 +3,10 @@ import type { SourceAccessStatus, SourceAttempt } from "@artbot/shared-types";
 import type { AdapterExtractionContext, AdapterExtractionResult, SourceAdapter, SourceCandidate } from "../types.js";
 import { deriveDefaultSourceCapabilities } from "../types.js";
 import {
+  buildAcceptanceExplanation,
   buildBlockedResult,
   buildRecordFromParsed,
+  buildNextStepHint,
   ensureRawPath,
   evaluateAcceptance,
   evaluateAccessDecision,
@@ -226,6 +228,10 @@ function looksLikeSearchShell(candidateUrl: string, extractedUrl: string, html: 
   return urlLooksLikeSearch && pageLooksLikeSearch;
 }
 
+function urlLooksLikeSearch(url: string): boolean {
+  return /\/(?:search|arama)\b|[?&](?:q|query|term|entry|s|search|search_words)=/i.test(url);
+}
+
 function matchesRequestedEntityInContent(
   content: string,
   query: AdapterExtractionContext["query"]
@@ -318,6 +324,55 @@ function hasNumericValue(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function urlReferencesRequestedEntity(
+  candidateUrl: string,
+  query: AdapterExtractionContext["query"]
+): boolean {
+  const normalizedUrl = normalizeEntityText(candidateUrl);
+  if (!normalizedUrl) {
+    return false;
+  }
+
+  const artistTokens = normalizeArtistTokens(query.artist);
+  const titleTokens = normalizeArtistTokens(query.title ?? "");
+  const relevantTokens = [...new Set([...artistTokens, ...titleTokens])];
+  if (relevantTokens.length === 0) {
+    return false;
+  }
+
+  return relevantTokens.every((token) => normalizedUrl.includes(token));
+}
+
+function hasValuationSignal(parsed: GenericParsedFields): boolean {
+  if (parsed.priceType === "estimate") {
+    return hasNumericValue(parsed.estimateLow) || hasNumericValue(parsed.estimateHigh);
+  }
+
+  if (parsed.priceType === "asking_price" || parsed.priceType === "hammer_price" || parsed.priceType === "realized_price") {
+    return hasNumericValue(parsed.priceAmount);
+  }
+
+  return false;
+}
+
+function shouldBypassSearchShellDowngrade(
+  parsed: GenericParsedFields,
+  candidateUrl: string,
+  extractedUrl: string,
+  content: string,
+  query: AdapterExtractionContext["query"]
+): boolean {
+  if (!hasValuationSignal(parsed)) {
+    return false;
+  }
+
+  return (
+    matchesRequestedEntityInContent(content, query) ||
+    urlReferencesRequestedEntity(candidateUrl, query) ||
+    urlReferencesRequestedEntity(extractedUrl, query)
+  );
+}
+
 function normalizeEmbeddedNumber(value: string): number | null {
   const cleaned = value.replace(/[^0-9,.\-]/g, "").trim();
   if (!cleaned) {
@@ -362,6 +417,73 @@ function parseEmbeddedCurrencyCell(value: string): { amount: number | null; curr
     return { amount, currency: "EUR" };
   }
   return { amount, currency: null };
+}
+
+function buildEmptyPatch(
+  partial: Partial<GenericParsedFields> & Pick<GenericParsedFields, "priceType" | "priceHidden">
+): GenericParsedFields {
+  return {
+    title: null,
+    artistName: null,
+    medium: null,
+    dimensionsText: null,
+    year: null,
+    imageUrl: null,
+    lotNumber: null,
+    estimateLow: null,
+    estimateHigh: null,
+    priceAmount: null,
+    currency: null,
+    saleDate: null,
+    buyersPremiumIncluded: null,
+    ...partial
+  };
+}
+
+function parseTurkishEstimateRange(content: string): GenericParsedFields | null {
+  const match = content.match(/Tahmini\s*:?\s*([\d.,]+)\s*(?:TL|TRY|₺)\s*[-–]\s*([\d.,]+)\s*(?:TL|TRY|₺)/i);
+  if (!match) {
+    return null;
+  }
+
+  const estimateLow = normalizeEmbeddedNumber(match[1] ?? "");
+  const estimateHigh = normalizeEmbeddedNumber(match[2] ?? "");
+  if (!hasNumericValue(estimateLow) || !hasNumericValue(estimateHigh)) {
+    return null;
+  }
+
+  return buildEmptyPatch({
+    estimateLow,
+    estimateHigh,
+    currency: "TRY",
+    priceType: "estimate",
+    priceHidden: false
+  });
+}
+
+function parseInquiryOnlyPatch(content: string): GenericParsedFields | null {
+  if (!/(fiyat\s+sorunuz|price\s+on\s+request|contact\s+for\s+price)/i.test(content)) {
+    return null;
+  }
+
+  return buildEmptyPatch({
+    priceType: "inquiry_only",
+    priceHidden: false
+  });
+}
+
+export function parseFixtureSourceSpecificPatch(sourceName: string, html: string): GenericParsedFields | null {
+  const normalized = sourceName.toLowerCase();
+  if (normalized.includes("bayrak")) {
+    return parseTurkishEstimateRange(html);
+  }
+  if (normalized.includes("turel") || normalized.includes("türel")) {
+    return parseInquiryOnlyPatch(html);
+  }
+  if (normalized.includes("sanatfiyat")) {
+    return parseSanatfiyatTrendTable(html);
+  }
+  return null;
 }
 
 function parseSanatfiyatTrendTable(html: string): GenericParsedFields | null {
@@ -447,6 +569,20 @@ function sourceSpecificKeywordsForAdapter(adapterId: string): string[] {
 }
 
 function parseSourceSpecificPatch(adapterId: string, html: string, markdown: string): GenericParsedFields | null {
+  if (adapterId === "bayrak-muzayede-listing" || adapterId === "bayrak-muzayede-lot") {
+    const estimatePatch = parseTurkishEstimateRange(`${html} ${markdown}`);
+    if (estimatePatch) {
+      return estimatePatch;
+    }
+  }
+
+  if (adapterId === "turel-art-listing") {
+    const inquiryPatch = parseInquiryOnlyPatch(`${html} ${markdown}`);
+    if (inquiryPatch) {
+      return inquiryPatch;
+    }
+  }
+
   if (adapterId === "sanatfiyat-licensed-extractor") {
     const trendPatch = parseSanatfiyatTrendTable(html);
     if (trendPatch) {
@@ -551,7 +687,6 @@ function sourceSpecificLinkMatchersForAdapter(adapterId: string): RegExp[] {
       /\/lot\//i,
       /\/eser\//i,
       /\/urun\//i,
-      /\/tumurunler\.html/i,
       /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i
     ];
   }
@@ -710,15 +845,23 @@ export class DeterministicVenueAdapter implements SourceAdapter {
     const fetchedAt = new Date().toISOString();
     const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext);
     const rawSnapshotPath = ensureRawPath(context.evidenceDir, `${this.id}-${Date.now()}-deterministic.html`);
-    writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown);
+    writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown, context.accessContext);
 
     const combinedContent = `${extracted.markdown} ${extracted.html}`;
     let parsed = parseGenericLotFields(combinedContent, extracted.url);
     const sourceSpecificPatch = parseSourceSpecificPatch(this.id, extracted.html, extracted.markdown);
     parsed = mergeSourceSpecificParsed(parsed, sourceSpecificPatch, this.id === "sanatfiyat-licensed-extractor");
+    const preModelSearchShell = looksLikeSearchShell(candidate.url, extracted.url, extracted.html);
+    const shouldAttemptStructuredExtraction =
+      parsed.priceType === "unknown"
+      && combinedContent.length > 120
+      && candidate.sourcePageType !== "listing"
+      && !preModelSearchShell
+      && !urlLooksLikeSearch(candidate.url)
+      && !urlLooksLikeSearch(extracted.url);
 
     let modelUsed: string | null = null;
-    if (parsed.priceType === "unknown" && combinedContent.length > 120) {
+    if (shouldAttemptStructuredExtraction) {
       const structured = await extractWithGeminiSchema({
         content: combinedContent
       });
@@ -782,7 +925,11 @@ export class DeterministicVenueAdapter implements SourceAdapter {
           sourcePageType: inferCandidatePageType(discovered.url, discovered.sourcePageType)
         }))
         .filter((candidate, index, array) => {
-        return isAllowedVenueUrl(candidate.url, allowedHosts) && array.findIndex((entry) => entry.url === candidate.url) === index;
+        return (
+          candidate.sourcePageType !== "other" &&
+          isAllowedVenueUrl(candidate.url, allowedHosts) &&
+          array.findIndex((entry) => entry.url === candidate.url) === index
+        );
       });
 
     const effectiveSourceStatus: SourceAccessStatus = parsed.priceHidden
@@ -790,6 +937,13 @@ export class DeterministicVenueAdapter implements SourceAdapter {
       : outageReason
         ? "blocked"
         : decision.sourceAccessStatus;
+    const canBypassSearchShell = shouldBypassSearchShellDowngrade(
+      parsed,
+      candidate.url,
+      extracted.url,
+      combinedContent,
+      context.query
+    );
     let acceptance = evaluateAcceptance(parsed, effectiveSourceStatus, {
       sourceName: this.sourceName,
       sourcePageType: candidate.sourcePageType,
@@ -797,7 +951,7 @@ export class DeterministicVenueAdapter implements SourceAdapter {
       queryArtist: context.query.artist,
       queryTitle: context.query.title
     });
-    if (effectiveSourceStatus !== "blocked" && looksLikeSearchShell(candidate.url, extracted.url, extracted.html)) {
+    if (effectiveSourceStatus !== "blocked" && preModelSearchShell && !canBypassSearchShell) {
       acceptance = {
         acceptedForEvidence: false,
         acceptedForValuation: false,
@@ -832,9 +986,17 @@ export class DeterministicVenueAdapter implements SourceAdapter {
     const attempt: SourceAttempt = {
       run_id: context.runId,
       source_name: this.sourceName,
+      source_family: this.capabilities.source_family,
+      venue_name: this.venueName,
       source_url: candidate.url,
       canonical_url: extracted.url,
       access_mode: context.accessContext.mode,
+      source_legal_posture: context.accessContext.legalPosture,
+      access_provenance_label: context.accessContext.accessProvenanceLabel ?? null,
+      session_identity: context.accessContext.sessionIdentity ?? null,
+      browser_identity: context.accessContext.browserIdentity ?? null,
+      proxy_identity: context.accessContext.proxyIdentity ?? null,
+      artifact_handling: context.accessContext.artifactHandling,
       source_access_status: effectiveSourceStatus,
       failure_class: outageReason ? "transport_other" : undefined,
       access_reason: outageReason ? `${decision.accessReason} ${outageReason}` : decision.accessReason,
@@ -875,7 +1037,9 @@ export class DeterministicVenueAdapter implements SourceAdapter {
       valuation_lane: acceptance.valuationLane,
       acceptance_reason: acceptance.acceptanceReason,
       rejection_reason: acceptance.rejectionReason,
-      valuation_eligibility_reason: acceptance.valuationEligibilityReason
+      valuation_eligibility_reason: acceptance.valuationEligibilityReason,
+      acceptance_explanation: buildAcceptanceExplanation(this.sourceName, acceptance, effectiveSourceStatus),
+      next_step_hint: buildNextStepHint(this.sourceName, acceptance, effectiveSourceStatus)
     };
 
     const shouldEscalateForMissingPrice =
@@ -908,7 +1072,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: null,
       baseUrl: "https://muzayede.app",
-      searchPaths: ["/arama.html?search_words=", "/search?q="],
+      searchPaths: ["/arama.html?search_words="],
       lotUrlMatchers: [
         /\/lot\//i,
         /\/eser\//i,
@@ -919,7 +1083,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
         /\/[^/?#]*mezat[^/?#]*\.html(?:\?.*)?$/i
       ],
       signatureIndicators: ["powered by müzayede app", "powered by muzayede app", "muzayede.app"],
-      venueRouteTemplates: ["/arama.html?search_words={q}", "/search?q={q}", "/muzayede?q={q}", "/arsiv?q={q}"],
+      venueRouteTemplates: ["/arama.html?search_words={q}"],
       turkeyVenueHostPatterns: [
         /\.tr$/i,
         /artmezat/i,
@@ -941,7 +1105,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.bayrakmuzayede.com",
-      searchPaths: ["/arama.html?search_words=", "/search?q="],
+      searchPaths: ["/arama.html?search_words="],
       lotUrlMatchers: [/\/lot\//i, /\/eser\//i, /\/urun\//i, /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i]
     }),
     new DeterministicVenueAdapter({
@@ -954,7 +1118,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.bayrakmuzayede.com",
-      searchPaths: ["/arama.html?search_words=", "/lot?q=", "/eser?q="],
+      searchPaths: ["/arama.html?search_words="],
       lotUrlMatchers: [/\/lot\//i, /\/eser\//i, /\/urun\//i, /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i]
     }),
     new DeterministicVenueAdapter({
@@ -1006,7 +1170,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.clarmuzayede.com",
-      searchPaths: ["/hemen-al?search=", "/hemen-al?q="],
+      searchPaths: ["/hemen-al?search="],
       lotUrlMatchers: [
         /\/lot\//i,
         /\/urun\//i,
@@ -1026,7 +1190,7 @@ export function buildSpecializedAdapters(): SourceAdapter[] {
       country: "Turkey",
       city: "Istanbul",
       baseUrl: "https://www.clarmuzayede.com",
-      searchPaths: ["/muzayede-arsivi?search=", "/auction-archive?q=", "/arsiv?q="],
+      searchPaths: ["/muzayede-arsivi?search="],
       lotUrlMatchers: [
         /\/lot\//i,
         /\/archive\//i,

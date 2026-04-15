@@ -6,12 +6,31 @@ import type {
   ArtifactKind,
   ArtifactManifest,
   ArtifactManifestItem,
+  ArtifactGcReason,
   ArtifactRetentionClass,
   GcPolicy,
   SourceAttempt
 } from "@artbot/shared-types";
 
 export const ARTIFACT_MANIFEST_FILE = "artifact-manifest.json";
+
+function emptyRetentionBreakdown(): ArtifactGcResult["deleted_by_retention_class"] {
+  return {
+    manifest: 0,
+    accepted_evidence: 0,
+    disputed_evidence: 0,
+    heavy_debug: 0,
+    ephemeral: 0
+  };
+}
+
+function emptyReasonBreakdown(): ArtifactGcResult["deleted_by_reason"] {
+  return {
+    duplicate: 0,
+    expired: 0,
+    watermark: 0
+  };
+}
 
 function toPositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback);
@@ -102,6 +121,12 @@ function buildManifestItem(
     created_at: stats.mtime.toISOString(),
     source_name: attempt?.source_name ?? null,
     source_url: attempt?.source_url ?? null,
+    source_legal_posture: attempt?.source_legal_posture,
+    artifact_handling: attempt?.artifact_handling,
+    export_restricted:
+      attempt != null
+        ? attempt.access_mode !== "anonymous" || attempt.source_legal_posture === "licensed_only" || attempt.artifact_handling === "internal_only"
+        : false,
     accepted_for_evidence: attempt ? Boolean(attempt.accepted_for_evidence ?? attempt.accepted) : undefined,
     disputed: attempt ? !(attempt.accepted_for_evidence ?? attempt.accepted) : undefined,
     deleted_at: null
@@ -193,7 +218,12 @@ function retentionDaysForClass(policy: GcPolicy, retentionClass: ArtifactRetenti
 }
 
 function isExpired(item: ArtifactManifestItem, policy: GcPolicy, now: Date): boolean {
-  if (item.deleted_at || item.promotion_state !== "standard" || item.retention_class === "manifest") {
+  if (
+    item.deleted_at
+    || item.promotion_state !== "standard"
+    || item.retention_class === "manifest"
+    || item.export_restricted
+  ) {
     return false;
   }
   const createdAt = new Date(item.created_at);
@@ -213,7 +243,34 @@ function deleteArtifact(item: ArtifactManifestItem, nowIso: string): number {
   return stats?.size ?? item.size_bytes;
 }
 
-export function runArtifactGc(runsRoot: string, policy = buildDefaultGcPolicyFromEnv(), now = new Date()): ArtifactGcResult {
+function isGcEligible(item: ArtifactManifestItem): boolean {
+  return !item.deleted_at && item.promotion_state === "standard" && item.retention_class !== "manifest" && !item.export_restricted;
+}
+
+function recordDeletion(
+  item: ArtifactManifestItem,
+  reason: ArtifactGcReason,
+  nowIso: string,
+  dryRun: boolean,
+  plannedPaths: Set<string>,
+  result: Pick<ArtifactGcResult, "deleted_items" | "reclaimed_bytes" | "deleted_by_reason" | "deleted_by_retention_class">
+): number {
+  plannedPaths.add(item.path);
+  const reclaimedBytes = dryRun ? item.size_bytes : deleteArtifact(item, nowIso);
+  result.deleted_items += 1;
+  result.reclaimed_bytes += reclaimedBytes;
+  result.deleted_by_reason[reason] += 1;
+  result.deleted_by_retention_class[item.retention_class] += 1;
+  return reclaimedBytes;
+}
+
+export function runArtifactGc(
+  runsRoot: string,
+  policy = buildDefaultGcPolicyFromEnv(),
+  options: { dryRun?: boolean; now?: Date } = {}
+): ArtifactGcResult {
+  const dryRun = options.dryRun ?? false;
+  const now = options.now ?? new Date();
   const manifests = fs
     .readdirSync(runsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -223,31 +280,40 @@ export function runArtifactGc(runsRoot: string, policy = buildDefaultGcPolicyFro
 
   const allItems = manifests.flatMap((entry) => entry.manifest.items);
   const activeItems = allItems.filter((item) => !item.deleted_at);
-  let reclaimedBytes = 0;
   const nowIso = now.toISOString();
+  const result: ArtifactGcResult = {
+    dry_run: dryRun,
+    scanned_items: allItems.length,
+    deleted_items: 0,
+    reclaimed_bytes: 0,
+    remaining_bytes: activeItems.reduce((sum, item) => sum + item.size_bytes, 0),
+    deleted_by_reason: emptyReasonBreakdown(),
+    deleted_by_retention_class: emptyRetentionBreakdown()
+  };
+  const plannedPaths = new Set<string>();
 
   const firstByHash = new Set<string>();
   for (const item of activeItems) {
-    if (item.retention_class === "manifest" || item.promotion_state !== "standard") {
+    if (!isGcEligible(item) || plannedPaths.has(item.path)) {
       continue;
     }
     if (!firstByHash.has(item.content_hash)) {
       firstByHash.add(item.content_hash);
       continue;
     }
-    reclaimedBytes += deleteArtifact(item, nowIso);
+    result.remaining_bytes -= recordDeletion(item, "duplicate", nowIso, dryRun, plannedPaths, result);
   }
 
   for (const item of allItems) {
-    if (isExpired(item, policy, now)) {
-      reclaimedBytes += deleteArtifact(item, nowIso);
+    if (!plannedPaths.has(item.path) && isExpired(item, policy, now)) {
+      result.remaining_bytes -= recordDeletion(item, "expired", nowIso, dryRun, plannedPaths, result);
     }
   }
 
-  let remainingBytes = allItems.filter((item) => !item.deleted_at).reduce((sum, item) => sum + item.size_bytes, 0);
+  let remainingBytes = result.remaining_bytes;
   if (remainingBytes > policy.high_watermark_bytes) {
     const purgeable = allItems
-      .filter((item) => !item.deleted_at && item.promotion_state === "standard" && item.retention_class !== "manifest")
+      .filter((item) => isGcEligible(item))
       .sort((left, right) => {
         const classPriority = (value: ArtifactRetentionClass) =>
           value === "heavy_debug" ? 0 : value === "ephemeral" ? 1 : value === "disputed_evidence" ? 2 : 3;
@@ -255,23 +321,24 @@ export function runArtifactGc(runsRoot: string, policy = buildDefaultGcPolicyFro
           || new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
       });
     for (const item of purgeable) {
+      if (plannedPaths.has(item.path) || item.deleted_at) {
+        continue;
+      }
       if (remainingBytes <= policy.target_bytes_after_gc) {
         break;
       }
-      reclaimedBytes += deleteArtifact(item, nowIso);
-      remainingBytes -= item.size_bytes;
+      const reclaimedBytes = recordDeletion(item, "watermark", nowIso, dryRun, plannedPaths, result);
+      remainingBytes -= reclaimedBytes;
+    }
+  }
+  result.remaining_bytes = Math.max(0, remainingBytes);
+
+  if (!dryRun) {
+    for (const { manifestPath, manifest } of manifests) {
+      manifest.total_size_bytes = manifest.items.filter((item) => !item.deleted_at).reduce((sum, item) => sum + item.size_bytes, 0);
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
     }
   }
 
-  for (const { manifestPath, manifest } of manifests) {
-    manifest.total_size_bytes = manifest.items.filter((item) => !item.deleted_at).reduce((sum, item) => sum + item.size_bytes, 0);
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
-  }
-
-  return {
-    scanned_items: allItems.length,
-    deleted_items: allItems.filter((item) => item.deleted_at).length,
-    reclaimed_bytes: reclaimedBytes,
-    remaining_bytes: manifests.reduce((sum, entry) => sum + entry.manifest.total_size_bytes, 0)
-  };
+  return result;
 }

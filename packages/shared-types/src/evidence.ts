@@ -1,13 +1,36 @@
 import { z } from "zod";
-import type { AccessMode, AcceptanceReason, SourceAccessStatus, ValuationLane } from "./enums.js";
-import { hostHealthRecordSchema } from "./operations.js";
+import type {
+  AccessMode,
+  AcceptanceReason,
+  ArtifactHandling,
+  SourceAccessStatus,
+  SourceLegalPosture,
+  ValuationLane
+} from "./enums.js";
+import {
+  artifactHandlingSchema,
+  crawlLaneSchema,
+  hostHealthRecordSchema,
+  priceVisibilitySchema,
+  saleChannelSchema,
+  sourceSurfaceSchema,
+  sourceLegalPostureSchema
+} from "./operations.js";
 
 export const sourceAttemptSchema = z.object({
   run_id: z.string(),
   source_name: z.string(),
+  source_family: z.string().nullable().optional(),
+  venue_name: z.string().nullable().optional(),
   source_url: z.string().url(),
   canonical_url: z.string().url().nullable(),
   access_mode: z.enum(["anonymous", "authorized", "licensed"]),
+  source_legal_posture: sourceLegalPostureSchema.optional(),
+  access_provenance_label: z.string().nullable().optional(),
+  session_identity: z.string().nullable().optional(),
+  browser_identity: z.string().nullable().optional(),
+  proxy_identity: z.string().nullable().optional(),
+  artifact_handling: artifactHandlingSchema.optional(),
   source_access_status: z.enum([
     "public_access",
     "auth_required",
@@ -15,6 +38,10 @@ export const sourceAttemptSchema = z.object({
     "blocked",
     "price_hidden"
   ]),
+  source_surface: sourceSurfaceSchema.optional(),
+  crawl_lane: crawlLaneSchema.optional(),
+  sale_channel: saleChannelSchema.optional(),
+  price_visibility: priceVisibilitySchema.optional(),
   failure_class: z
     .enum([
       "access_blocked",
@@ -71,7 +98,9 @@ export const sourceAttemptSchema = z.object({
     "blocked_access"
   ]),
   rejection_reason: z.string().nullable().optional(),
-  valuation_eligibility_reason: z.string().nullable().optional()
+  valuation_eligibility_reason: z.string().nullable().optional(),
+  acceptance_explanation: z.string().nullable().optional(),
+  next_step_hint: z.string().nullable().optional()
 });
 
 export type SourceAttempt = z.infer<typeof sourceAttemptSchema>;
@@ -84,6 +113,12 @@ export interface AccessContext {
   sessionExpiresAt?: string;
   sensitivity?: "standard" | "sensitive" | "licensed";
   encryptedAtRest?: boolean;
+  legalPosture?: SourceLegalPosture;
+  sessionIdentity?: string;
+  browserIdentity?: string;
+  proxyIdentity?: string;
+  artifactHandling?: ArtifactHandling;
+  accessProvenanceLabel?: string;
   manualLoginCheckpoint?: boolean;
   allowLicensed?: boolean;
   licensedIntegrations: string[];

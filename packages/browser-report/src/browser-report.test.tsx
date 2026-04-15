@@ -83,6 +83,52 @@ describe("browser report normalization", () => {
         failure_class_breakdown: {
           access_blocked: 1
         },
+        discovery_provider_diagnostics: [
+          {
+            provider: "brave",
+            enabled: true,
+            reason: null,
+            requests_used: 2,
+            results_returned: 9
+          }
+        ],
+        persisted_source_metrics: [
+          {
+            source_name: "Clar",
+            source_family: "clar",
+            venue_name: "Clar Müzayede",
+            legal_posture: "public_permitted",
+            total_attempts: 4,
+            reachable_count: 4,
+            parse_success_count: 3,
+            price_signal_count: 2,
+            accepted_for_evidence_count: 2,
+            valuation_ready_count: 1,
+            blocked_count: 0,
+            auth_required_count: 0,
+            failure_count: 1,
+            reliability_score: 0.5,
+            last_status: "public_access",
+            updated_at: "2026-04-12T10:00:00.000Z"
+          }
+        ],
+        recent_canaries: [
+          {
+            family: "clar",
+            source_name: "Clar",
+            fixture: "clar/archive.html",
+            source_page_type: "listing",
+            legal_posture: "public_permitted",
+            expected_price_type: "asking_price",
+            observed_price_type: "asking_price",
+            acceptance_reason: "asking_price_ready",
+            accepted_for_evidence: true,
+            accepted_for_valuation: true,
+            status: "pass",
+            details: "Parsed asking price.",
+            recorded_at: "2026-04-12T10:05:00.000Z"
+          }
+        ],
         valuation_generated: true,
         valuation_reason: "Generated"
       },
@@ -110,7 +156,13 @@ describe("browser report normalization", () => {
           currency: "TRY",
           normalized_price_usd: 3000,
           accepted_for_valuation: true,
-          acceptance_reason: "asking_price_ready"
+          acceptance_reason: "asking_price_ready",
+          source_access_status: "public_access",
+          access_mode: "anonymous",
+          source_legal_posture: "public_permitted",
+          access_provenance_label: "Anonymous public access.",
+          acceptance_explanation: "Clar: accepted asking price evidence.",
+          next_step_hint: "Capture another Turkish asking comparable."
         }
       ],
       gaps: ["Low priced coverage across crawled sources."]
@@ -118,6 +170,10 @@ describe("browser report normalization", () => {
 
     expect(normalized.runId).toBe("run-123");
     expect(normalized.valuation.generated).toBe(true);
+    expect(normalized.sourceMetrics[0]?.sourceName).toBe("Clar");
+    expect(normalized.canaries[0]?.status).toBe("pass");
+    expect(normalized.discoveryDiagnostics[0]?.provider).toBe("brave");
+    expect(normalized.records[0]?.acceptanceExplanation).toContain("accepted asking price");
     expect(normalized.reasonBreakdown[0]?.label).toBe("Missing Numeric Price");
     expect(normalized.gaps[0]).toContain("Low priced coverage");
   });
@@ -254,6 +310,11 @@ describe("browser report normalization", () => {
             valuation_eligibility_reason: null,
             price_hidden: false,
             source_access_status: "public_access",
+            access_mode: "anonymous",
+            source_legal_posture: "public_permitted",
+            access_provenance_label: "Anonymous public access.",
+            acceptance_explanation: "Clar accepted the record as priced evidence.",
+            next_step_hint: "Find another realized comparable.",
             notes: []
           }
         }
@@ -263,6 +324,7 @@ describe("browser report normalization", () => {
     expect(normalized.runType).toBe("artist_market_inventory");
     expect(normalized.records[0]?.id).toBe("clar-1");
     expect(normalized.records[0]?.venueName).toBe("Clar Müzayede");
+    expect(normalized.records[0]?.accessProvenanceLabel).toContain("Anonymous public access");
     expect(normalized.records[0]?.priceLabel).toContain("$");
   });
 });
@@ -300,5 +362,6 @@ describe("browser report rendering", () => {
     expect(html).toContain("<!doctype html>");
     expect(html).toContain("Fikret Mualla");
     expect(html).toContain("No eligible comparables.");
+    expect(html).toContain("Recent canaries");
   });
 });

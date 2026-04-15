@@ -9,9 +9,12 @@ import {
   NetworkHealthTracker,
   ResearchOrchestrator,
   classifyFailureClass,
+  decideDiscoveredCandidateAction,
   insertDiscoveredCandidate,
   isOutageRelevantTransportKind,
   resolveConcurrencyForState,
+  shouldCaptureHeavyEvidenceForOutcome,
+  shouldTriggerCrawleeRecoveryForTransport,
   shouldQueueDiscoveredCandidate,
   shouldKeepRenderedDiscoveredUrl,
   shouldExitProcessingLoop,
@@ -145,6 +148,60 @@ describe("pipeline helpers", () => {
     expect(sourceAccessStatusForFailure("transport_timeout", "licensed_access")).toBe("licensed_access");
     expect(sourceAccessStatusForFailure("transport_dns", "blocked")).toBe("public_access");
     expect(sourceAccessStatusForFailure("waf_challenge", "public_access")).toBe("blocked");
+  });
+
+  it("triggers crawlee recovery for eligible transport failures and blocks auth/legal disallowed cases", () => {
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.DNS_FAILED, "public_access")).toBe(true);
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.TCP_TIMEOUT, "licensed_access")).toBe(true);
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.RATE_LIMITED, "public_access")).toBe(true);
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.HTTP_ERROR, "public_access")).toBe(true);
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.AUTH_INVALID, "public_access")).toBe(false);
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.LEGAL_BLOCK, "public_access")).toBe(false);
+    expect(shouldTriggerCrawleeRecoveryForTransport(TransportErrorKind.WAF_BLOCK, "blocked")).toBe(false);
+  });
+
+  it("captures heavy evidence selectively for rejected, low-confidence, and browser-recovery outcomes", () => {
+    expect(
+      shouldCaptureHeavyEvidenceForOutcome(
+        {
+          attempt: { accepted: false, accepted_for_evidence: false, acceptance_reason: "blocked_access" } as any,
+          record: null
+        },
+        "selective"
+      )
+    ).toBe(true);
+
+    expect(
+      shouldCaptureHeavyEvidenceForOutcome(
+        {
+          attempt: { accepted: true, accepted_for_evidence: true, acceptance_reason: "valuation_ready" } as any,
+          record: { overall_confidence: 0.45 } as any
+        },
+        "selective"
+      )
+    ).toBe(true);
+
+    expect(
+      shouldCaptureHeavyEvidenceForOutcome(
+        {
+          attempt: { accepted: true, accepted_for_evidence: true, acceptance_reason: "generic_shell_page" } as any,
+          record: { overall_confidence: 0.92 } as any,
+          needsBrowserVerification: true
+        },
+        "selective"
+      )
+    ).toBe(true);
+  });
+
+  it("skips heavy evidence for accepted high-confidence outcomes unless mode is always", () => {
+    const outcome = {
+      attempt: { accepted: true, accepted_for_evidence: true, acceptance_reason: "valuation_ready" } as any,
+      record: { overall_confidence: 0.88 } as any
+    };
+
+    expect(shouldCaptureHeavyEvidenceForOutcome(outcome, "selective")).toBe(false);
+    expect(shouldCaptureHeavyEvidenceForOutcome(outcome, "off")).toBe(false);
+    expect(shouldCaptureHeavyEvidenceForOutcome(outcome, "always")).toBe(true);
   });
 
   it("filters rendered discovery noise but keeps relevant same-host candidates", () => {
@@ -391,6 +448,172 @@ describe("pipeline helpers", () => {
         query
       )
     ).toBe(true);
+  });
+
+  it("uses local AI high-confidence accept for discovery candidates that pass deterministic guardrails", async () => {
+    try {
+      vi.stubGlobal("fetch", (async () => new Response(JSON.stringify({
+        model: "local-model",
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: "accept_candidate",
+                confidence: 0.93,
+                reasons: ["entity_and_pricing_signals_present"]
+              })
+            }
+          }
+        ]
+      }), { status: 200 })) as typeof fetch);
+
+      const decision = await decideDiscoveredCandidateAction({
+        candidate: {
+          url: "https://www.bayrakmuzayede.com/abidin-dino-kompozisyon123.html",
+          sourcePageType: "lot",
+          provenance: "listing_expansion",
+          score: 0.9,
+          discoveredFromUrl: "https://www.bayrakmuzayede.com/arama.html?search_words=Abidin%20Dino"
+        },
+        query: {
+          artist: "Abidin Dino",
+          title: undefined
+        } as any,
+        sourceName: "Bayrak",
+        localAiConfig: {
+          enabled: true,
+          provider: "openai_compatible",
+          baseUrl: "http://127.0.0.1:1234/v1",
+          apiKey: "lm-studio",
+          model: "local-model",
+          mode: "aggressive",
+          minConfidenceAuto: 0.65,
+          maxLatencyMs: 3000,
+          maxTokens: 120
+        }
+      });
+
+      expect(decision.keep).toBe(true);
+      expect(decision.trace.outcome).toBe("accept_candidate");
+      expect(decision.trace.deterministic_veto).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("applies deterministic veto even when AI could accept", async () => {
+    const decision = await decideDiscoveredCandidateAction({
+      candidate: {
+        url: "https://www.bayrakmuzayede.com/sultan-abdulhamid-han-donemi-gumus-5-kurus-para81011.html",
+        sourcePageType: "lot",
+        provenance: "listing_expansion",
+        score: 0.9,
+        discoveredFromUrl: "https://www.bayrakmuzayede.com/arama.html?search_words=Abidin%20Dino"
+      },
+      query: {
+        artist: "Abidin Dino",
+        title: undefined
+      } as any,
+      sourceName: "Bayrak",
+      localAiConfig: {
+        enabled: false,
+        provider: "openai_compatible",
+        baseUrl: null,
+        apiKey: null,
+        model: "local-model",
+        mode: "aggressive",
+        minConfidenceAuto: 0.65,
+        maxLatencyMs: 3000,
+        maxTokens: 120
+      }
+    });
+
+    expect(decision.keep).toBe(false);
+    expect(decision.trace.outcome).toBe("reject_candidate");
+    expect(decision.trace.deterministic_veto).toBe(true);
+  });
+
+  it("queues low-confidence AI discovery outcomes for review", async () => {
+    try {
+      vi.stubGlobal("fetch", (async () => new Response(JSON.stringify({
+        model: "local-model",
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: "accept_candidate",
+                confidence: 0.42,
+                reasons: ["weak_signals"]
+              })
+            }
+          }
+        ]
+      }), { status: 200 })) as typeof fetch);
+
+      const decision = await decideDiscoveredCandidateAction({
+        candidate: {
+          url: "https://www.clarmuzayede.com/hemen-al/resim/9596",
+          sourcePageType: "lot",
+          provenance: "listing_expansion",
+          score: 0.72,
+          discoveredFromUrl: "https://www.clarmuzayede.com/hemen-al?q=Abidin%20Dino"
+        },
+        query: {
+          artist: "Abidin Dino",
+          title: undefined
+        } as any,
+        sourceName: "Clar",
+        localAiConfig: {
+          enabled: true,
+          provider: "openai_compatible",
+          baseUrl: "http://127.0.0.1:1234/v1",
+          apiKey: "lm-studio",
+          model: "local-model",
+          mode: "aggressive",
+          minConfidenceAuto: 0.7,
+          maxLatencyMs: 3000,
+          maxTokens: 120
+        }
+      });
+
+      expect(decision.keep).toBe(true);
+      expect(decision.trace.outcome).toBe("queue_review");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to queue_review outcome when local AI is unavailable", async () => {
+    const decision = await decideDiscoveredCandidateAction({
+      candidate: {
+        url: "https://www.clarmuzayede.com/hemen-al/resim/9596",
+        sourcePageType: "lot",
+        provenance: "listing_expansion",
+        score: 0.72,
+        discoveredFromUrl: "https://www.clarmuzayede.com/hemen-al?q=Abidin%20Dino"
+      },
+      query: {
+        artist: "Abidin Dino",
+        title: undefined
+      } as any,
+      sourceName: "Clar",
+      localAiConfig: {
+        enabled: true,
+        provider: "openai_compatible",
+        baseUrl: "http://127.0.0.1:1234/v1",
+        apiKey: "lm-studio",
+        model: "local-model",
+        mode: "aggressive",
+        minConfidenceAuto: 0.7,
+        maxLatencyMs: 1,
+        maxTokens: 120
+      }
+    });
+
+    expect(decision.keep).toBe(true);
+    expect(decision.trace.action).toBe("queue_review");
+    expect(decision.trace.outcome).toBe("queue_review");
+    expect(decision.trace.reasons).toContain("local_ai_unavailable_fallback");
   });
 
   it("prioritizes discovered lot candidates ahead of queued query variants", () => {

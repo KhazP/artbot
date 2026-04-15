@@ -61,6 +61,10 @@ describe("setup env persistence", () => {
     expect(parsedEnv.LLM_BASE_URL).toBe("http://127.0.0.1:1234/v1");
     expect(parsedEnv.LLM_API_KEY).toBe("lm-studio");
     expect(parsedEnv.DEFAULT_REPORT_SURFACE).toBe("ask");
+    expect(parsedEnv.WEB_DISCOVERY_PROVIDER).toBe("searxng");
+    expect(parsedEnv.WEB_DISCOVERY_SECONDARY_PROVIDER).toBe("none");
+    expect(parsedEnv.SEARXNG_BASE_URL).toBe("http://127.0.0.1:8080");
+    expect(parsedEnv.FIRECRAWL_ENABLED).toBe("false");
     expect(parsedProfiles.error).toBeNull();
     expect(parsedProfiles.profiles.map((profile) => profile.id)).toEqual(["artsy-auth", "sanatfiyat-license"]);
   });

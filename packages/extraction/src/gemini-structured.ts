@@ -138,6 +138,36 @@ function parseResponseText(text: string): StructuredGeminiExtraction | null {
   return null;
 }
 
+function structuredLlmTimeoutMs(): number {
+  const parsed = Number(process.env.STRUCTURED_LLM_TIMEOUT_MS ?? 12_000);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 12_000;
+  }
+  return Math.max(1_000, Math.floor(parsed));
+}
+
+async function postJsonWithTimeout(
+  endpoint: string,
+  headers: Record<string, string>,
+  payload: unknown,
+  timeoutMs: number
+): Promise<Response | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(endpoint, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify(payload)
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function callGemini(input: GeminiExtractionInput): Promise<StructuredGeminiExtraction | null> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -147,24 +177,26 @@ async function callGemini(input: GeminiExtractionInput): Promise<StructuredGemin
   const model = input.model ?? process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite";
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const prompt = buildPrompt(input.content);
+  const timeoutMs = structuredLlmTimeoutMs();
 
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
+    const response = await postJsonWithTimeout(
+      endpoint,
+      {
         "content-type": "application/json"
       },
-      body: JSON.stringify({
+      {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0,
           responseMimeType: "application/json",
           responseSchema: jsonSchema
         }
-      })
-    });
+      },
+      timeoutMs
+    );
 
-    if (!response.ok) {
+    if (!response?.ok) {
       return null;
     }
 
@@ -196,6 +228,7 @@ async function callOpenAiCompatible(input: GeminiExtractionInput): Promise<Struc
   const model = input.model ?? process.env.MODEL_CHEAP_DEFAULT ?? "google/gemma-4-26b-a4b";
   const apiKey = process.env.LLM_API_KEY?.trim();
   const prompt = buildPrompt(input.content);
+  const timeoutMs = structuredLlmTimeoutMs();
   const headers: Record<string, string> = {
     "content-type": "application/json"
   };
@@ -219,10 +252,10 @@ async function callOpenAiCompatible(input: GeminiExtractionInput): Promise<Struc
   };
 
   try {
-    let response = await fetch(endpoint, {
-      method: "POST",
+    let response = await postJsonWithTimeout(
+      endpoint,
       headers,
-      body: JSON.stringify({
+      {
         ...baseBody,
         response_format: {
           type: "json_schema",
@@ -232,16 +265,13 @@ async function callOpenAiCompatible(input: GeminiExtractionInput): Promise<Struc
             strict: true
           }
         }
-      })
-    });
+      },
+      timeoutMs
+    );
 
-    if (!response.ok) {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(baseBody)
-      });
-      if (!response.ok) {
+    if (!response?.ok) {
+      response = await postJsonWithTimeout(endpoint, headers, baseBody, timeoutMs);
+      if (!response?.ok) {
         return null;
       }
     }

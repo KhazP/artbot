@@ -1,8 +1,22 @@
 import { AuthManager } from "@artbot/auth-manager";
-import type { AccessContext, HostHealthRecord, ResearchQuery, SourcePlanItem, SourcePlanSelectionState } from "@artbot/shared-types";
+import type {
+  AccessContext,
+  DiscoveryProviderDiagnostics,
+  HostHealthRecord,
+  ResearchQuery,
+  SourcePlanItem,
+  SourcePlanSelectionState
+} from "@artbot/shared-types";
 import { GenericSourceAdapter, type SourceAdapter, type SourceCandidate } from "@artbot/source-adapters";
 import { buildDiscoveryConfigFromEnv, discoverWebCandidates, expandCandidatesLight } from "./discovery.js";
 import { evaluateSourcePolicy } from "./source-policy.js";
+import {
+  buildEntrypointsForHost,
+  inferSourceFamilyBucket,
+  resolveFamilyPackByHost,
+  type SourceFamilyPack,
+  type SourceFamilyBucket
+} from "./source-families.js";
 
 export interface PlannedSource {
   adapter: SourceAdapter;
@@ -12,6 +26,31 @@ export interface PlannedSource {
   healthSkipReason?: string | null;
   healthSelectionNote?: string | null;
 }
+
+export interface SourcePlanningResult {
+  plannedSources: PlannedSource[];
+  discoveryDiagnostics: DiscoveryProviderDiagnostics[];
+}
+
+type HostHealthDimension = {
+  source_family: string;
+  crawl_lane: "deterministic" | "cheap_fetch" | "crawlee" | "browser";
+  access_mode: "anonymous" | "authorized" | "licensed";
+  total_attempts: number;
+  success_count: number;
+  blocked_count: number;
+  auth_required_count: number;
+  failure_count: number;
+  reliability_score: number;
+  last_status: HostHealthRecord["last_status"];
+  last_failure_class: HostHealthRecord["last_failure_class"];
+  last_attempt_at: string;
+  updated_at: string;
+};
+
+type HostHealthRecordWithDimensions = HostHealthRecord & {
+  dimensions?: Record<string, HostHealthDimension>;
+};
 
 function hostFromUrl(url: string): string | null {
   try {
@@ -29,19 +68,122 @@ function isLikelyTurkeyHost(host: string): boolean {
   return host.endsWith(".tr") || host.includes("muzayede") || host.includes("sanat");
 }
 
-function buildDynamicAdapterForHost(host: string): SourceAdapter {
-  return new GenericSourceAdapter({
-    id: `dynamic-web-${host.replace(/[^a-z0-9]+/gi, "-")}`,
-    sourceName: `Web Discovery (${host})`,
-    venueName: host,
+function discoveredUrlLooksLikeRoutablePage(url: string): boolean {
+  const lower = url.toLowerCase();
+  return (
+    /(\/lot\/|\/lots\/|\/auction\/lot|\/auction-lot\/|\/item\/\d+|\/lot-|\/products\/|\/urun\/|\/artist\/|\/artists\/)/.test(lower)
+    || /(\/archive|\/catalog|\/arsiv|\/search|\/arama|\/results?)/.test(lower)
+    || /\/[a-z0-9-]+\d+\.html(?:\?.*)?$/i.test(lower)
+  );
+}
+
+function inferDynamicSourcePageType(url: string): SourceCandidate["sourcePageType"] {
+  const lower = url.toLowerCase();
+  if (discoveredUrlLooksLikeRoutablePage(url)) {
+    if (/(\/artist\/|\/artists\/)/.test(lower)) {
+      return "artist_page";
+    }
+    if (/(\/archive|\/catalog|\/arsiv|\/search|\/arama|\/results?)/.test(lower)) {
+      return "listing";
+    }
+    return "lot";
+  }
+  if (/(\/archive|\/catalog|\/arsiv|\/search|\/arama|\/results?)/.test(lower)) {
+    return "listing";
+  }
+  return "other";
+}
+
+function inferSearchPathFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const preferredKeys = ["search_words", "query", "entry", "keyword", "q", "term", "search", "s"];
+    for (const key of preferredKeys) {
+      if (parsed.searchParams.has(key)) {
+        return `${parsed.pathname}?${key}=`;
+      }
+    }
+  } catch {
+    // Ignore malformed URLs.
+  }
+  return null;
+}
+
+function inferSearchPathFromPack(pack: SourceFamilyPack | null): string | null {
+  if (!pack) {
+    return null;
+  }
+  for (const path of pack.verified_search_paths ?? []) {
+    const normalized = path.startsWith("/") ? path : `/${path}`;
+    if (/[?&](?:q|query|entry|keyword|term|search|s|search_words)=/i.test(normalized)) {
+      return normalized.replace(/([?&](?:q|query|entry|keyword|term|search|s|search_words)=).*/i, "$1");
+    }
+  }
+  return null;
+}
+
+function buildHostFingerprintAdapter(input: {
+  host: string;
+  discoveredUrl: string;
+  sourceHints?: string[];
+  seedCandidates?: SourceCandidate[];
+}): SourceAdapter {
+  const familyPack = resolveFamilyPackByHost(input.host);
+  const sourcePageType = inferDynamicSourcePageType(input.discoveredUrl);
+  const verifiedSearchPath = inferSearchPathFromPack(familyPack);
+  const allowUnverifiedSearchSeeds = process.env.ALLOW_UNVERIFIED_SEARCH_SEEDS === "true";
+  const inferredUnverifiedSearchPath = inferSearchPathFromUrl(input.discoveredUrl);
+  const searchPath = verifiedSearchPath ?? (allowUnverifiedSearchSeeds ? inferredUnverifiedSearchPath : null);
+  const supportsSearch = Boolean(searchPath);
+  const sourceFamily = familyPack?.id ?? `open-web-${input.host.replace(/[^a-z0-9]+/gi, "-")}`;
+  const crawlStrategies = [
+    supportsSearch ? "search" : null,
+    sourcePageType === "lot" ? null : "listing_to_lot",
+    familyPack?.entry_paths.some((entryPath) => /(sitemap|robots)/i.test(entryPath)) ? "sitemap" : null,
+    familyPack?.entry_paths.some((entryPath) => /(archive|catalog|arsiv|artists?)/i.test(entryPath)) ? "archive_index" : null,
+    "rendered_dom"
+  ].filter((value): value is SourceAdapter["crawlStrategies"][number] => value !== null);
+  const seedCandidates = (input.seedCandidates ?? []).slice(0, 32);
+  const baseAdapter = new GenericSourceAdapter({
+    id: `host-fingerprint-${input.host.replace(/[^a-z0-9]+/gi, "-")}`,
+    sourceName: `Web Discovery (${input.host})`,
+    venueName: input.host,
     venueType: "other",
-    sourcePageType: "listing",
+    sourcePageType: sourcePageType === "other" ? "listing" : sourcePageType,
     tier: 4,
-    country: isLikelyTurkeyHost(host) ? "Turkey" : null,
+    country: isLikelyTurkeyHost(input.host) ? "Turkey" : null,
     city: null,
-    baseUrl: `https://${host}`,
-    searchPath: "/search?q="
+    baseUrl: `https://${input.host}`,
+    searchPath: searchPath ?? "/",
+    crawlStrategies,
+    capabilities: {
+      version: "1",
+      source_family: sourceFamily,
+      access_modes: ["anonymous", "authorized", "licensed"],
+      browser_support: "optional",
+      sale_modes: ["realized", "estimate", "asking", "unknown"],
+      evidence_requirements: ["raw_snapshot", "screenshot"],
+      structured_data_likelihood: sourcePageType === "lot" || sourcePageType === "artist_page" ? "medium" : "low",
+      preferred_discovery: "web_discovery"
+    }
   });
+
+  return {
+    ...baseAdapter,
+    discoverCandidates: async () => {
+      if (seedCandidates.length > 0) {
+        return seedCandidates;
+      }
+      return buildEntrypointsForHost(input.host, input.discoveredUrl, supportsSearch).map((url) => ({
+        url,
+        sourcePageType: inferDynamicSourcePageType(url),
+        provenance: "signature_expansion",
+        score: 0.56,
+        discoveredFromUrl: input.discoveredUrl
+      }));
+    },
+    extract: (candidate, context) => baseAdapter.extract(candidate, context)
+  };
 }
 
 function isTurkeySource(adapter: SourceAdapter): boolean {
@@ -129,13 +271,82 @@ function hostsForPlannedSource(adapter: SourceAdapter, candidates: SourceCandida
   return [...hosts];
 }
 
+function normalizeFamilyHealthKey(value: string): string {
+  return value.toLowerCase().replace(/^(?:open-web|dynamic-web|host-fingerprint)-/, "");
+}
+
+function sourceFamiliesLikelyMatch(left: string, right: string): boolean {
+  const normalizedLeft = normalizeFamilyHealthKey(left);
+  const normalizedRight = normalizeFamilyHealthKey(right);
+  return (
+    normalizedLeft === normalizedRight
+    || normalizedLeft.includes(normalizedRight)
+    || normalizedRight.includes(normalizedLeft)
+  );
+}
+
+function applyLaneAwareHealthScope(
+  record: HostHealthRecord,
+  adapter: SourceAdapter,
+  accessMode: PlannedSource["accessContext"]["mode"]
+): HostHealthRecord {
+  const laneAwareRecord = record as HostHealthRecordWithDimensions;
+  const dimensions = Object.values(laneAwareRecord.dimensions ?? {}).filter(
+    (dimension) =>
+      sourceFamiliesLikelyMatch(dimension.source_family, adapter.capabilities.source_family)
+      && dimension.access_mode === accessMode
+  );
+  if (dimensions.length === 0) {
+    return record;
+  }
+  const successfulDimensions = dimensions
+    .filter((dimension) => dimension.success_count > 0)
+    .sort((left, right) => {
+      const reliabilityDelta = right.reliability_score - left.reliability_score;
+      if (reliabilityDelta !== 0) {
+        return reliabilityDelta;
+      }
+      const successDelta = right.success_count - left.success_count;
+      if (successDelta !== 0) {
+        return successDelta;
+      }
+      return right.updated_at.localeCompare(left.updated_at);
+    });
+  const primaryDimension = successfulDimensions[0]
+    ?? [...dimensions].sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0]
+    ?? null;
+  if (!primaryDimension) {
+    return record;
+  }
+
+  return {
+    ...record,
+    total_attempts: primaryDimension.total_attempts,
+    success_count: primaryDimension.success_count,
+    blocked_count: primaryDimension.blocked_count,
+    auth_required_count: primaryDimension.auth_required_count,
+    failure_count: primaryDimension.failure_count,
+    consecutive_failures:
+      primaryDimension.success_count > 0
+        ? 0
+        : Math.min(record.consecutive_failures, Math.max(1, primaryDimension.total_attempts)),
+    reliability_score: Number(primaryDimension.reliability_score.toFixed(4)),
+    last_status: primaryDimension.last_status ?? record.last_status,
+    last_failure_class: primaryDimension.last_failure_class ?? record.last_failure_class,
+    last_attempt_at: primaryDimension.last_attempt_at ?? record.last_attempt_at,
+    updated_at: primaryDimension.updated_at ?? record.updated_at
+  };
+}
+
 function selectRelevantHostHealth(
   adapter: SourceAdapter,
   candidates: SourceCandidate[],
-  hostHealthIndex: Map<string, HostHealthRecord[]>
+  hostHealthIndex: Map<string, HostHealthRecord[]>,
+  accessMode: PlannedSource["accessContext"]["mode"]
 ): HostHealthRecord | null {
   const matches = hostsForPlannedSource(adapter, candidates)
     .flatMap((host) => hostHealthIndex.get(host) ?? [])
+    .map((record) => applyLaneAwareHealthScope(record, adapter, accessMode))
     .sort((left, right) => right.total_attempts - left.total_attempts);
 
   return matches[0] ?? null;
@@ -157,17 +368,37 @@ function evaluateSourceHealthDecision(
   adapter: SourceAdapter,
   candidates: SourceCandidate[],
   hostHealthIndex: Map<string, HostHealthRecord[]>,
-  hostAdapterIndex: Map<string, Set<string>>
+  hostAdapterIndex: Map<string, Set<string>>,
+  accessMode: PlannedSource["accessContext"]["mode"],
+  analysisMode: ResearchQuery["analysisMode"]
 ): { skipReason: string | null; scoreAdjustment: number; note: string | null } {
   const candidateHosts = hostsForPlannedSource(adapter, candidates);
-  if (candidateHosts.some((host) => (hostAdapterIndex.get(host)?.size ?? 0) > 1)) {
-    return { skipReason: null, scoreAdjustment: 0, note: null };
-  }
+  const hasSharedHost = candidateHosts.some((host) => (hostAdapterIndex.get(host)?.size ?? 0) > 1);
 
-  const record = selectRelevantHostHealth(adapter, candidates, hostHealthIndex);
+  const record = selectRelevantHostHealth(adapter, candidates, hostHealthIndex, accessMode);
   if (!record) {
     return { skipReason: null, scoreAdjustment: 0, note: null };
   }
+  const allowHardSkip = analysisMode !== "comprehensive";
+  const asDecision = (
+    skipReason: string,
+    scoreAdjustment: number,
+    note: string,
+    fallbackPenalty = -80
+  ): { skipReason: string | null; scoreAdjustment: number; note: string | null } => {
+    if (allowHardSkip) {
+      return { skipReason, scoreAdjustment, note };
+    }
+    const deprioritizedNote = note.replace(/^Skipped because\s+/i, "Deprioritized because ");
+    const sharedHostNote = hasSharedHost
+      ? " Shared host with multiple adapters; comprehensive mode keeps this host eligible behind healthier families."
+      : " Comprehensive mode keeps this host eligible behind healthier families.";
+    return {
+      skipReason: null,
+      scoreAdjustment: Math.min(scoreAdjustment, fallbackPenalty),
+      note: `${deprioritizedNote}${sharedHostNote}`
+    };
+  };
 
   const family = adapter.capabilities.source_family.toLowerCase();
   const publicOnlySource = !adapter.requiresAuth && !adapter.requiresLicense;
@@ -178,11 +409,12 @@ function evaluateSourceHealthDecision(
     && record.success_count === 0
     && record.last_failure_class === "not_found"
   ) {
-    return {
-      skipReason: `Persisted host health for ${record.host} shows ${record.total_attempts} attempts with no successful records and repeated not-found failures.`,
-      scoreAdjustment: -120,
-      note: `Skipped because ${record.host} has repeated not-found failures across runs.`
-    };
+    return asDecision(
+      `Persisted host health for ${record.host} shows ${record.total_attempts} attempts with no successful records and repeated not-found failures.`,
+      -120,
+      `Skipped because ${record.host} has repeated not-found failures across runs.`,
+      -95
+    );
   }
 
   if (
@@ -196,24 +428,26 @@ function evaluateSourceHealthDecision(
       || record.last_failure_class === "host_circuit"
     )
   ) {
-    return {
-      skipReason: `Persisted host health for ${record.host} shows ${record.total_attempts} attempts with zero successful records and repeated transport-level failures.`,
-      scoreAdjustment: -110,
-      note: `Skipped because ${record.host} has repeated transport failures with no successful records across recent runs.`
-    };
+    return asDecision(
+      `Persisted host health for ${record.host} shows ${record.total_attempts} attempts with zero successful records and repeated transport-level failures.`,
+      -110,
+      `Skipped because ${record.host} has repeated transport failures with no successful records across recent runs.`,
+      -90
+    );
   }
 
   if (
     adapter.id === "clar-archive"
-    && record.total_attempts >= 40
-    && record.blocked_count >= 20
-    && record.reliability_score < 0.05
+    && record.total_attempts >= 20
+    && (record.blocked_count >= 8 || record.last_failure_class === "waf_challenge")
+    && record.reliability_score < 0.1
   ) {
-    return {
-      skipReason: `Persisted host health for ${record.host} shows Clar archive pages are heavily blocked and rarely produce usable records.`,
-      scoreAdjustment: -90,
-      note: `Skipped because Clar archive has persistent blocking with very low usable yield.`
-    };
+    return asDecision(
+      `Persisted host health for ${record.host} shows Clar archive pages are heavily blocked and rarely produce usable records.`,
+      -90,
+      "Skipped because Clar archive has persistent blocking with very low usable yield.",
+      -105
+    );
   }
 
   if (
@@ -223,11 +457,12 @@ function evaluateSourceHealthDecision(
     && record.success_count === 0
     && record.reliability_score === 0
   ) {
-    return {
-      skipReason: `Persisted host health for ${record.host} shows ${record.total_attempts} attempts with zero successful records.`,
-      scoreAdjustment: -100,
-      note: `Skipped because ${record.host} has produced no successful records across recent runs.`
-    };
+    return asDecision(
+      `Persisted host health for ${record.host} shows ${record.total_attempts} attempts with zero successful records.`,
+      -100,
+      `Skipped because ${record.host} has produced no successful records across recent runs.`,
+      -85
+    );
   }
 
   let scoreAdjustment = 0;
@@ -256,7 +491,8 @@ function evaluateSourceHealthDecision(
 
 function applyPersistedHealthSignals(
   planned: PlannedSource[],
-  hostHealthIndex: Map<string, HostHealthRecord[]>
+  hostHealthIndex: Map<string, HostHealthRecord[]>,
+  analysisMode: ResearchQuery["analysisMode"]
 ): PlannedSource[] {
   const hostAdapterIndex = buildHostAdapterIndex(planned);
   return planned.map((entry) => {
@@ -264,7 +500,9 @@ function applyPersistedHealthSignals(
       entry.adapter,
       entry.candidates,
       hostHealthIndex,
-      hostAdapterIndex
+      hostAdapterIndex,
+      entry.accessContext.mode,
+      analysisMode
     );
 
     return {
@@ -293,10 +531,57 @@ function sortSources(query: ResearchQuery, adapters: SourceAdapter[]): SourceAda
   });
 }
 
-function selectionBudgetForMode(analysisMode: ResearchQuery["analysisMode"]): number {
-  if (analysisMode === "fast") return 4;
-  if (analysisMode === "balanced") return 6;
-  return 10;
+interface FamilyQuotaProfile {
+  selectionBudget: number;
+  minimums: Partial<Record<SourceFamilyBucket, number>>;
+}
+
+function familyQuotaProfile(analysisMode: ResearchQuery["analysisMode"]): FamilyQuotaProfile {
+  if (analysisMode === "fast") {
+    return {
+      selectionBudget: 4,
+      minimums: {
+        turkey_first_party: 1,
+        turkey_platform: 1,
+        global_major: 1,
+        global_marketplace: 1
+      }
+    };
+  }
+  if (analysisMode === "balanced") {
+    return {
+      selectionBudget: 8,
+      minimums: {
+        turkey_first_party: 2,
+        turkey_platform: 1,
+        global_major: 1,
+        global_marketplace: 1,
+        db_meta: 1
+      }
+    };
+  }
+  return {
+    selectionBudget: 14,
+    minimums: {
+      turkey_first_party: 3,
+      turkey_platform: 2,
+      global_major: 2,
+      global_marketplace: 2,
+      global_direct_sale: 1,
+      db_meta: 1
+    }
+  };
+}
+
+function familyBucketForPlannedSource(planned: PlannedSource): SourceFamilyBucket {
+  const hosts = planned.candidates
+    .map((candidate) => hostFromUrl(candidate.url))
+    .filter((host): host is string => Boolean(host));
+  return inferSourceFamilyBucket({
+    sourceFamily: planned.adapter.capabilities.source_family,
+    sourceName: planned.adapter.sourceName,
+    hosts
+  });
 }
 
 function accessStatusPriority(status: PlannedSource["accessContext"]["sourceAccessStatus"]): number {
@@ -423,26 +708,6 @@ function reorderPlannedSourcesForSelection(query: ResearchQuery, planned: Planne
     });
 }
 
-function maxSelectedPerFamily(sourceFamily: string, analysisMode: ResearchQuery["analysisMode"]): number {
-  const normalized = sourceFamily.toLowerCase();
-  if (analysisMode === "fast") {
-    return 1;
-  }
-
-  if (
-    normalized.includes("clar")
-    || normalized.includes("muzayedeapp")
-    || normalized.includes("portakal")
-    || normalized.includes("sanatfiyat")
-    || normalized.includes("liveauctioneers")
-    || normalized.includes("invaluable")
-  ) {
-    return 2;
-  }
-
-  return 1;
-}
-
 function selectionReasonForState(
   planned: PlannedSource,
   state: SourcePlanSelectionState,
@@ -486,11 +751,26 @@ export function buildSourcePlanItems(
   candidateCap: number,
   analysisMode: ResearchQuery["analysisMode"] = "balanced"
 ): SourcePlanItem[] {
-  const selectionBudget = selectionBudgetForMode(analysisMode);
+  const quotaProfile = familyQuotaProfile(analysisMode);
+  const selectionBudget = quotaProfile.selectionBudget;
   let selectedCount = 0;
-  const familySelections = new Map<string, number>();
+  const bucketSelections = new Map<SourceFamilyBucket, number>();
+  const availableByBucket = plannedSources.reduce<Map<SourceFamilyBucket, number>>((acc, planned) => {
+    const isRoutable =
+      planned.accessContext.sourceAccessStatus !== "blocked"
+      && !planned.healthSkipReason
+      && planned.accessContext.sourceAccessStatus !== "auth_required"
+      && planned.candidates.length > 0;
+    if (!isRoutable) {
+      return acc;
+    }
+    const bucket = familyBucketForPlannedSource(planned);
+    acc.set(bucket, (acc.get(bucket) ?? 0) + 1);
+    return acc;
+  }, new Map<SourceFamilyBucket, number>());
 
   return plannedSources.map((planned, index) => {
+    const bucket = familyBucketForPlannedSource(planned);
     const skipReason =
       planned.healthSkipReason
       ?? planned.accessContext.blockerReason
@@ -500,6 +780,12 @@ export function buildSourcePlanItems(
           ? "No candidates discovered for this source."
           : null);
 
+    const isRoutable =
+      planned.accessContext.sourceAccessStatus !== "blocked"
+      && !planned.healthSkipReason
+      && planned.accessContext.sourceAccessStatus !== "auth_required"
+      && planned.candidates.length > 0;
+
     let selectionState: SourcePlanSelectionState;
     if (planned.accessContext.sourceAccessStatus === "blocked") {
       selectionState = "blocked";
@@ -507,20 +793,34 @@ export function buildSourcePlanItems(
       selectionState = "skipped";
     } else if (planned.accessContext.sourceAccessStatus === "auth_required" || planned.candidates.length === 0) {
       selectionState = "skipped";
-    } else if (
-      (familySelections.get(planned.adapter.capabilities.source_family) ?? 0)
-      >= maxSelectedPerFamily(planned.adapter.capabilities.source_family, analysisMode)
-    ) {
-      selectionState = "deprioritized";
-    } else if (selectedCount >= selectionBudget) {
+    } else if (!isRoutable || selectedCount >= selectionBudget) {
       selectionState = "deprioritized";
     } else {
-      selectionState = "selected";
-      selectedCount += 1;
-      familySelections.set(
-        planned.adapter.capabilities.source_family,
-        (familySelections.get(planned.adapter.capabilities.source_family) ?? 0) + 1
-      );
+      const minRequired = quotaProfile.minimums[bucket] ?? 0;
+      const effectiveMinRequired = Math.min(minRequired, availableByBucket.get(bucket) ?? 0);
+      const currentBucketSelected = bucketSelections.get(bucket) ?? 0;
+      const remainingSlots = selectionBudget - selectedCount;
+      const requiredOutstanding = Object.entries(quotaProfile.minimums).reduce((sum, [bucketKey, minimum]) => {
+        const castBucket = bucketKey as SourceFamilyBucket;
+        const available = availableByBucket.get(castBucket) ?? 0;
+        if (available === 0) {
+          return sum;
+        }
+        const selected = bucketSelections.get(castBucket) ?? 0;
+        const effectiveMinimum = Math.min(minimum ?? 0, available);
+        return sum + Math.max(0, effectiveMinimum - selected);
+      }, 0);
+      const currentBucketStillRequired = currentBucketSelected < effectiveMinRequired;
+      const wouldBreakMinimumCoverage =
+        !currentBucketStillRequired && remainingSlots - 1 < requiredOutstanding;
+
+      if (wouldBreakMinimumCoverage) {
+        selectionState = "deprioritized";
+      } else {
+        selectionState = "selected";
+        selectedCount += 1;
+        bucketSelections.set(bucket, currentBucketSelected + 1);
+      }
     }
 
     return {
@@ -538,6 +838,7 @@ export function buildSourcePlanItems(
       selection_reason: selectionReasonForState(planned, selectionState, planned.candidates.length, skipReason),
       priority_rank: index + 1,
       skip_reason: skipReason,
+      legal_posture: planned.accessContext.legalPosture,
       capability_version: planned.adapter.capabilities.version,
       capabilities: planned.adapter.capabilities
     };
@@ -568,16 +869,20 @@ function applyPreferredDiscoveryProviders(query: ResearchQuery, config: ReturnTy
   };
 }
 
-export async function planSources(
+export async function planSourcesWithDiagnostics(
   query: ResearchQuery,
   adapters: SourceAdapter[],
   authManager: AuthManager,
   hostHealth: HostHealthRecord[] = []
-): Promise<PlannedSource[]> {
+): Promise<SourcePlanningResult> {
   const discoveryConfig = applyPreferredDiscoveryProviders(query, buildDiscoveryConfigFromEnv(query.analysisMode));
   const sorted = sortSources(query, adapters);
   const planned: PlannedSource[] = [];
   const hostHealthIndex = buildHostHealthIndex(hostHealth);
+  const finalize = (plannedSources: PlannedSource[]): SourcePlanningResult => ({
+    plannedSources,
+    discoveryDiagnostics: discoveryConfig.webDiscoveryDiagnostics ?? []
+  });
 
   for (const adapter of sorted) {
     const sourcePolicyDecision = evaluateSourcePolicy(adapter, query);
@@ -590,7 +895,8 @@ export async function planSources(
       allowLicensed: query.allowLicensed,
       manualLoginCheckpoint: query.manualLoginCheckpoint,
       cookieFile: query.cookieFile,
-      licensedIntegrations: query.licensedIntegrations
+      licensedIntegrations: query.licensedIntegrations,
+      legalPosture: sourcePolicyDecision.legalPosture
     });
 
     if (!sourcePolicyDecision.allowed) {
@@ -626,7 +932,9 @@ export async function planSources(
 
   const webCandidates = await discoverWebCandidates(query, discoveryConfig);
   if (webCandidates.length === 0) {
-    return reorderPlannedSourcesForSelection(query, applyPersistedHealthSignals(planned, hostHealthIndex));
+    return finalize(
+      reorderPlannedSourcesForSelection(query, applyPersistedHealthSignals(planned, hostHealthIndex, query.analysisMode))
+    );
   }
 
   const hostToPlanned = new Map<string, PlannedSource>();
@@ -670,7 +978,41 @@ export async function planSources(
   }
 
   for (const [host, candidates] of dynamicByHost) {
-    const adapter = buildDynamicAdapterForHost(host);
+    const representative = candidates[0]?.url ?? `https://${host}/`;
+    const familyPack = resolveFamilyPackByHost(host);
+    const seededFromDiscovery = candidates
+      .filter((candidate) => discoveredUrlLooksLikeRoutablePage(candidate.url))
+      .map((candidate) => ({
+        ...candidate,
+        sourcePageType: inferDynamicSourcePageType(candidate.url)
+      }));
+    const fallbackEntrypoints = buildEntrypointsForHost(
+      host,
+      representative,
+      Boolean(familyPack?.verified_search_paths?.length)
+    ).map((url) => ({
+      url,
+      sourcePageType: inferDynamicSourcePageType(url),
+      provenance: "signature_expansion" as const,
+      score: 0.56,
+      discoveredFromUrl: representative
+    }));
+    const dynamicCandidates = seededFromDiscovery.length > 0 ? seededFromDiscovery : fallbackEntrypoints;
+    const dedupedDynamicCandidates: SourceCandidate[] = [];
+    const seenUrls = new Set<string>();
+    for (const candidate of dynamicCandidates) {
+      if (seenUrls.has(candidate.url)) {
+        continue;
+      }
+      seenUrls.add(candidate.url);
+      dedupedDynamicCandidates.push(candidate);
+    }
+    const adapter = buildHostFingerprintAdapter({
+      host,
+      discoveredUrl: representative,
+      sourceHints: familyPack?.query_lexicon,
+      seedCandidates: dedupedDynamicCandidates
+    });
     const sourcePolicyDecision = evaluateSourcePolicy(adapter, query);
     const accessContext = authManager.resolveAccess({
       sourceName: adapter.sourceName,
@@ -681,7 +1023,8 @@ export async function planSources(
       allowLicensed: query.allowLicensed,
       manualLoginCheckpoint: query.manualLoginCheckpoint,
       cookieFile: query.cookieFile,
-      licensedIntegrations: query.licensedIntegrations
+      licensedIntegrations: query.licensedIntegrations,
+      legalPosture: sourcePolicyDecision.legalPosture
     });
 
     if (!sourcePolicyDecision.allowed) {
@@ -693,14 +1036,14 @@ export async function planSources(
     planned.push({
       adapter,
       accessContext,
-      candidates: reorderCandidates(candidates.slice(0, discoveryConfig.maxUrlsPerDiscoveredDomain)),
+      candidates: reorderCandidates(dedupedDynamicCandidates.slice(0, discoveryConfig.maxUrlsPerDiscoveredDomain)),
       selectionScore: 0,
       healthSkipReason: null,
       healthSelectionNote: null
     });
   }
 
-  const plannedWithHealth = applyPersistedHealthSignals(planned, hostHealthIndex);
+  const plannedWithHealth = applyPersistedHealthSignals(planned, hostHealthIndex, query.analysisMode);
 
   const totalCandidates = plannedWithHealth.reduce((sum, source) => sum + source.candidates.length, 0);
   if (totalCandidates > discoveryConfig.maxTotalCandidatesPerRun) {
@@ -726,8 +1069,17 @@ export async function planSources(
         break;
       }
     }
-    return reorderPlannedSourcesForSelection(query, trimmed.filter((source) => source.candidates.length > 0));
+    return finalize(reorderPlannedSourcesForSelection(query, trimmed.filter((source) => source.candidates.length > 0)));
   }
 
-  return reorderPlannedSourcesForSelection(query, plannedWithHealth);
+  return finalize(reorderPlannedSourcesForSelection(query, plannedWithHealth));
+}
+
+export async function planSources(
+  query: ResearchQuery,
+  adapters: SourceAdapter[],
+  authManager: AuthManager,
+  hostHealth: HostHealthRecord[] = []
+): Promise<PlannedSource[]> {
+  return (await planSourcesWithDiagnostics(query, adapters, authManager, hostHealth)).plannedSources;
 }

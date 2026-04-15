@@ -207,6 +207,51 @@ describe("GenericSourceAdapter access handling", () => {
     expect(result.record?.work_title).toBe("Parsed Listing");
   });
 
+  it("keeps hidden estimate ranges valuation-eligible when numeric signals exist", async () => {
+    mocks.parseGenericLotFieldsMock.mockImplementation(() => ({
+      title: "Abidin Dino - Hidden Estimate",
+      artistName: "Abidin Dino",
+      medium: null,
+      dimensionsText: null,
+      year: null,
+      imageUrl: null,
+      lotNumber: "44",
+      estimateLow: 60000,
+      estimateHigh: 90000,
+      priceAmount: 75000,
+      priceType: "estimate",
+      currency: "TRY",
+      saleDate: "2026-02-02",
+      priceHidden: true,
+      buyersPremiumIncluded: null
+    }));
+
+    const adapter = new GenericSourceAdapter({
+      id: "public-source",
+      sourceName: "Artam",
+      venueName: "Artam",
+      venueType: "auction_house",
+      sourcePageType: "lot",
+      tier: 1,
+      country: "Turkey",
+      city: "Istanbul",
+      baseUrl: "https://example.com",
+      searchPath: "/q="
+    });
+
+    const result = await adapter.extract(
+      { url: "https://example.com/lot/44", sourcePageType: "lot", provenance: "seed", score: 0.9 },
+      context("anonymous", "public_access")
+    );
+
+    expect(result.attempt.source_access_status).toBe("price_hidden");
+    expect(result.attempt.accepted_for_evidence).toBe(true);
+    expect(result.attempt.accepted_for_valuation).toBe(true);
+    expect(result.attempt.acceptance_reason).toBe("estimate_range_ready");
+    expect(result.record?.accepted_for_valuation).toBe(true);
+    expect(result.record?.price_hidden).toBe(true);
+  });
+
   it("rejects generic shell pages instead of surfacing them as records", async () => {
     mocks.parseGenericLotFieldsMock.mockImplementation(() => ({
       title: "Anasayfa | Bayrak Müzayede",
