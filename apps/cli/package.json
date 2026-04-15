@@ -61,6 +61,7 @@
     "gradient-string": "^3.0.0",
     "ink": "^5.2.1",
     "ink-text-input": "^6.0.0",
+    "jimp": "^1.6.0",
     "lucide-react": "latest",
     "ora": "^8.2.0",
     "picocolors": "^1.1.1",
