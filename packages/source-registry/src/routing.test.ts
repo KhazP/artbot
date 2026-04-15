@@ -122,6 +122,34 @@ describe("planSources", () => {
     expect(plans[0].accessContext.mode).toBe("anonymous");
   });
 
+  it("keeps auth-required sources selected when an auth profile is available", async () => {
+    const plans = await planSources(
+      {
+        ...baseQuery,
+        authProfileId: "artsy-profile"
+      },
+      [
+        adapter({
+          id: "artsy-source",
+          sourceName: "Artsy",
+          requiresAuth: true
+        })
+      ],
+      new AuthManager([
+        {
+          id: "artsy-profile",
+          mode: "authorized",
+          sourcePatterns: ["Artsy"]
+        }
+      ])
+    );
+
+    expect(plans[0].accessContext.sourceAccessStatus).toBe("auth_required");
+    expect(plans[0].accessContext.mode).toBe("authorized");
+    const sourcePlan = buildSourcePlanItems(plans, 12, "balanced");
+    expect(sourcePlan[0]?.selection_state).toBe("selected");
+  });
+
   it("uses licensed_access when integration is allowed", async () => {
     const plans = await planSources(
       {

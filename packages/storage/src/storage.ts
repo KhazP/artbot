@@ -669,14 +669,16 @@ export class ArtbotStorage {
     };
     next.reliability_score = Number((next.success_count / Math.max(1, next.total_attempts)).toFixed(4));
 
-    this.db
-      .prepare(
-        `INSERT INTO host_health (host, payload_json, updated_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(host)
-         DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
-      )
-      .run(host, JSON.stringify(next), now);
+    this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `INSERT INTO host_health (host, payload_json, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(host)
+           DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`
+        )
+        .run(host, JSON.stringify(next), now)
+    );
 
     return next as HostHealthRecord;
   }
@@ -1162,6 +1164,7 @@ export class ArtbotStorage {
       this.db.prepare(`DELETE FROM cluster_memberships WHERE cluster_id IN (${placeholders})`).run(...existingClusterIds);
     }
     this.db.prepare(`DELETE FROM artwork_clusters WHERE artist_key = ?`).run(artistKey);
+    this.db.prepare(`DELETE FROM review_items WHERE artist_key = ?`).run(artistKey);
 
     for (const cluster of clusters) {
       this.db

@@ -335,11 +335,6 @@ app.get("/runs/:id", async (request, reply) => {
       }
     : computedSummary;
 
-  const artistKey = typeof details.run.query.artist === "string" ? artistKeyFromName(details.run.query.artist) : null;
-  const liveInventory = artistKey ? storage.listInventoryRecordsByArtist(artistKey) : [];
-  const liveClusters = artistKey ? storage.listArtworkClustersByArtist(artistKey) : [];
-  const liveClusterMemberships = artistKey ? storage.listClusterMemberships(artistKey) : [];
-  const liveReviewQueue = artistKey ? storage.listReviewItemsByArtist(artistKey) : [];
   const inventoryPayloadLocalAiDecisions = persistedInventoryPayload?.local_ai_decisions ?? [];
 
   const response = {
@@ -356,10 +351,10 @@ app.get("/runs/:id", async (request, reply) => {
     duplicates,
     per_painting_stats: perPaintingStats,
     inventory_summary: persistedInventoryPayload?.inventory_summary,
-    inventory: liveInventory.length > 0 ? liveInventory : persistedInventoryPayload?.inventory,
-    clusters: liveClusters.length > 0 ? liveClusters : persistedInventoryPayload?.clusters,
-    cluster_memberships: liveClusterMemberships.length > 0 ? liveClusterMemberships : persistedInventoryPayload?.cluster_memberships,
-    review_queue: liveReviewQueue.length > 0 ? liveReviewQueue : persistedInventoryPayload?.review_queue,
+    inventory: persistedInventoryPayload?.inventory,
+    clusters: persistedInventoryPayload?.clusters,
+    cluster_memberships: persistedInventoryPayload?.cluster_memberships,
+    review_queue: persistedInventoryPayload?.review_queue,
     source_hosts: persistedInventoryPayload?.source_hosts,
     checkpoints: persistedInventoryPayload?.checkpoints,
     artifacts: persistedInventoryPayload?.artifacts

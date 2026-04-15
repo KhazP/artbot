@@ -590,6 +590,20 @@ function accessStatusPriority(status: PlannedSource["accessContext"]["sourceAcce
   return 2;
 }
 
+function hasRunnableAuthPath(planned: PlannedSource): boolean {
+  if (planned.accessContext.sourceAccessStatus !== "auth_required") {
+    return true;
+  }
+
+  // Auth-gated sources are runnable when we can authenticate via profile, cookies, or manual checkpoint.
+  return (
+    planned.accessContext.mode !== "anonymous"
+    || Boolean(planned.accessContext.profileId)
+    || Boolean(planned.accessContext.cookieFile)
+    || Boolean(planned.accessContext.manualLoginCheckpoint)
+  );
+}
+
 function candidatePriority(candidate: SourceCandidate): number {
   if (candidate.sourcePageType === "lot") {
     return 0;
@@ -759,7 +773,7 @@ export function buildSourcePlanItems(
     const isRoutable =
       planned.accessContext.sourceAccessStatus !== "blocked"
       && !planned.healthSkipReason
-      && planned.accessContext.sourceAccessStatus !== "auth_required"
+      && hasRunnableAuthPath(planned)
       && planned.candidates.length > 0;
     if (!isRoutable) {
       return acc;
@@ -783,15 +797,18 @@ export function buildSourcePlanItems(
     const isRoutable =
       planned.accessContext.sourceAccessStatus !== "blocked"
       && !planned.healthSkipReason
-      && planned.accessContext.sourceAccessStatus !== "auth_required"
+      && hasRunnableAuthPath(planned)
       && planned.candidates.length > 0;
+    const authUnavailable =
+      planned.accessContext.sourceAccessStatus === "auth_required"
+      && !hasRunnableAuthPath(planned);
 
     let selectionState: SourcePlanSelectionState;
     if (planned.accessContext.sourceAccessStatus === "blocked") {
       selectionState = "blocked";
     } else if (planned.healthSkipReason) {
       selectionState = "skipped";
-    } else if (planned.accessContext.sourceAccessStatus === "auth_required" || planned.candidates.length === 0) {
+    } else if (authUnavailable || planned.candidates.length === 0) {
       selectionState = "skipped";
     } else if (!isRoutable || selectedCount >= selectionBudget) {
       selectionState = "deprioritized";

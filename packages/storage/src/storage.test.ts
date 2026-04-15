@@ -269,7 +269,7 @@ describe("ArtbotStorage reliability persistence", () => {
 });
 
 describe("ArtbotStorage review adjudication", () => {
-  it("persists adjudicated review items across cluster refresh", () => {
+  it("drops stale review items when clusters are rebuilt", () => {
     const { dbPath, runsRoot } = mkTempPaths();
     const storage = new ArtbotStorage(dbPath, runsRoot);
     const now = "2026-04-14T12:00:00.000Z";
@@ -352,9 +352,7 @@ describe("ArtbotStorage review adjudication", () => {
     );
 
     const persisted = storage.listReviewItemsByArtist(artistKey);
-    expect(persisted).toHaveLength(1);
-    expect(persisted[0]?.status).toBe("accepted");
-    expect(persisted[0]?.recommended_action).toBe("merge");
+    expect(persisted).toHaveLength(0);
   });
 });
 
