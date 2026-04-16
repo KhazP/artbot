@@ -1,0 +1,4 @@
+interface:
+  display_name: "ArtBot CLI"
+  short_description: "Operate ArtBot CLI in command-first mode"
+  default_prompt: "Use $artbot-cli to operate ArtBot from the command line with JSON-first commands."
