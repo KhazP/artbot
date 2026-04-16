@@ -1,12 +1,17 @@
 <div align="center">
 
-# 🎨 artbot
+<img src="https://i.imgur.com/Nrxm4Ih.png" alt="artbot banner" width="100%" />
+<br />
 
-**Production-oriented, painting price research bot**
+**Production-oriented, painting price research bot**<br/>
 _Session-aware extraction · Evidence capture · Strict structured outputs_
 
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10.x-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
+[![npm version](https://img.shields.io/npm/v/artbot?logo=npm)](https://www.npmjs.com/package/artbot)
+[![npm downloads](https://img.shields.io/npm/dm/artbot?logo=npm)](https://www.npmjs.com/package/artbot)
+[![CI](https://github.com/KhazP/artbot/actions/workflows/ci.yml/badge.svg)](https://github.com/KhazP/artbot/actions/workflows/ci.yml)
+[![GitHub Stars](https://img.shields.io/github/stars/KhazP/artbot?style=social)](https://github.com/KhazP/artbot)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](#-docker)
 
@@ -19,7 +24,6 @@ _Session-aware extraction · Evidence capture · Strict structured outputs_
 | Area                     | Details                                                                                                                                   |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | **Runtime**              | Local-first — SQLite (`node:sqlite`) + filesystem evidence                                                                                |
-| **Pipeline**             | `search → select source → extract → verify → normalize → score → report`                                                                  |
 | **Access Statuses**      | `public_access` · `auth_required` · `licensed_access` · `blocked` · `price_hidden`                                                        |
 | **Session Handling**     | Authorized profiles, cookie injection, persistent browser state, manual-login checkpoints; expired/missing sessions refresh automatically |
 | **Turkey-First Sources** | `muzayedeapp-platform` · `portakal-catalog` · `clar-buy-now` · `clar-archive` · `sanatfiyat-licensed-extractor`                           |
@@ -27,9 +31,24 @@ _Session-aware extraction · Evidence capture · Strict structured outputs_
 | **FX Normalization**     | Nominal USD + CPI-adjusted 2026 USD outputs                                                                                               |
 | **Evidence**             | Screenshot + raw snapshot + parser metadata for every accepted/rejected candidate                                                         |
 
+### Architecture Pipeline
+
+```mermaid
+graph LR
+  A[Search] --> B[Select Source]
+  B --> C[Extract]
+  C --> D[Verify]
+  D --> E[Normalize]
+  E --> F[Score]
+  F --> G[Report]
+```
+
 ---
 
 ## 📁 Monorepo Layout
+
+<details>
+<summary><strong>View source structure</strong></summary>
 
 ```
 turkish-art-price-agent/
@@ -53,6 +72,7 @@ turkish-art-price-agent/
 ├── var/                 # Local runtime artifacts (DB, runs, logs)
 └── ...
 ```
+</details>
 
 ---
 
@@ -76,6 +96,9 @@ pnpm --filter artbot dev -- runs show --run-id <id>
 
 # 6. Watch a run in real time
 pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2
+
+# 7. Open the interactive UI explicitly
+pnpm --filter artbot dev -- tui
 ```
 
 ---
@@ -84,15 +107,20 @@ pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2
 
 ```bash
 npm install -g artbot
+artbot
+artbot tui
 artbot setup
 artbot backend status
 artbot research artist --artist "Burhan Dogancay" --wait
 ```
 
+> [!NOTE]
 > The npm package includes a local ArtBot API and worker runtime — **no hosting required**.
 > Config, auth state, logs, and local data live under `~/.artbot`.
 >
 > [LM Studio](https://lmstudio.ai/) works out of the box with the default local server URL `http://127.0.0.1:1234/v1`.
+
+Bare `artbot` is help-first. Use `artbot tui` only when you explicitly want the interactive UI.
 
 <details>
 <summary><strong>Alternative manual startup</strong></summary>
@@ -132,12 +160,17 @@ artbot research work --artist "Bedri Rahmi Eyüboğlu" --title "Mosaic" --wait
 artbot runs list [--status pending|running|completed|failed --limit 20]
 artbot runs show --run-id <id>
 artbot runs watch --run-id <id> [--interval 2]
+artbot runs pin --run-id <id>
+artbot runs unpin --run-id <id>
 
-# Storage cleanup
+# Storage visibility and cleanup
+artbot storage
 artbot cleanup --dry-run
 artbot cleanup --max-size-gb 4 --keep-last 50
+artbot runs pin --run-id <id>  # preserve a run before cleanup
 ```
 
+> [!NOTE]
 > **Legacy aliases** (`research-artist`, `research-work`, `run-status`) remain available.
 
 **Global options:**
@@ -149,8 +182,40 @@ artbot cleanup --max-size-gb 4 --keep-last 50
 | `--api-key <key>`      | Authentication key            |
 | `--verbose`            | Verbose logging               |
 | `--quiet`              | Suppress non-essential output |
+| `--no-tui`             | Block interactive UI launch   |
 
 **Environment fallback:** `API_BASE_URL` (defaults to `http://localhost:4000`)
+
+**Automation guardrail:** `ARTBOT_NO_TUI=1` disables interactive UI launch.
+
+## 🤖 Command-First Agent Usage
+
+For agent and automation work, prefer the repo-local CLI entrypoint plus `--json`:
+
+```bash
+pnpm --filter artbot dev -- --json doctor
+pnpm --filter artbot dev -- --json backend status
+pnpm --filter artbot dev -- --json auth list
+pnpm --filter artbot dev -- --json auth status
+pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --preview-only
+pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --wait
+pnpm --filter artbot dev -- --json runs show --run-id <id>
+pnpm --filter artbot dev -- --json replay attempt --run-id <id>
+pnpm --filter artbot dev -- --json runs pin --run-id <id>
+pnpm --filter artbot dev -- --json runs unpin --run-id <id>
+pnpm --filter artbot dev -- --json storage
+pnpm --filter artbot dev -- --json cleanup --dry-run
+```
+
+Repo instruction files are committed at the root:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `GEMINI.md`
+
+The reusable Codex skill lives at `skills/artbot-cli`.
+
+Install it explicitly into Codex from a clone by copying or symlinking `skills/artbot-cli` into `~/.codex/skills/artbot-cli`, or use your normal GitHub-path skill installer flow. The npm package does not auto-write into `$CODEX_HOME`.
 
 ---
 
@@ -181,6 +246,9 @@ Set `AUTH_PROFILES_JSON` in your environment:
 
 Each run produces a structured evidence directory:
 
+<details>
+<summary><strong>View evidence structure</strong></summary>
+
 ```
 var/runs/<run_id>/
 ├── results.json
@@ -192,7 +260,9 @@ var/runs/<run_id>/
     └── har/               # (selective mode) HAR archives
 ```
 
+> [!NOTE]
 > Attempt-level auth evidence fields (`pre_auth_screenshot_path`, `post_auth_screenshot_path`) are included when auth flows are used.
+</details>
 
 ---
 
@@ -206,6 +276,7 @@ var/runs/<run_id>/
 | `LLM_BASE_URL`            | Local OpenAI-compatible endpoint (e.g., LM Studio) |
 | `GEMINI_API_KEY`          | Gemini API key                                     |
 
+> [!WARNING]
 > No hard-model escalation path is enabled in v1.
 
 ---
@@ -297,6 +368,7 @@ This project automates browsing and data collection. When using it, **you are re
 - Using only accounts and licenses **you are authorized to use**.
 - Avoiding abusive traffic patterns or attempts to bypass access controls.
 
+> [!IMPORTANT]
 > 🔒 **Found a security issue?** Please open a private issue or contact the maintainer directly — do not disclose publicly first.
 
 ---

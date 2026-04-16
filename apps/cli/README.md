@@ -50,9 +50,66 @@ artbot backend stop
 ## Usage
 
 ```bash
+artbot
+artbot tui
 artbot runs list
 artbot research artist --artist "Burhan Dogancay" --wait
 artbot runs show --run-id <id>
+artbot runs watch --run-id <id> --interval 2
+artbot runs pin --run-id <id>
+artbot runs unpin --run-id <id>
+artbot storage
+artbot cleanup --dry-run
+```
+
+Bare `artbot` prints help. Open the interactive UI explicitly with `artbot tui`.
+
+## Run retention and storage visibility
+
+Use run pinning to preserve a completed run and retained artifacts through automatic cleanup and manual GC:
+
+```bash
+artbot runs pin --run-id <id>
+artbot runs unpin --run-id <id>
+```
+
+Use storage visibility to inspect disk state before cleanup:
+
+```bash
+artbot storage
+artbot --json storage
+artbot cleanup --dry-run
+```
+
+`artbot storage` reports:
+
+- total `var/` usage,
+- pinned run count,
+- expirable run count,
+- last cleanup reclaimed bytes and timestamp.
+
+## Automation / Agents
+
+Prefer explicit commands plus `--json`:
+
+```bash
+artbot --json doctor
+artbot --json backend status
+artbot --json auth list
+artbot --json auth status
+artbot --json research artist --artist "Burhan Dogancay" --preview-only
+artbot --json research artist --artist "Burhan Dogancay" --wait
+artbot --json replay attempt --run-id <id>
+artbot --json runs pin --run-id <id>
+artbot --json runs unpin --run-id <id>
+artbot --json storage
+artbot --json cleanup --dry-run
+```
+
+If an automation wrapper must hard-disable the interactive UI, pass `--no-tui` or set:
+
+```bash
+export ARTBOT_NO_TUI=1
 ```
 
 ## Remote API override

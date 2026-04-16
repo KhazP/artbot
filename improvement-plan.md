@@ -398,7 +398,11 @@ Disk usage must become manageable by default.
 - [x] Added `artbot cleanup --dry-run`.
 - [x] Added `artbot cleanup --max-size-gb <n>`.
 - [x] Added `artbot cleanup --keep-last <n>` so operators can preserve the newest completed runs unless the storage budget still requires purging.
+- [x] Added `artbot storage` so operators can see total `var/` usage, pinned vs expirable run counts, and last cleanup reclaimed bytes.
 - [x] Tightened default artifact retention closer to the plan: accepted screenshots/raw evidence default to 14 days; traces/HAR default to 7 days; disputed/debug artifacts default to 7 days.
+- [x] Added per-run preservation with `artbot runs pin --run-id <id>` and `artbot runs unpin --run-id <id>`.
+- [x] Pinned runs now promote their retained artifacts so cleanup and automatic GC preserve them by default.
+- [x] Surfaced pinned retention state in run list/detail output and the local TUI run history/detail views.
 
 ### Required cleanup behavior
 
