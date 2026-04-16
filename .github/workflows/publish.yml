@@ -39,4 +39,6 @@ jobs:
         run: pnpm build
 
       - name: Publish CLI
-        run: npm publish --provenance --access public --workspace apps/cli
+        run: |
+          cd apps/cli
+          npm publish --provenance --access public
