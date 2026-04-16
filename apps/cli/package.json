@@ -1,6 +1,6 @@
 {
   "name": "artbot",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": false,
   "description": "CLI for running ArtBot market research locally.",
   "author": "Alp Yalay <contact@alpyalay.org>",
@@ -17,7 +17,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "preferGlobal": true,
   "keywords": [
@@ -59,15 +59,15 @@
     "fastify": "^5.2.1",
     "figlet": "^1.8.0",
     "gradient-string": "^3.0.0",
-    "ink": "^5.2.1",
+    "ink": "^7.0.0",
     "ink-text-input": "^6.0.0",
     "jimp": "^1.6.0",
     "lucide-react": "latest",
     "ora": "^8.2.0",
     "picocolors": "^1.1.1",
     "playwright": "^1.59.1",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
     "uuid": "^11.1.0",
     "zod": "^3.24.2"
   },
@@ -80,7 +80,7 @@
     "@artbot/storage": "workspace:*",
     "@types/figlet": "^1.7.0",
     "@types/gradient-string": "^1.1.6",
-    "@types/react": "^18.3.12",
+    "@types/react": "^19.2.2",
     "esbuild": "^0.25.11"
   }
 }

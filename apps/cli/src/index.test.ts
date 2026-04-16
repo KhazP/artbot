@@ -291,6 +291,22 @@ describe("artbot cli v2", () => {
     expect(stderr).toContain("TUI launch is disabled by --no-tui or ARTBOT_NO_TUI");
   });
 
+  it("does not launch interactive setup when no-tui mode is enabled", async () => {
+    const io = createMockIo();
+
+    const code = await runCli(["node", "artbot", "--no-tui", "setup"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stdout).toContain("Setup is interactive and disabled by --no-tui or ARTBOT_NO_TUI");
+    expect(stderr).toBe("");
+  });
+
   it("prints the package version from package.json", async () => {
     const io = createMockIo();
     const code = await runCli(["node", "artbot", "--version"], {
@@ -460,6 +476,70 @@ describe("artbot cli v2", () => {
     expect(stdout).toContain("pinned");
   });
 
+  it("keeps --json responses stdout-only for runs list", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        runs: [
+          {
+            id: "run-1",
+            runType: "artist",
+            query: researchQuerySchema.parse({
+              artist: "Burhan Dogancay",
+              scope: "turkey_plus_international",
+              turkeyFirst: true,
+              analysisMode: "comprehensive",
+              priceNormalization: "usd_dual",
+              manualLoginCheckpoint: false,
+              allowLicensed: false,
+              licensedIntegrations: [],
+              crawlMode: "backfill",
+              sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
+            }),
+            status: "completed",
+            pinned: false,
+            createdAt: "2026-04-08T10:00:00.000Z",
+            updatedAt: "2026-04-08T10:05:00.000Z"
+          }
+        ]
+      })
+    );
+
+    const code = await runCli(["node", "artbot", "--json", "runs", "list"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(() => JSON.parse(stdout)).not.toThrow();
+    expect(stderr).toBe("");
+    expect(stdout).not.toContain("Run ID");
+  });
+
+  it("accepts a leading argument separator before global options", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        runs: []
+      })
+    );
+
+    const code = await runCli(["node", "artbot", "--", "--json", "runs", "list"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ runs: [] });
+    expect(stderr).toBe("");
+  });
+
   it("prints storage usage summary as strict JSON", async () => {
     const io = createMockIo();
     const summary = buildStorageUsageSummary();
@@ -544,6 +624,7 @@ describe("artbot cli v2", () => {
     const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       expect(String(url)).toContain("/runs/run-123/pin");
       expect(init?.method).toBe("POST");
+      expect(init?.body).toBe("{}");
       return jsonResponse({
         ...buildRunDetails("completed").run,
         pinned: true,
@@ -572,6 +653,7 @@ describe("artbot cli v2", () => {
     const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       expect(String(url)).toContain("/runs/run-123/unpin");
       expect(init?.method).toBe("POST");
+      expect(init?.body).toBe("{}");
       return jsonResponse({
         ...buildRunDetails("completed").run,
         pinned: false

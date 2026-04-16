@@ -574,13 +574,18 @@ async function requestJson<T>(
   path: string,
   payload?: unknown
 ): Promise<T> {
+  const headers: Record<string, string> = {
+    ...(globals.apiKey ? { "x-api-key": globals.apiKey } : {})
+  };
+  const requestBody = payload === undefined ? undefined : JSON.stringify(payload);
+  if (requestBody !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+
   const response = await ctx.deps.fetchImpl(`${globals.apiBaseUrl}${path}`, {
     method,
-    headers: {
-      "content-type": "application/json",
-      ...(globals.apiKey ? { "x-api-key": globals.apiKey } : {})
-    },
-    body: payload === undefined ? undefined : JSON.stringify(payload)
+    headers,
+    body: requestBody
   });
 
   const text = await response.text();
@@ -1690,9 +1695,24 @@ async function handleResearch(
         : "/crawl/artist-market/plan";
 
   const shouldPreviewPlan = !globals.json || Boolean(options.previewOnly);
-  const preview = shouldPreviewPlan
-    ? await requestJson<SourcePlanPreviewResponse>(ctx, globals, "POST", planPath, { query })
-    : null;
+  const planSpinner =
+    shouldPreviewPlan && !globals.json && !globals.quiet
+      ? ctx.deps.spinnerFactory(`Preparing source plan for ${query.artist}...`).start()
+      : null;
+  let preview: SourcePlanPreviewResponse | null = null;
+  try {
+    preview = shouldPreviewPlan
+      ? await requestJson<SourcePlanPreviewResponse>(ctx, globals, "POST", planPath, { query })
+      : null;
+    if (planSpinner) {
+      planSpinner.succeed("Source plan ready.");
+    }
+  } catch (error) {
+    if (planSpinner) {
+      planSpinner.fail("Source plan request failed.");
+    }
+    throw error;
+  }
 
   if (preview) {
     if (globals.json && options.previewOnly) {
@@ -1804,7 +1824,7 @@ async function handleRunsPinMutation(
   pinned: boolean
 ): Promise<void> {
   const globals = resolveGlobals(command);
-  const run = await requestJson<RunEntity>(ctx, globals, "POST", `/runs/${options.runId}/${pinned ? "pin" : "unpin"}`);
+  const run = await requestJson<RunEntity>(ctx, globals, "POST", `/runs/${options.runId}/${pinned ? "pin" : "unpin"}`, {});
   printJson(globals, ctx, run);
   if (globals.json) {
     return;
@@ -1816,6 +1836,22 @@ async function handleRunsPinMutation(
 
 async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
+  if (ctx.noTui || globals.noTui) {
+    const message =
+      "Setup is interactive and disabled by --no-tui or ARTBOT_NO_TUI. Use \"artbot backend start\" to bootstrap locally, then run \"artbot doctor\".";
+    if (globals.json) {
+      printJson(globals, ctx, {
+        ok: false,
+        code: "setup_interactive_disabled",
+        message,
+        recommended_commands: ["artbot backend start", "artbot doctor"]
+      });
+      return;
+    }
+    logInfo(globals, ctx, message);
+    return;
+  }
+
   const result = await runSetupWizard();
   printJson(globals, ctx, result);
   if (!globals.json) {
@@ -2408,18 +2444,20 @@ export function createProgram(ctx: CliContext): Command {
 export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<number> {
   loadWorkspaceEnv();
   const userArgs = argv.slice(2);
+  const normalizedUserArgs = userArgs[0] === "--" ? userArgs.slice(1) : userArgs;
+  const normalizedArgv = [argv[0] ?? "node", argv[1] ?? "artbot", ...normalizedUserArgs];
 
   const ctx: CliContext = {
     deps: defaultDeps(deps),
     exitCode: EXIT_CODES.OK,
-    noTui: isNoTuiEnabled(userArgs)
+    noTui: isNoTuiEnabled(normalizedUserArgs)
   };
 
   const program = createProgram(ctx);
-  const wantsHelp = userArgs.includes("-h") || userArgs.includes("--help");
-  const wantsVersion = userArgs.includes("-V") || userArgs.includes("--version");
+  const wantsHelp = normalizedUserArgs.includes("-h") || normalizedUserArgs.includes("--help");
+  const wantsVersion = normalizedUserArgs.includes("-V") || normalizedUserArgs.includes("--version");
   if (!wantsHelp && !wantsVersion) {
-    const { operands, unknown } = program.parseOptions(userArgs);
+    const { operands, unknown } = program.parseOptions(normalizedUserArgs);
     const onlyGlobalOptions = operands.length === 0 && unknown.length === 0;
     if (onlyGlobalOptions) {
       program.outputHelp();
@@ -2428,7 +2466,7 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
   }
 
   try {
-    await program.parseAsync(argv);
+    await program.parseAsync(normalizedArgv);
     return ctx.exitCode;
   } catch (error) {
     const exitCode = mapErrorToExitCode(error);

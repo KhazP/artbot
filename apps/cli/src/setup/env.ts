@@ -258,6 +258,7 @@ export function upsertEnvFile(envPath: string, updates: Record<string, string>):
     nextLines.push(`${key}=${formatEnvValue(value)}`);
   }
 
+  fs.mkdirSync(path.dirname(envPath), { recursive: true });
   fs.writeFileSync(envPath, `${nextLines.filter(Boolean).join("\n")}\n`, "utf-8");
 }
 

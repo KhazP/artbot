@@ -69,6 +69,18 @@ describe("setup env persistence", () => {
     expect(parsedProfiles.profiles.map((profile) => profile.id)).toEqual(["artsy-auth", "sanatfiyat-license"]);
   });
 
+  it("creates parent directories when writing a new env file", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "artbot-env-mkdir-test-"));
+    const envPath = path.join(tempDir, "nested", "path", ".env");
+
+    upsertEnvFile(envPath, {
+      API_BASE_URL: "http://localhost:4000"
+    });
+
+    expect(fs.existsSync(envPath)).toBe(true);
+    expect(fs.readFileSync(envPath, "utf-8")).toContain("API_BASE_URL=http://localhost:4000");
+  });
+
   it("falls back to ARTBOT_ROOT when cwd is outside the workspace", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "artbot-root-test-"));
     const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "artbot-outside-test-"));

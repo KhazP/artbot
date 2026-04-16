@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-04-16
+
+### Fixed
+- `runs pin` and `runs unpin` now send explicit JSON request bodies, satisfying API body validation.
+- `setup` now respects `--no-tui` / `ARTBOT_NO_TUI` and exits with non-interactive guidance.
+- `runs list` and `runs show` automation paths now have explicit JSON-only coverage, including `pnpm ... -- --json ...` pass-through.
+- Source-plan generation now surfaces progress feedback during longer preview/create phases.
+- Storage summaries now classify all unpinned runs as expirable for accurate retention visibility.
+- Published CLI entrypoint now suppresses the noisy `node:sqlite` experimental warning while preserving other warnings.
+
+### Changed
+- Root docs, npm package README, ops runbook, and release docs were synchronized to match shipped CLI behavior.
+
 ## [0.3.0] - 2026-04-16
 
 ### Added

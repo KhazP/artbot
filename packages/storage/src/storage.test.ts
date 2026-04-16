@@ -122,8 +122,8 @@ describe("ArtbotStorage storage usage summary", () => {
       bytes: 3
     });
     expect(summary.expirable).toEqual({
-      runs: 2,
-      bytes: 14
+      runs: 3,
+      bytes: 21
     });
   });
 

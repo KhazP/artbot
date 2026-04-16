@@ -610,10 +610,9 @@ export class ArtbotStorage {
         pinned.bytes += runBytes;
         continue;
       }
-      if (row.status === "completed" || row.status === "failed") {
-        expirable.runs += 1;
-        expirable.bytes += runBytes;
-      }
+
+      expirable.runs += 1;
+      expirable.bytes += runBytes;
     }
 
     return {
