@@ -586,6 +586,77 @@ describe("artbot cli v2", () => {
     expect(fs.existsSync(tracePath)).toBe(true);
   });
 
+  it("supports the cleanup command with keep-last and max-size options", async () => {
+    const io = createMockIo();
+    const runsRoot = mkTempDir("artbot-cli-cleanup-");
+
+    const writeRun = (runId: string, generatedAt: string, traceName: string) => {
+      const runRoot = path.join(runsRoot, runId);
+      fs.mkdirSync(path.join(runRoot, "evidence", "traces"), { recursive: true });
+      const reportPath = path.join(runRoot, "report.md");
+      const resultsPath = path.join(runRoot, "results.json");
+      const tracePath = path.join(runRoot, "evidence", "traces", traceName);
+      fs.writeFileSync(reportPath, "report", "utf-8");
+      fs.writeFileSync(resultsPath, JSON.stringify({ ok: true }), "utf-8");
+      fs.writeFileSync(tracePath, "trace", "utf-8");
+      fs.utimesSync(tracePath, new Date("2026-01-01T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"));
+
+      const manifest = buildRunArtifactManifest({
+        runId,
+        runRoot,
+        reportPath,
+        resultsPath,
+        attempts: [
+          {
+            run_id: runId,
+            source_name: "Clar",
+            source_url: `https://example.com/${runId}`,
+            canonical_url: `https://example.com/${runId}`,
+            access_mode: "anonymous",
+            source_access_status: "public_access",
+            access_reason: "fixture",
+            blocker_reason: null,
+            extracted_fields: {},
+            screenshot_path: null,
+            raw_snapshot_path: null,
+            trace_path: tracePath,
+            har_path: null,
+            fetched_at: "2026-04-14T10:00:00.000Z",
+            parser_used: "fixture",
+            model_used: null,
+            confidence_score: 0.8,
+            accepted: true,
+            acceptance_reason: "valuation_ready"
+          }
+        ]
+      });
+      manifest.generated_at = generatedAt;
+      writeArtifactManifest(runRoot, manifest);
+    };
+
+    writeRun("run-older", "2026-04-10T00:00:00.000Z", "older.zip");
+    writeRun("run-newest", "2026-04-15T00:00:00.000Z", "newest.zip");
+
+    const code = await runCli(
+      ["node", "artbot", "--json", "cleanup", "--runs-root", runsRoot, "--dry-run", "--keep-last", "1", "--max-size-gb", "1"],
+      {
+        fetchImpl: vi.fn(),
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    const { stdout, stderr } = io.read();
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const payload = JSON.parse(stdout) as any;
+    expect(payload.keep_last).toBe(1);
+    expect(payload.max_size_gb).toBe(1);
+    expect(payload.deleted_items).toBeGreaterThan(0);
+    expect(payload.dry_run).toBe(true);
+  });
+
   it("lists filtered review queue items", async () => {
     const io = createMockIo();
     const fetchImpl = vi.fn(async () =>

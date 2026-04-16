@@ -30,6 +30,7 @@ import { parseGenericLotFields } from "@artbot/extraction";
 import { evaluateAcceptance, evaluateFixtureContract } from "@artbot/source-adapters";
 import {
   ArtbotStorage,
+  buildDefaultGcPolicyFromEnv,
   ensureWorkspaceRuntimeStoragePaths,
   resolveWorkspaceRelativePath,
   runArtifactGc
@@ -148,6 +149,8 @@ interface GraphExplainOptions {
 interface ArtifactGcOptions {
   runsRoot?: string;
   dryRun?: boolean;
+  maxSizeGb?: string;
+  keepLast?: string;
 }
 
 interface CanaryRunOptions {
@@ -333,6 +336,28 @@ function toPositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
     throw new InputValidationError(`Expected a positive integer, received "${value}".`);
+  }
+  return parsed;
+}
+
+function toNonNegativeInt(value: string | undefined, label: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    throw new InputValidationError(`Expected ${label} to be a non-negative integer, received "${value}".`);
+  }
+  return parsed;
+}
+
+function toPositiveNumber(value: string | undefined, label: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new InputValidationError(`Expected ${label} to be a positive number, received "${value}".`);
   }
   return parsed;
 }
@@ -1173,13 +1198,36 @@ async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOption
 async function handleArtifactGc(ctx: CliContext, options: ArtifactGcOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const runsRoot = options.runsRoot ? path.resolve(options.runsRoot) : resolveRunsRootLocal();
-  const result = runArtifactGc(runsRoot, undefined, { dryRun: Boolean(options.dryRun) });
-  printJson(globals, ctx, { runsRoot, ...result });
+  const keepLast = toNonNegativeInt(options.keepLast, "--keep-last") ?? 0;
+  const maxSizeGb = toPositiveNumber(options.maxSizeGb, "--max-size-gb");
+  const policy = buildDefaultGcPolicyFromEnv();
+
+  if (maxSizeGb != null) {
+    const byteBudget = Math.max(1, Math.floor(maxSizeGb * 1024 * 1024 * 1024));
+    policy.high_watermark_bytes = byteBudget;
+    policy.target_bytes_after_gc = byteBudget;
+  }
+
+  const result = runArtifactGc(runsRoot, policy, {
+    dryRun: Boolean(options.dryRun),
+    keepLast
+  });
+  printJson(globals, ctx, {
+    runsRoot,
+    keep_last: keepLast,
+    max_size_gb: maxSizeGb ?? null,
+    policy,
+    ...result
+  });
   if (globals.json) {
     return;
   }
   logInfo(globals, ctx, `Runs root: ${runsRoot}`);
   logInfo(globals, ctx, `Mode: ${result.dry_run ? "dry-run" : "apply"}`);
+  logInfo(globals, ctx, `Keep latest runs intact: ${keepLast}`);
+  if (maxSizeGb != null) {
+    logInfo(globals, ctx, `Max size budget: ${maxSizeGb} GB`);
+  }
   logInfo(globals, ctx, `Scanned items: ${result.scanned_items}`);
   logInfo(globals, ctx, `${result.dry_run ? "Planned deletions" : "Deleted items"}: ${result.deleted_items}`);
   logInfo(
@@ -1997,11 +2045,26 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     });
 
   const opsGroup = program.command("ops").description("Operational maintenance commands");
+  const cleanupCommand = program
+    .command("cleanup")
+    .description("Clean up retained run artifacts and enforce a local storage budget");
+
+  cleanupCommand
+    .option("--runs-root <path>", "Runs root to scan")
+    .option("--dry-run", "Report what cleanup would delete without mutating artifacts")
+    .option("--max-size-gb <number>", "Trim retained artifacts until the runs root is at or below this size budget")
+    .option("--keep-last <number>", "Preserve the newest completed runs in full unless the size budget still requires purging")
+    .action(async (options: ArtifactGcOptions, command: Command) => {
+      await handleArtifactGc(ctx, options, command);
+    });
+
   opsGroup
     .command("gc")
-    .description("Run artifact retention and garbage collection over run artifacts")
+    .description("Run artifact retention and garbage collection over run artifacts (legacy alias)")
     .option("--runs-root <path>", "Runs root to scan")
     .option("--dry-run", "Report what GC would delete without mutating artifacts")
+    .option("--max-size-gb <number>", "Trim retained artifacts until the runs root is at or below this size budget")
+    .option("--keep-last <number>", "Preserve the newest completed runs in full unless the size budget still requires purging")
     .action(async (options: ArtifactGcOptions, command: Command) => {
       await handleArtifactGc(ctx, options, command);
     });

@@ -132,6 +132,10 @@ artbot research work --artist "Bedri Rahmi Eyüboğlu" --title "Mosaic" --wait
 artbot runs list [--status pending|running|completed|failed --limit 20]
 artbot runs show --run-id <id>
 artbot runs watch --run-id <id> [--interval 2]
+
+# Storage cleanup
+artbot cleanup --dry-run
+artbot cleanup --max-size-gb 4 --keep-last 50
 ```
 
 > **Legacy aliases** (`research-artist`, `research-work`, `run-status`) remain available.

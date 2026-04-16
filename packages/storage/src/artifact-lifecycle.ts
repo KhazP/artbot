@@ -45,9 +45,9 @@ export function buildDefaultGcPolicyFromEnv(): GcPolicy {
     high_watermark_bytes: toPositiveInt(process.env.ARTIFACT_GC_HIGH_WATERMARK_BYTES, 512 * 1024 * 1024),
     target_bytes_after_gc: toPositiveInt(process.env.ARTIFACT_GC_TARGET_BYTES, 384 * 1024 * 1024),
     manifest_retention_days: toPositiveInt(process.env.ARTIFACT_GC_MANIFEST_RETENTION_DAYS, 3650),
-    accepted_evidence_retention_days: toPositiveInt(process.env.ARTIFACT_GC_ACCEPTED_RETENTION_DAYS, 180),
-    disputed_evidence_retention_days: toPositiveInt(process.env.ARTIFACT_GC_DISPUTED_RETENTION_DAYS, 120),
-    heavy_debug_retention_days: toPositiveInt(process.env.ARTIFACT_GC_HEAVY_DEBUG_RETENTION_DAYS, 14),
+    accepted_evidence_retention_days: toPositiveInt(process.env.ARTIFACT_GC_ACCEPTED_RETENTION_DAYS, 14),
+    disputed_evidence_retention_days: toPositiveInt(process.env.ARTIFACT_GC_DISPUTED_RETENTION_DAYS, 7),
+    heavy_debug_retention_days: toPositiveInt(process.env.ARTIFACT_GC_HEAVY_DEBUG_RETENTION_DAYS, 7),
     ephemeral_retention_days: toPositiveInt(process.env.ARTIFACT_GC_EPHEMERAL_RETENTION_DAYS, 7)
   };
 }
@@ -264,19 +264,42 @@ function recordDeletion(
   return reclaimedBytes;
 }
 
+function manifestSortTimestamp(manifest: ArtifactManifest): number {
+  const parsed = new Date(manifest.generated_at).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function protectedRunIds(
+  manifests: Array<{ manifestPath: string; manifest: ArtifactManifest }>,
+  keepLast: number
+): Set<string> {
+  if (keepLast <= 0) {
+    return new Set();
+  }
+
+  return new Set(
+    [...manifests]
+      .sort((left, right) => manifestSortTimestamp(right.manifest) - manifestSortTimestamp(left.manifest))
+      .slice(0, keepLast)
+      .map((entry) => entry.manifest.run_id)
+  );
+}
+
 export function runArtifactGc(
   runsRoot: string,
   policy = buildDefaultGcPolicyFromEnv(),
-  options: { dryRun?: boolean; now?: Date } = {}
+  options: { dryRun?: boolean; now?: Date; keepLast?: number } = {}
 ): ArtifactGcResult {
   const dryRun = options.dryRun ?? false;
   const now = options.now ?? new Date();
+  const keepLast = Math.max(0, Math.floor(options.keepLast ?? 0));
   const manifests = fs
     .readdirSync(runsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => path.join(runsRoot, entry.name, ARTIFACT_MANIFEST_FILE))
     .map((manifestPath) => ({ manifestPath, manifest: readArtifactManifest(manifestPath) }))
     .filter((entry): entry is { manifestPath: string; manifest: ArtifactManifest } => Boolean(entry.manifest));
+  const protectedRuns = protectedRunIds(manifests, keepLast);
 
   const allItems = manifests.flatMap((entry) => entry.manifest.items);
   const activeItems = allItems.filter((item) => !item.deleted_at);
@@ -292,9 +315,17 @@ export function runArtifactGc(
   };
   const plannedPaths = new Set<string>();
 
+  const duplicateCandidates = activeItems
+    .filter((item) => isGcEligible(item) && !plannedPaths.has(item.path))
+    .sort((left, right) => {
+      const protectionPriority = Number(protectedRuns.has(right.run_id)) - Number(protectedRuns.has(left.run_id));
+      return protectionPriority || new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+    });
+
   const firstByHash = new Set<string>();
-  for (const item of activeItems) {
-    if (!isGcEligible(item) || plannedPaths.has(item.path)) {
+  for (const item of duplicateCandidates) {
+    if (protectedRuns.has(item.run_id)) {
+      firstByHash.add(item.content_hash);
       continue;
     }
     if (!firstByHash.has(item.content_hash)) {
@@ -305,7 +336,7 @@ export function runArtifactGc(
   }
 
   for (const item of allItems) {
-    if (!plannedPaths.has(item.path) && isExpired(item, policy, now)) {
+    if (!plannedPaths.has(item.path) && !protectedRuns.has(item.run_id) && isExpired(item, policy, now)) {
       result.remaining_bytes -= recordDeletion(item, "expired", nowIso, dryRun, plannedPaths, result);
     }
   }
@@ -315,9 +346,11 @@ export function runArtifactGc(
     const purgeable = allItems
       .filter((item) => isGcEligible(item))
       .sort((left, right) => {
+        const protectionPriority = Number(protectedRuns.has(left.run_id)) - Number(protectedRuns.has(right.run_id));
         const classPriority = (value: ArtifactRetentionClass) =>
           value === "heavy_debug" ? 0 : value === "ephemeral" ? 1 : value === "disputed_evidence" ? 2 : 3;
-        return classPriority(left.retention_class) - classPriority(right.retention_class)
+        return protectionPriority
+          || classPriority(left.retention_class) - classPriority(right.retention_class)
           || new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
       });
     for (const item of purgeable) {
