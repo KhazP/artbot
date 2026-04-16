@@ -228,4 +228,52 @@ describe("artifact lifecycle", () => {
     expect(fs.existsSync(olderTrace)).toBe(false);
     expect(fs.existsSync(newestTrace)).toBe(true);
   });
+
+  it("preserves pinned runs during gc even without manifest promotion", () => {
+    const runsRoot = mkRunRoot();
+    const policy = {
+      high_watermark_bytes: 1024 * 1024,
+      target_bytes_after_gc: 512 * 1024,
+      manifest_retention_days: 3650,
+      accepted_evidence_retention_days: 14,
+      disputed_evidence_retention_days: 7,
+      heavy_debug_retention_days: 7,
+      ephemeral_retention_days: 7
+    };
+
+    const writeRun = (runId: string, traceName: string) => {
+      const runRoot = path.join(runsRoot, runId);
+      fs.mkdirSync(path.join(runRoot, "evidence", "traces"), { recursive: true });
+
+      const reportPath = path.join(runRoot, "report.md");
+      const resultsPath = path.join(runRoot, "results.json");
+      const tracePath = path.join(runRoot, "evidence", "traces", traceName);
+      fs.writeFileSync(reportPath, "report", "utf-8");
+      fs.writeFileSync(resultsPath, JSON.stringify({ ok: true }), "utf-8");
+      fs.writeFileSync(tracePath, `${runId}-trace`, "utf-8");
+      fs.utimesSync(tracePath, new Date("2026-01-01T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"));
+
+      const manifest = buildRunArtifactManifest({
+        runId,
+        runRoot,
+        reportPath,
+        resultsPath,
+        attempts: [makeAttempt({ run_id: runId, trace_path: tracePath, source_url: `https://example.com/${runId}` })]
+      });
+      writeArtifactManifest(runRoot, manifest);
+      return tracePath;
+    };
+
+    const pinnedTrace = writeRun("run-pinned", "pinned.zip");
+    const standardTrace = writeRun("run-standard", "standard.zip");
+
+    const result = runArtifactGc(runsRoot, policy, {
+      pinnedRunIds: ["run-pinned"],
+      now: new Date("2026-04-16T00:00:00.000Z")
+    });
+
+    expect(result.deleted_items).toBe(1);
+    expect(fs.existsSync(pinnedTrace)).toBe(true);
+    expect(fs.existsSync(standardTrace)).toBe(false);
+  });
 });

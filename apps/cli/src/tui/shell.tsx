@@ -256,7 +256,7 @@ function PrimaryPane(props: {
     <Panel
       theme={props.theme}
       title={props.activeArtist || "Active Run"}
-      subtitle={`${run?.run?.status ?? "unknown"} · ${run?.run?.id ?? "n/a"}${elapsed ? ` · ${elapsed}` : ""}`}
+      subtitle={`${run?.run?.status ?? "unknown"} · ${run?.run?.id ?? "n/a"}${run?.run?.pinned ? " · pinned" : ""}${elapsed ? ` · ${elapsed}` : ""}`}
       accentColor={props.focusTarget === "main" ? props.theme.colors.selection : undefined}
     >
       <Box>
@@ -375,6 +375,7 @@ function SidePanePanel(props: {
     >
       <Text color={props.theme.colors.text}>Run id: {props.displayedRun?.run?.id ?? "n/a"}</Text>
       <Text color={props.theme.colors.text}>Status: {props.displayedRun?.run?.status ?? "n/a"}</Text>
+      <Text color={props.theme.colors.text}>Retention: {props.displayedRun?.run?.pinned ? "pinned" : "default"}</Text>
       <Text color={props.theme.colors.text}>Results: {truncate(props.displayedRun?.run?.resultsPath ?? "n/a", 54)}</Text>
       <Text color={props.theme.colors.text}>Report: {truncate(props.displayedRun?.run?.reportPath ?? props.browserReportPath ?? "n/a", 54)}</Text>
       {topBlocker(props.displayedRun) ? (
@@ -477,7 +478,7 @@ function OverlayPanel(props: {
             <Box key={run.id} flexDirection="column" marginBottom={1}>
               <Text color={selected ? props.theme.colors.selection : props.theme.colors.text}>
                 {selected ? "›" : " "} {run.query.artist} · {run.status}
-                <Text color={props.theme.colors.muted}> · {run.runType}</Text>
+                <Text color={props.theme.colors.muted}> · {run.runType}{run.pinned ? " · pinned" : ""}</Text>
               </Text>
               <Text color={props.theme.colors.muted}>{run.id} · {formatTimestamp(run.updatedAt)}</Text>
             </Box>

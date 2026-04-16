@@ -11,11 +11,15 @@ const cliPackageVersion = JSON.parse(fs.readFileSync(new URL("../package.json", 
   version: string;
 };
 const cleanupPaths: string[] = [];
+const envSnapshot = {
+  ARTBOT_NO_TUI: process.env.ARTBOT_NO_TUI
+};
 
 afterEach(() => {
   for (const target of cleanupPaths.splice(0)) {
     fs.rmSync(target, { recursive: true, force: true });
   }
+  process.env.ARTBOT_NO_TUI = envSnapshot.ARTBOT_NO_TUI;
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -45,6 +49,7 @@ function buildRunDetails(status: "pending" | "running" | "completed" | "failed")
         sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
       }),
       status,
+      pinned: false,
       createdAt: "2026-04-08T12:00:00.000Z",
       updatedAt: "2026-04-08T12:01:00.000Z"
     },
@@ -135,6 +140,16 @@ function buildRunDetails(status: "pending" | "running" | "completed" | "failed")
   };
 }
 
+function buildStorageUsageSummary() {
+  return {
+    total_var_bytes: 3_221_225_472,
+    pinned_runs: 7,
+    expirable_runs: 18,
+    last_cleanup_reclaimed_bytes: 536_870_912,
+    last_cleanup_completed_at: "2026-04-15T09:30:00.000Z"
+  };
+}
+
 function createMockIo() {
   let stdout = "";
   let stderr = "";
@@ -198,7 +213,82 @@ describe("artbot cli v2", () => {
     expect(stdout).toContain("local");
     expect(stdout).toContain("research-work");
     expect(stdout).toContain("runs");
+    expect(stdout).toContain("--no-tui");
+    expect(stdout).toContain("tui");
     expect(stderr).toBe("");
+  });
+
+  it("prints root help on bare invocation", async () => {
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 99);
+
+    const code = await runCli(["node", "artbot"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(startInteractive).not.toHaveBeenCalled();
+    expect(stdout).toContain("Usage: artbot [options] [command]");
+    expect(stdout).toContain("tui");
+    expect(stderr).toBe("");
+  });
+
+  it("launches the explicit tui command", async () => {
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 7);
+
+    const code = await runCli(["node", "artbot", "tui"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive
+    });
+
+    expect(code).toBe(7);
+    expect(startInteractive).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks the tui command when --no-tui is passed", async () => {
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 7);
+
+    const code = await runCli(["node", "artbot", "--no-tui", "tui"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive
+    });
+
+    const { stderr } = io.read();
+    expect(code).toBe(2);
+    expect(startInteractive).not.toHaveBeenCalled();
+    expect(stderr).toContain("TUI launch is disabled by --no-tui or ARTBOT_NO_TUI");
+  });
+
+  it("blocks the tui command when ARTBOT_NO_TUI is set", async () => {
+    process.env.ARTBOT_NO_TUI = "yes";
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 7);
+
+    const code = await runCli(["node", "artbot", "tui"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive
+    });
+
+    const { stderr } = io.read();
+    expect(code).toBe(2);
+    expect(startInteractive).not.toHaveBeenCalled();
+    expect(stderr).toContain("TUI launch is disabled by --no-tui or ARTBOT_NO_TUI");
   });
 
   it("prints the package version from package.json", async () => {
@@ -234,15 +324,12 @@ describe("artbot cli v2", () => {
     const io = createMockIo();
     const fetchImpl = vi.fn(async () => jsonResponse({ runId: "run-1", status: "pending" }));
 
-    const code = await runCli(
-      ["node", "artbot", "--json", "research", "artist", "--artist", "Burhan Dogancay"],
-      {
-        fetchImpl,
-        stdout: io.appendStdout,
-        stderr: io.appendStderr,
-        spinnerFactory: createSpinnerStub()
-      }
-    );
+    const code = await runCli(["node", "artbot", "--json", "research", "artist", "--artist", "Burhan Dogancay"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
 
     const { stdout, stderr } = io.read();
     expect(code).toBe(0);
@@ -349,6 +436,8 @@ describe("artbot cli v2", () => {
               sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
             }),
             status: "completed",
+            pinned: true,
+            pinnedAt: "2026-04-08T10:06:00.000Z",
             createdAt: "2026-04-08T10:00:00.000Z",
             updatedAt: "2026-04-08T10:05:00.000Z"
           }
@@ -368,6 +457,141 @@ describe("artbot cli v2", () => {
     expect(stderr).toBe("");
     expect(stdout).toContain("Run ID");
     expect(stdout).toContain("Burhan Dogancay");
+    expect(stdout).toContain("pinned");
+  });
+
+  it("prints storage usage summary as strict JSON", async () => {
+    const io = createMockIo();
+    const summary = buildStorageUsageSummary();
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toContain("/storage/usage");
+      expect(init?.method).toBe("GET");
+      return jsonResponse(summary);
+    });
+
+    const code = await runCli(["node", "artbot", "--json", "storage"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual(summary);
+  });
+
+  it("renders storage usage as a human-readable table", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async () => jsonResponse(buildStorageUsageSummary()));
+
+    const code = await runCli(["node", "artbot", "storage"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("Total var usage");
+    expect(stdout).toContain("Pinned runs");
+    expect(stdout).toContain("Expirable runs");
+    expect(stdout).toContain("Last cleanup reclaimed");
+    expect(stdout).toContain("bytes");
+  });
+
+  it("renders nested storage summary payloads from the API", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        usage: {
+          total_bytes: 3_221_225_472,
+          pinned: { runs: 7, bytes: 2_100_000_000 },
+          expirable: { runs: 18, bytes: 1_121_225_472 },
+          last_cleanup: {
+            reclaimed_bytes: 536_870_912,
+            timestamp: "2026-04-15T09:30:00.000Z",
+            dry_run: false
+          }
+        }
+      })
+    );
+
+    const code = await runCli(["node", "artbot", "storage"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("Total var usage");
+    expect(stdout).toContain("Pinned runs");
+    expect(stdout).toContain("Expirable runs");
+    expect(stdout).toContain("Last cleanup reclaimed");
+    expect(stdout).toContain("3.0 GB");
+    expect(stdout).toContain("512 MB");
+    expect(stdout).not.toContain("n/a");
+  });
+
+  it("pins a run via the API", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toContain("/runs/run-123/pin");
+      expect(init?.method).toBe("POST");
+      return jsonResponse({
+        ...buildRunDetails("completed").run,
+        pinned: true,
+        pinnedAt: "2026-04-16T10:00:00.000Z"
+      });
+    });
+
+    const code = await runCli(["node", "artbot", "--json", "runs", "pin", "--run-id", "run-123"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toMatchObject({
+      id: "run-123",
+      pinned: true
+    });
+  });
+
+  it("unpins a run via the API", async () => {
+    const io = createMockIo();
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toContain("/runs/run-123/unpin");
+      expect(init?.method).toBe("POST");
+      return jsonResponse({
+        ...buildRunDetails("completed").run,
+        pinned: false
+      });
+    });
+
+    const code = await runCli(["node", "artbot", "--json", "runs", "unpin", "--run-id", "run-123"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toMatchObject({
+      id: "run-123",
+      pinned: false
+    });
   });
 
   it("keeps --json responses stdout-only for runs show", async () => {
@@ -638,7 +862,19 @@ describe("artbot cli v2", () => {
     writeRun("run-newest", "2026-04-15T00:00:00.000Z", "newest.zip");
 
     const code = await runCli(
-      ["node", "artbot", "--json", "cleanup", "--runs-root", runsRoot, "--dry-run", "--keep-last", "1", "--max-size-gb", "1"],
+      [
+        "node",
+        "artbot",
+        "--json",
+        "cleanup",
+        "--runs-root",
+        runsRoot,
+        "--dry-run",
+        "--keep-last",
+        "1",
+        "--max-size-gb",
+        "1"
+      ],
       {
         fetchImpl: vi.fn(),
         stdout: io.appendStdout,
@@ -757,7 +993,19 @@ describe("artbot cli v2", () => {
     });
 
     const code = await runCli(
-      ["node", "artbot", "--json", "review", "decide", "--run-id", "run-123", "--item-id", "review-1", "--decision", "merge"],
+      [
+        "node",
+        "artbot",
+        "--json",
+        "review",
+        "decide",
+        "--run-id",
+        "run-123",
+        "--item-id",
+        "review-1",
+        "--decision",
+        "merge"
+      ],
       {
         fetchImpl,
         stdout: io.appendStdout,

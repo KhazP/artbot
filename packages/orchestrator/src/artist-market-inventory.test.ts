@@ -20,6 +20,7 @@ function makeRun(): RunEntity {
       sourceClasses: ["auction_house", "gallery", "dealer", "marketplace", "database"]
     },
     status: "running",
+    pinned: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };

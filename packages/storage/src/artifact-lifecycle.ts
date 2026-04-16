@@ -269,7 +269,7 @@ function manifestSortTimestamp(manifest: ArtifactManifest): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-function protectedRunIds(
+function keepLastProtectedRunIds(
   manifests: Array<{ manifestPath: string; manifest: ArtifactManifest }>,
   keepLast: number
 ): Set<string> {
@@ -285,10 +285,18 @@ function protectedRunIds(
   );
 }
 
+function combineProtectedRunIds(keepLastProtected: Set<string>, pinnedRunIds?: Iterable<string>): Set<string> {
+  const combined = new Set(keepLastProtected);
+  for (const runId of pinnedRunIds ?? []) {
+    combined.add(runId);
+  }
+  return combined;
+}
+
 export function runArtifactGc(
   runsRoot: string,
   policy = buildDefaultGcPolicyFromEnv(),
-  options: { dryRun?: boolean; now?: Date; keepLast?: number } = {}
+  options: { dryRun?: boolean; now?: Date; keepLast?: number; pinnedRunIds?: Iterable<string> } = {}
 ): ArtifactGcResult {
   const dryRun = options.dryRun ?? false;
   const now = options.now ?? new Date();
@@ -299,7 +307,7 @@ export function runArtifactGc(
     .map((entry) => path.join(runsRoot, entry.name, ARTIFACT_MANIFEST_FILE))
     .map((manifestPath) => ({ manifestPath, manifest: readArtifactManifest(manifestPath) }))
     .filter((entry): entry is { manifestPath: string; manifest: ArtifactManifest } => Boolean(entry.manifest));
-  const protectedRuns = protectedRunIds(manifests, keepLast);
+  const protectedRuns = combineProtectedRunIds(keepLastProtectedRunIds(manifests, keepLast), options.pinnedRunIds);
 
   const allItems = manifests.flatMap((entry) => entry.manifest.items);
   const activeItems = allItems.filter((item) => !item.deleted_at);

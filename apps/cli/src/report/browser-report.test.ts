@@ -54,6 +54,7 @@ describe("browser report file generation", () => {
           id: "run-123",
           runType: "artist",
           status: "completed",
+          pinned: false,
           query: { artist: "Bedri Baykam", analysisMode: "fast" }
         },
         summary: {
@@ -112,6 +113,7 @@ describe("browser report file generation", () => {
           id: "run-remote",
           runType: "artist_market_inventory",
           status: "completed",
+          pinned: false,
           query: { artist: "Bedri Baykam", analysisMode: "fast" }
         },
         summary: {

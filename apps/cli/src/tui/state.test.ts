@@ -164,6 +164,7 @@ describe("tui state", () => {
           runType: "artist",
           query: makeQuery("Bedri Baykam"),
           status: "completed",
+          pinned: false,
           createdAt: "2026-04-12T12:00:00.000Z",
           updatedAt: "2026-04-12T12:05:00.000Z"
         },
@@ -172,6 +173,7 @@ describe("tui state", () => {
           runType: "work",
           query: makeQuery("Fikret Mualla", "Untitled"),
           status: "failed",
+          pinned: false,
           createdAt: "2026-04-12T13:00:00.000Z",
           updatedAt: "2026-04-12T13:05:00.000Z"
         }
@@ -181,6 +183,36 @@ describe("tui state", () => {
 
     expect(filteredByArtist).toHaveLength(1);
     expect(filteredByArtist[0]?.id).toBe("run-2");
+  });
+
+  it("filters recent runs by pinned retention label", () => {
+    const filtered = filterRecentRuns(
+      [
+        {
+          id: "run-1",
+          runType: "artist",
+          query: makeQuery("Bedri Baykam"),
+          status: "completed",
+          pinned: true,
+          pinnedAt: "2026-04-12T12:06:00.000Z",
+          createdAt: "2026-04-12T12:00:00.000Z",
+          updatedAt: "2026-04-12T12:05:00.000Z"
+        },
+        {
+          id: "run-2",
+          runType: "work",
+          query: makeQuery("Fikret Mualla", "Untitled"),
+          status: "failed",
+          pinned: false,
+          createdAt: "2026-04-12T13:00:00.000Z",
+          updatedAt: "2026-04-12T13:05:00.000Z"
+        }
+      ],
+      "pinned"
+    );
+
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.id).toBe("run-1");
   });
 
   it("clamps list navigation to valid bounds", () => {

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { v4 as uuidv4 } from "uuid";
 import type {
+  ArtifactGcResult,
   ArtworkCluster,
   ArtworkImage,
   CanaryResult,
@@ -25,13 +26,15 @@ import type {
   SourceHealthRecord,
   SourceHost
 } from "@artbot/shared-types";
-import { buildDefaultGcPolicyFromEnv, runArtifactGc } from "./artifact-lifecycle.js";
+import { ARTIFACT_MANIFEST_FILE, buildDefaultGcPolicyFromEnv, readArtifactManifest, runArtifactGc } from "./artifact-lifecycle.js";
 
 interface RunRow {
   id: string;
   run_type: RunType;
   query_json: string;
   status: RunStatus;
+  pinned?: number | null;
+  pinned_at?: string | null;
   error: string | null;
   report_path: string | null;
   results_path: string | null;
@@ -40,6 +43,16 @@ interface RunRow {
   lease_owner?: string | null;
   lease_expires_at?: string | null;
   heartbeat_at?: string | null;
+}
+
+interface RunUsageRow {
+  id: string;
+  status: RunStatus;
+  pinned?: number | null;
+}
+
+interface StorageMetadataRow {
+  value_json: string;
 }
 
 type HostHealthDimension = {
@@ -69,6 +82,33 @@ export interface RunDetails {
   sourceStatusBreakdown: Record<SourceAccessStatus, number>;
   authModeBreakdown: Record<"anonymous" | "authorized" | "licensed", number>;
 }
+
+export interface StorageUsageBreakdown {
+  runs: number;
+  bytes: number;
+}
+
+export interface StorageCleanupObservation {
+  reclaimed_bytes: number;
+  timestamp: string;
+  dry_run: boolean;
+}
+
+export interface StorageUsageSummary {
+  total_runs: number;
+  total_bytes: number;
+  pinned: StorageUsageBreakdown;
+  expirable: StorageUsageBreakdown;
+  last_cleanup: StorageCleanupObservation | null;
+  observed_cleanup?: StorageCleanupObservation;
+}
+
+export type StorageGcResult = ArtifactGcResult & {
+  last_cleanup: StorageCleanupObservation | null;
+  observed_cleanup?: StorageCleanupObservation;
+};
+
+const LAST_CLEANUP_METADATA_KEY = "last_cleanup";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -192,6 +232,8 @@ export class ArtbotStorage {
         run_type TEXT NOT NULL,
         query_json TEXT NOT NULL,
         status TEXT NOT NULL,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        pinned_at TEXT,
         error TEXT,
         report_path TEXT,
         results_path TEXT,
@@ -324,14 +366,22 @@ export class ArtbotStorage {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS storage_metadata (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     this.ensureRunsColumn("lease_owner", "TEXT");
     this.ensureRunsColumn("lease_expires_at", "TEXT");
     this.ensureRunsColumn("heartbeat_at", "TEXT");
+    this.ensureRunsColumn("pinned", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureRunsColumn("pinned_at", "TEXT");
   }
 
-  private ensureRunsColumn(columnName: "lease_owner" | "lease_expires_at" | "heartbeat_at", columnSqlType: "TEXT"): void {
+  private ensureRunsColumn(columnName: string, columnSqlType: string): void {
     const columns = this.db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
     if (columns.some((column) => column.name === columnName)) {
       return;
@@ -364,6 +414,7 @@ export class ArtbotStorage {
       runType,
       query,
       status: "pending",
+      pinned: false,
       createdAt: now,
       updatedAt: now
     };
@@ -372,7 +423,7 @@ export class ArtbotStorage {
   public getPendingRuns(limit = 5): RunEntity[] {
     const rows = this.db
       .prepare(
-        `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+        `SELECT id, run_type, query_json, status, pinned, pinned_at, error, report_path, results_path, created_at, updated_at
          FROM runs
          WHERE status = 'pending'
          ORDER BY created_at ASC
@@ -387,7 +438,7 @@ export class ArtbotStorage {
     const nowIso = new Date().toISOString();
     const rows = this.db
       .prepare(
-        `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+        `SELECT id, run_type, query_json, status, pinned, pinned_at, error, report_path, results_path, created_at, updated_at
          FROM runs
          WHERE status = 'pending'
             OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
@@ -405,7 +456,7 @@ export class ArtbotStorage {
     const rows = status
       ? (this.db
           .prepare(
-            `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+            `SELECT id, run_type, query_json, status, pinned, pinned_at, error, report_path, results_path, created_at, updated_at
              FROM runs
              WHERE status = ?
              ORDER BY created_at DESC, id DESC
@@ -414,7 +465,7 @@ export class ArtbotStorage {
           .all(status, cappedLimit) as unknown as RunRow[])
       : (this.db
           .prepare(
-            `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+            `SELECT id, run_type, query_json, status, pinned, pinned_at, error, report_path, results_path, created_at, updated_at
              FROM runs
              ORDER BY created_at DESC, id DESC
              LIMIT ?`
@@ -534,11 +585,80 @@ export class ArtbotStorage {
         )
         .run(reportPath, resultsPath, now, runId)
     );
+    const run = this.getRun(runId);
+    this.syncRunManifestPromotionState(runId, Boolean(run?.pinned));
     this.runArtifactGc();
   }
 
-  public runArtifactGc(options: { dryRun?: boolean; now?: Date } = {}) {
-    return runArtifactGc(this.runsRoot, buildDefaultGcPolicyFromEnv(), options);
+  public getStorageUsageSummary(options: { observedCleanup?: StorageCleanupObservation } = {}): StorageUsageSummary {
+    const runRows = this.db.prepare(`SELECT id, status, pinned FROM runs`).all() as unknown as RunUsageRow[];
+    let totalBytes = 0;
+    const pinned = {
+      runs: 0,
+      bytes: 0
+    };
+    const expirable = {
+      runs: 0,
+      bytes: 0
+    };
+
+    for (const row of runRows) {
+      const runBytes = this.getRunDirectorySizeBytes(row.id);
+      totalBytes += runBytes;
+      if (Boolean(row.pinned)) {
+        pinned.runs += 1;
+        pinned.bytes += runBytes;
+        continue;
+      }
+      if (row.status === "completed" || row.status === "failed") {
+        expirable.runs += 1;
+        expirable.bytes += runBytes;
+      }
+    }
+
+    return {
+      total_runs: runRows.length,
+      total_bytes: totalBytes,
+      pinned,
+      expirable,
+      last_cleanup: this.getLastCleanupObservation(),
+      observed_cleanup: options.observedCleanup
+    };
+  }
+
+  public runArtifactGc(options: { dryRun?: boolean; now?: Date } = {}): StorageGcResult {
+    const gcResult = runArtifactGc(this.runsRoot, buildDefaultGcPolicyFromEnv(), {
+      ...options,
+      pinnedRunIds: this.listPinnedRunIds()
+    });
+    const timestamp = (options.now ?? new Date()).toISOString();
+    const observedCleanup: StorageCleanupObservation = {
+      reclaimed_bytes: gcResult.reclaimed_bytes,
+      timestamp,
+      dry_run: gcResult.dry_run
+    };
+
+    if (!gcResult.dry_run) {
+      this.setLastCleanupObservation(observedCleanup);
+      return {
+        ...gcResult,
+        last_cleanup: observedCleanup
+      };
+    }
+
+    return {
+      ...gcResult,
+      last_cleanup: this.getLastCleanupObservation(),
+      observed_cleanup: observedCleanup
+    };
+  }
+
+  public pinRun(runId: string): RunEntity | null {
+    return this.setRunPinned(runId, true);
+  }
+
+  public unpinRun(runId: string): RunEntity | null {
+    return this.setRunPinned(runId, false);
   }
 
   public failRun(runId: string, error: string): void {
@@ -1307,7 +1427,7 @@ export class ArtbotStorage {
   public getRunDetails(runId: string): RunDetails | null {
     const row = this.db
       .prepare(
-        `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+        `SELECT id, run_type, query_json, status, pinned, pinned_at, error, report_path, results_path, created_at, updated_at
          FROM runs WHERE id = ?`
       )
       .get(runId) as RunRow | undefined;
@@ -1359,7 +1479,7 @@ export class ArtbotStorage {
   public getRun(runId: string): RunEntity | null {
     const row = this.db
       .prepare(
-        `SELECT id, run_type, query_json, status, error, report_path, results_path, created_at, updated_at
+        `SELECT id, run_type, query_json, status, pinned, pinned_at, error, report_path, results_path, created_at, updated_at
          FROM runs WHERE id = ?`
       )
       .get(runId) as RunRow | undefined;
@@ -1387,18 +1507,132 @@ export class ArtbotStorage {
     return row ? JSON.parse(row.payload_json) : null;
   }
 
+  private getRunDirectorySizeBytes(runId: string): number {
+    return this.getDirectorySizeBytes(path.join(this.runsRoot, runId));
+  }
+
+  private getDirectorySizeBytes(targetPath: string): number {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(targetPath, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+
+    let total = 0;
+    for (const entry of entries) {
+      const entryPath = path.join(targetPath, entry.name);
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        total += this.getDirectorySizeBytes(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      try {
+        total += fs.statSync(entryPath).size;
+      } catch {
+        // Ignore files that disappear while summarizing usage.
+      }
+    }
+    return total;
+  }
+
+  private getLastCleanupObservation(): StorageCleanupObservation | null {
+    const row = this.db
+      .prepare(`SELECT value_json FROM storage_metadata WHERE key = ?`)
+      .get(LAST_CLEANUP_METADATA_KEY) as StorageMetadataRow | undefined;
+    if (!row) {
+      return null;
+    }
+    try {
+      return JSON.parse(row.value_json) as StorageCleanupObservation;
+    } catch {
+      return null;
+    }
+  }
+
+  private setLastCleanupObservation(observation: StorageCleanupObservation): void {
+    const updatedAt = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO storage_metadata (key, value_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key)
+         DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`
+      )
+      .run(LAST_CLEANUP_METADATA_KEY, JSON.stringify(observation), updatedAt);
+  }
+
   private mapRun(row: RunRow): RunEntity {
     return {
       id: row.id,
       runType: row.run_type,
       query: JSON.parse(row.query_json) as ResearchQuery,
       status: row.status,
+      pinned: Boolean(row.pinned),
+      pinnedAt: row.pinned_at ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       error: row.error ?? undefined,
       reportPath: row.report_path ?? undefined,
       resultsPath: row.results_path ?? undefined
     };
+  }
+
+  private listPinnedRunIds(): string[] {
+    const rows = this.db.prepare(`SELECT id FROM runs WHERE pinned = 1`).all() as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  private setRunPinned(runId: string, pinned: boolean): RunEntity | null {
+    const now = new Date().toISOString();
+    const result = this.withBusyRetry(() =>
+      this.db
+        .prepare(
+          `UPDATE runs
+           SET pinned = ?,
+               pinned_at = ?,
+               updated_at = ?
+           WHERE id = ?`
+        )
+        .run(pinned ? 1 : 0, pinned ? now : null, now, runId)
+    );
+
+    if (result.changes === 0) {
+      return null;
+    }
+
+    this.syncRunManifestPromotionState(runId, pinned);
+    const run = this.getRun(runId);
+    if (run?.status === "completed") {
+      this.runArtifactGc();
+    }
+    return run;
+  }
+
+  private syncRunManifestPromotionState(runId: string, pinned: boolean): void {
+    const manifestPath = path.join(this.runsRoot, runId, ARTIFACT_MANIFEST_FILE);
+    const manifest = readArtifactManifest(manifestPath);
+    if (!manifest) {
+      return;
+    }
+
+    const nextPromotionState = pinned ? "promoted" : "standard";
+    let mutated = false;
+    for (const item of manifest.items) {
+      if (item.promotion_state !== nextPromotionState) {
+        item.promotion_state = nextPromotionState;
+        mutated = true;
+      }
+    }
+
+    if (mutated) {
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
+    }
   }
 
 }

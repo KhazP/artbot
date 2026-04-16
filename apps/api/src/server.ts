@@ -85,6 +85,66 @@ const adjudicateReviewItemSchema = z.object({
   decision: z.enum(["merge", "keep_separate"])
 });
 
+const storageUsageBreakdownSchema = z.object({
+  runs: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative()
+});
+
+const storageCleanupObservationSchema = z.object({
+  reclaimed_bytes: z.number().int().nonnegative(),
+  timestamp: z.string(),
+  dry_run: z.boolean()
+});
+
+const storageUsageSummarySchema = z.object({
+  total_runs: z.number().int().nonnegative(),
+  total_bytes: z.number().int().nonnegative(),
+  pinned: storageUsageBreakdownSchema,
+  expirable: storageUsageBreakdownSchema,
+  last_cleanup: storageCleanupObservationSchema.nullable(),
+  observed_cleanup: storageCleanupObservationSchema.optional()
+});
+
+const storageUsageResponseSchema = z.object({
+  total_var_bytes: z.number().int().nonnegative(),
+  pinned_runs: z.number().int().nonnegative(),
+  expirable_runs: z.number().int().nonnegative(),
+  last_cleanup_reclaimed_bytes: z.number().int().nonnegative().nullable(),
+  last_cleanup_completed_at: z.string().nullable(),
+  usage: storageUsageSummarySchema
+});
+
+function getDirectorySizeBytes(targetPath: string): number {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(targetPath, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+
+  let total = 0;
+  for (const entry of entries) {
+    const entryPath = path.join(targetPath, entry.name);
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      total += getDirectorySizeBytes(entryPath);
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+    try {
+      total += fs.statSync(entryPath).size;
+    } catch {
+      // Ignore files that disappear while summarizing usage.
+    }
+  }
+
+  return total;
+}
+
 app.addHook("preHandler", async (request, reply) => {
   if (!apiKey) return;
 
@@ -361,6 +421,43 @@ app.get("/runs/:id", async (request, reply) => {
   };
 
   return runDetailsResponseSchema.parse(response);
+});
+
+app.post("/runs/:id/pin", async (request, reply) => {
+  const id = (request.params as { id: string }).id;
+  const run = storage.pinRun(id);
+  if (!run) {
+    return reply.status(404).send({ error: "Run not found" });
+  }
+  return run;
+});
+
+app.post("/runs/:id/unpin", async (request, reply) => {
+  const id = (request.params as { id: string }).id;
+  const run = storage.unpinRun(id);
+  if (!run) {
+    return reply.status(404).send({ error: "Run not found" });
+  }
+  return run;
+});
+
+app.get("/storage/usage", async () => {
+  const usage = storageUsageSummarySchema.parse(
+    (
+      storage as ArtbotStorage & {
+        getStorageUsageSummary: () => unknown;
+      }
+    ).getStorageUsageSummary()
+  );
+  const varRoot = path.resolve(runsRoot, "..");
+  return storageUsageResponseSchema.parse({
+    total_var_bytes: getDirectorySizeBytes(varRoot),
+    pinned_runs: usage.pinned.runs,
+    expirable_runs: usage.expirable.runs,
+    last_cleanup_reclaimed_bytes: usage.last_cleanup?.reclaimed_bytes ?? null,
+    last_cleanup_completed_at: usage.last_cleanup?.timestamp ?? null,
+    usage
+  });
 });
 
 app.post("/runs/:id/review-queue/:reviewId/adjudicate", async (request, reply) => {

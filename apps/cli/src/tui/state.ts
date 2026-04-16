@@ -7,6 +7,8 @@ export interface PipelineDetails {
   run?: {
     id?: string;
     status?: string;
+    pinned?: boolean;
+    pinnedAt?: string;
     resultsPath?: string;
     reportPath?: string;
     runType?: string;
@@ -178,12 +180,14 @@ export function filterRecentRuns(runs: RunEntity[], query: string): RunEntity[] 
     const title = run.query.title?.toLowerCase() ?? "";
     const status = run.status.toLowerCase();
     const runType = run.runType.toLowerCase();
+    const pinned = run.pinned ? "pinned" : "";
     return (
       run.id.toLowerCase().includes(trimmed) ||
       artist.includes(trimmed) ||
       title.includes(trimmed) ||
       status.includes(trimmed) ||
-      runType.includes(trimmed)
+      runType.includes(trimmed) ||
+      pinned.includes(trimmed)
     );
   });
 }

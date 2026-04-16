@@ -58,6 +58,108 @@ describe("ArtbotStorage listRuns", () => {
     expect(failedOnly[0].id).toBe(first.id);
     expect(failedOnly[0].status).toBe("failed");
   });
+
+  it("persists pinned run state across reloads", () => {
+    const { dbPath, runsRoot } = mkTempPaths();
+    const storage = new ArtbotStorage(dbPath, runsRoot);
+
+    const run = storage.createRun("artist", query("Pinned Artist"));
+    expect(run.pinned).toBe(false);
+
+    const pinned = storage.pinRun(run.id);
+    expect(pinned?.pinned).toBe(true);
+    expect(pinned?.pinnedAt).toBeDefined();
+
+    const reloaded = new ArtbotStorage(dbPath, runsRoot);
+    expect(reloaded.getRun(run.id)?.pinned).toBe(true);
+    expect(reloaded.listRuns(10)[0]?.pinned).toBe(true);
+
+    const unpinned = reloaded.unpinRun(run.id);
+    expect(unpinned?.pinned).toBe(false);
+    expect(unpinned?.pinnedAt).toBeUndefined();
+  });
+});
+
+describe("ArtbotStorage storage usage summary", () => {
+  it("reports total bytes with pinned vs expirable run splits", () => {
+    const { dbPath, runsRoot } = mkTempPaths();
+    const storage = new ArtbotStorage(dbPath, runsRoot);
+
+    const pinnedRun = storage.createRun("artist", query("Pinned Summary Artist"));
+    const completedRun = storage.createRun("artist", query("Completed Summary Artist"));
+    const failedRun = storage.createRun("artist", query("Failed Summary Artist"));
+    const runningRun = storage.createRun("artist", query("Running Summary Artist"));
+
+    storage.pinRun(pinnedRun.id);
+    storage.failRun(failedRun.id, "fixture failure");
+    storage.reserveRun(runningRun.id, "worker-summary", 60_000);
+
+    const pinnedFile = path.join(runsRoot, pinnedRun.id, "pin.txt");
+    fs.mkdirSync(path.dirname(pinnedFile), { recursive: true });
+    fs.writeFileSync(pinnedFile, "pin", "utf-8");
+
+    const completedRoot = path.join(runsRoot, completedRun.id);
+    fs.mkdirSync(completedRoot, { recursive: true });
+    const completedReportPath = path.join(completedRoot, "report.md");
+    const completedResultsPath = path.join(completedRoot, "results.json");
+    fs.writeFileSync(completedReportPath, "report!", "utf-8");
+    fs.writeFileSync(completedResultsPath, "{}", "utf-8");
+    storage.completeRun(completedRun.id, completedReportPath, completedResultsPath);
+
+    const failedFile = path.join(runsRoot, failedRun.id, "failure.txt");
+    fs.mkdirSync(path.dirname(failedFile), { recursive: true });
+    fs.writeFileSync(failedFile, "error", "utf-8");
+
+    const runningFile = path.join(runsRoot, runningRun.id, "active.txt");
+    fs.mkdirSync(path.dirname(runningFile), { recursive: true });
+    fs.writeFileSync(runningFile, "active!", "utf-8");
+
+    const summary = storage.getStorageUsageSummary();
+    expect(summary.total_runs).toBe(4);
+    expect(summary.total_bytes).toBe(24);
+    expect(summary.pinned).toEqual({
+      runs: 1,
+      bytes: 3
+    });
+    expect(summary.expirable).toEqual({
+      runs: 2,
+      bytes: 14
+    });
+  });
+
+  it("persists last cleanup metadata only for non-dry-run gc", () => {
+    const { dbPath, runsRoot } = mkTempPaths();
+    const storage = new ArtbotStorage(dbPath, runsRoot);
+
+    const initialCleanupAt = new Date("2026-04-15T00:00:00.000Z");
+    const first = storage.runArtifactGc({ now: initialCleanupAt });
+    expect(first.last_cleanup).toEqual({
+      reclaimed_bytes: first.reclaimed_bytes,
+      timestamp: initialCleanupAt.toISOString(),
+      dry_run: false
+    });
+    expect(first.observed_cleanup).toBeUndefined();
+    expect(storage.getStorageUsageSummary().last_cleanup).toEqual(first.last_cleanup);
+
+    const dryRunAt = new Date("2026-04-16T00:00:00.000Z");
+    const dryRun = storage.runArtifactGc({ dryRun: true, now: dryRunAt });
+    expect(dryRun.last_cleanup).toEqual(first.last_cleanup);
+    expect(dryRun.observed_cleanup).toEqual({
+      reclaimed_bytes: dryRun.reclaimed_bytes,
+      timestamp: dryRunAt.toISOString(),
+      dry_run: true
+    });
+    expect(storage.getStorageUsageSummary().last_cleanup).toEqual(first.last_cleanup);
+
+    const nextCleanupAt = new Date("2026-04-16T01:00:00.000Z");
+    const second = storage.runArtifactGc({ now: nextCleanupAt });
+    expect(second.last_cleanup).toEqual({
+      reclaimed_bytes: second.reclaimed_bytes,
+      timestamp: nextCleanupAt.toISOString(),
+      dry_run: false
+    });
+    expect(storage.getStorageUsageSummary().last_cleanup).toEqual(second.last_cleanup);
+  });
 });
 
 describe("ArtbotStorage lease lifecycle", () => {
@@ -450,5 +552,101 @@ describe("ArtbotStorage completeRun", () => {
     expect(fs.existsSync(traceA) || fs.existsSync(traceB)).toBe(true);
     expect(fs.existsSync(traceA) && fs.existsSync(traceB)).toBe(false);
     expect(readArtifactManifest(path.join(runRoot, "artifact-manifest.json"))?.items.some((item) => item.deleted_at)).toBe(true);
+  });
+
+  it("preserves pinned run artifacts during automatic gc", () => {
+    const { dbPath, runsRoot } = mkTempPaths();
+    const storage = new ArtbotStorage(dbPath, runsRoot);
+    const run = storage.createRun("artist", query("Pinned GC Artist"));
+    const runRoot = path.join(runsRoot, run.id);
+    fs.mkdirSync(path.join(runRoot, "evidence", "traces"), { recursive: true });
+
+    const reportPath = path.join(runRoot, "report.md");
+    const resultsPath = path.join(runRoot, "results.json");
+    const traceA = path.join(runRoot, "evidence", "traces", "a.zip");
+    const traceB = path.join(runRoot, "evidence", "traces", "b.zip");
+    fs.writeFileSync(reportPath, "report", "utf-8");
+    fs.writeFileSync(resultsPath, JSON.stringify({ ok: true }), "utf-8");
+    fs.writeFileSync(traceA, "same-payload", "utf-8");
+    fs.writeFileSync(traceB, "same-payload", "utf-8");
+
+    const attempts: SourceAttempt[] = [
+      {
+        run_id: run.id,
+        source_name: "Fixture Source",
+        source_family: "fixture",
+        venue_name: "Fixture Venue",
+        source_url: "https://example.com/lot/1",
+        canonical_url: "https://example.com/lot/1",
+        access_mode: "anonymous",
+        source_legal_posture: "public_permitted",
+        artifact_handling: "standard",
+        source_access_status: "public_access",
+        access_reason: "fixture",
+        blocker_reason: null,
+        extracted_fields: {},
+        screenshot_path: null,
+        raw_snapshot_path: null,
+        trace_path: traceA,
+        har_path: null,
+        fetched_at: "2026-04-14T10:00:00.000Z",
+        parser_used: "fixture",
+        model_used: null,
+        confidence_score: 0.8,
+        accepted: true,
+        accepted_for_evidence: true,
+        accepted_for_valuation: true,
+        valuation_lane: "asking",
+        acceptance_reason: "asking_price_ready"
+      },
+      {
+        run_id: run.id,
+        source_name: "Fixture Source",
+        source_family: "fixture",
+        venue_name: "Fixture Venue",
+        source_url: "https://example.com/lot/2",
+        canonical_url: "https://example.com/lot/2",
+        access_mode: "anonymous",
+        source_legal_posture: "public_permitted",
+        artifact_handling: "standard",
+        source_access_status: "public_access",
+        access_reason: "fixture",
+        blocker_reason: null,
+        extracted_fields: {},
+        screenshot_path: null,
+        raw_snapshot_path: null,
+        trace_path: traceB,
+        har_path: null,
+        fetched_at: "2026-04-14T10:01:00.000Z",
+        parser_used: "fixture",
+        model_used: null,
+        confidence_score: 0.8,
+        accepted: true,
+        accepted_for_evidence: true,
+        accepted_for_valuation: true,
+        valuation_lane: "asking",
+        acceptance_reason: "asking_price_ready"
+      }
+    ];
+    writeArtifactManifest(
+      runRoot,
+      buildRunArtifactManifest({
+        runId: run.id,
+        runRoot,
+        reportPath,
+        resultsPath,
+        attempts
+      })
+    );
+
+    storage.pinRun(run.id);
+    storage.completeRun(run.id, reportPath, resultsPath);
+
+    const manifest = readArtifactManifest(path.join(runRoot, "artifact-manifest.json"));
+    expect(storage.getRun(run.id)?.pinned).toBe(true);
+    expect(fs.existsSync(traceA)).toBe(true);
+    expect(fs.existsSync(traceB)).toBe(true);
+    expect(manifest?.items.every((item) => item.promotion_state === "promoted")).toBe(true);
+    expect(manifest?.items.some((item) => item.deleted_at)).toBe(false);
   });
 });

@@ -153,6 +153,10 @@ interface ArtifactGcOptions {
   keepLast?: string;
 }
 
+interface StorageUsageResponse {
+  [key: string]: unknown;
+}
+
 interface CanaryRunOptions {
   fixturesRoot?: string;
 }
@@ -168,6 +172,7 @@ interface GlobalOptions {
   apiKey?: string;
   verbose: boolean;
   quiet: boolean;
+  noTui: boolean;
 }
 
 export type RunDetailsResponse = RunDetailsResponsePayload;
@@ -302,6 +307,7 @@ interface CliDeps {
   spinnerFactory?: (text: string) => SpinnerLike;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
+  startInteractive?: () => Promise<number>;
 }
 
 class ApiRequestError extends Error {
@@ -323,6 +329,7 @@ class TerminalStateError extends Error {
 interface CliContext {
   deps: Required<CliDeps>;
   exitCode: number;
+  noTui: boolean;
 }
 
 function toNumber(value?: string): number | undefined {
@@ -396,6 +403,69 @@ function safeJsonParse(text: string): unknown {
   return JSON.parse(text);
 }
 
+function isTruthyEnvFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function isNoTuiEnabled(userArgs: string[], env: NodeJS.ProcessEnv = process.env): boolean {
+  return userArgs.includes("--no-tui") || isTruthyEnvFlag(env.ARTBOT_NO_TUI);
+}
+
+function getNestedValue(payload: unknown, pathSegments: string[]): unknown {
+  let current = payload;
+  for (const segment of pathSegments) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function readNestedNumber(payload: unknown, paths: string[][]): number | undefined {
+  for (const pathSegments of paths) {
+    const value = getNestedValue(payload, pathSegments);
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readNestedString(payload: unknown, paths: string[][]): string | undefined {
+  for (const pathSegments of paths) {
+    const value = getNestedValue(payload, pathSegments);
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function formatBytesCompact(value: number | undefined): string {
+  if (value == null) {
+    return "n/a";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let normalized = value;
+  let unitIndex = 0;
+  while (normalized >= 1024 && unitIndex < units.length - 1) {
+    normalized /= 1024;
+    unitIndex += 1;
+  }
+  const decimals = normalized >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${normalized.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+function formatBytesWithRaw(value: number | undefined): string {
+  if (value == null) {
+    return "n/a";
+  }
+  return `${formatBytesCompact(value)} (${Math.round(value).toLocaleString("en-US")} bytes)`;
+}
+
 function resolveGlobals(command: Command): GlobalOptions {
   const raw = command.optsWithGlobals() as {
     json?: boolean;
@@ -403,6 +473,7 @@ function resolveGlobals(command: Command): GlobalOptions {
     apiKey?: string;
     verbose?: boolean;
     quiet?: boolean;
+    noTui?: boolean;
   };
 
   const globals: GlobalOptions = {
@@ -410,7 +481,8 @@ function resolveGlobals(command: Command): GlobalOptions {
     apiBaseUrl: raw.apiBaseUrl ?? process.env.API_BASE_URL ?? "http://localhost:4000",
     apiKey: raw.apiKey ?? process.env.ARTBOT_API_KEY,
     verbose: Boolean(raw.verbose),
-    quiet: Boolean(raw.quiet)
+    quiet: Boolean(raw.quiet),
+    noTui: Boolean(raw.noTui) || isTruthyEnvFlag(process.env.ARTBOT_NO_TUI)
   };
 
   if (globals.verbose && globals.quiet) {
@@ -523,7 +595,7 @@ async function requestJson<T>(
 
 export function renderRunsTable(runs: RunEntity[]): string {
   const table = new Table({
-    head: ["Run ID", "Type", "Status", "Artist", "Created"],
+    head: ["Run ID", "Type", "Status", "Retention", "Artist", "Created"],
     wordWrap: true
   });
 
@@ -532,6 +604,7 @@ export function renderRunsTable(runs: RunEntity[]): string {
       run.id,
       run.runType,
       run.status,
+      run.pinned ? "pinned" : "default",
       run.query.artist,
       new Date(run.createdAt).toLocaleString("en-US")
     ]);
@@ -693,6 +766,63 @@ export function renderCanaryTable(canaries: CanaryResult[], limit = 8): string {
   return table.toString();
 }
 
+export function renderStorageUsageTable(summary: StorageUsageResponse): string {
+  const totalVarBytes = readNestedNumber(summary, [
+    ["total_var_bytes"],
+    ["total_var_usage_bytes"],
+    ["total_bytes"],
+    ["totals", "var_bytes"],
+    ["totals", "total_var_bytes"],
+    ["usage", "total_bytes"],
+    ["usage", "total_var_bytes"],
+    ["usage", "var_bytes"]
+  ]);
+  const pinnedRuns = readNestedNumber(summary, [
+    ["pinned_runs"],
+    ["pinned", "runs"],
+    ["run_counts", "pinned"],
+    ["runs", "pinned"],
+    ["usage", "pinned", "runs"]
+  ]);
+  const expirableRuns = readNestedNumber(summary, [
+    ["expirable_runs"],
+    ["expirable", "runs"],
+    ["run_counts", "expirable"],
+    ["runs", "expirable"],
+    ["usage", "expirable", "runs"]
+  ]);
+  const lastCleanupReclaimedBytes = readNestedNumber(summary, [
+    ["last_cleanup_reclaimed_bytes"],
+    ["cleanup", "reclaimed_bytes"],
+    ["cleanup", "last_reclaimed_bytes"],
+    ["last_cleanup", "reclaimed_bytes"],
+    ["usage", "last_cleanup", "reclaimed_bytes"]
+  ]);
+  const lastCleanupAt = readNestedString(summary, [
+    ["last_cleanup_at"],
+    ["last_cleanup_completed_at"],
+    ["cleanup", "completed_at"],
+    ["cleanup", "last_completed_at"],
+    ["last_cleanup", "completed_at"],
+    ["last_cleanup", "timestamp"],
+    ["usage", "last_cleanup", "timestamp"]
+  ]);
+
+  const table = new Table({
+    head: ["Metric", "Value"]
+  });
+
+  table.push(
+    ["Total var usage", formatBytesWithRaw(totalVarBytes)],
+    ["Pinned runs", pinnedRuns != null ? Math.round(pinnedRuns).toLocaleString("en-US") : "n/a"],
+    ["Expirable runs", expirableRuns != null ? Math.round(expirableRuns).toLocaleString("en-US") : "n/a"],
+    ["Last cleanup reclaimed", formatBytesWithRaw(lastCleanupReclaimedBytes)],
+    ["Last cleanup at", lastCleanupAt ? new Date(lastCleanupAt).toLocaleString("en-US") : "n/a"]
+  );
+
+  return table.toString();
+}
+
 type ReviewQueueFilterStatus = "open" | "resolved" | undefined;
 type ReviewDecision = "merge" | "keep_separate";
 
@@ -819,9 +949,9 @@ function renderSetupAssessment(assessment: SetupAssessment): string {
         : picocolors.yellow("unavailable");
   const localBackendDetail =
     assessment.localBackendMode === "workspace"
-      ? assessment.workspaceRoot ?? "Workspace root unavailable"
+      ? (assessment.workspaceRoot ?? "Workspace root unavailable")
       : assessment.localBackendMode === "bundled"
-        ? assessment.localBackendPath ?? "Bundled runtime home unavailable"
+        ? (assessment.localBackendPath ?? "Bundled runtime home unavailable")
         : "No local backend runtime detected";
   const localUnlimitedProfileActive =
     assessment.webDiscoveryEnabled && assessment.webDiscoveryProvider === "searxng" && !assessment.firecrawlEnabled;
@@ -843,21 +973,9 @@ function renderSetupAssessment(assessment: SetupAssessment): string {
       assessment.apiHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
       assessment.apiHealth.reason ?? assessment.apiBaseUrl
     ],
-    [
-      "Local Backend",
-      localBackendStatus,
-      localBackendDetail
-    ],
-    [
-      "Config",
-      picocolors.green("env"),
-      assessment.envPath
-    ],
-    [
-      "Discovery Profile",
-      discoveryStatus,
-      discoveryDetail
-    ],
+    ["Local Backend", localBackendStatus, localBackendDetail],
+    ["Config", picocolors.green("env"), assessment.envPath],
+    ["Discovery Profile", discoveryStatus, discoveryDetail],
     [
       "SearXNG",
       assessment.searxngHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
@@ -875,9 +993,13 @@ function renderSetupAssessment(assessment: SetupAssessment): string {
     ],
     [
       "Sessions",
-      assessment.sessionStates.length === 0 ? picocolors.yellow("none") : picocolors.green(String(assessment.sessionStates.length)),
+      assessment.sessionStates.length === 0
+        ? picocolors.yellow("none")
+        : picocolors.green(String(assessment.sessionStates.length)),
       assessment.sessionStates
-        .map((session) => `${session.profileId}:${session.exists ? (session.expired ? "expired" : "ready") : "missing"}`)
+        .map(
+          (session) => `${session.profileId}:${session.exists ? (session.expired ? "expired" : "ready") : "missing"}`
+        )
         .join(", ") || "No relevant sessions"
     ]
   );
@@ -899,14 +1021,16 @@ function renderBackendStatus(status: LocalBackendStatus): string {
     [
       "API Process",
       status.api.running ? picocolors.green("running") : picocolors.yellow("stopped"),
-      status.api.pid ? `pid ${status.api.pid}${status.api.logPath ? ` · ${status.api.logPath}` : ""}` : status.api.logPath ?? "No managed API process"
+      status.api.pid
+        ? `pid ${status.api.pid}${status.api.logPath ? ` · ${status.api.logPath}` : ""}`
+        : (status.api.logPath ?? "No managed API process")
     ],
     [
       "Worker Process",
       status.worker.running ? picocolors.green("running") : picocolors.yellow("stopped"),
       status.worker.pid
         ? `pid ${status.worker.pid}${status.worker.logPath ? ` · ${status.worker.logPath}` : ""}`
-        : status.worker.logPath ?? "No managed worker process"
+        : (status.worker.logPath ?? "No managed worker process")
     ],
     [
       "API Health",
@@ -930,6 +1054,18 @@ function renderSetupIssues(assessment: SetupAssessment): string {
       return `${prefix} ${issue.message}${issue.detail ? ` (${issue.detail})` : ""}`;
     })
     .join("\n");
+}
+
+function formatRunRetention(run: Pick<RunEntity, "pinned" | "pinnedAt">): string {
+  if (!run.pinned) {
+    return "default";
+  }
+
+  if (!run.pinnedAt) {
+    return "pinned";
+  }
+
+  return `pinned since ${new Date(run.pinnedAt).toLocaleString("en-US")}`;
 }
 
 function renderAuthProfilesTable(assessment: SetupAssessment): string {
@@ -959,6 +1095,7 @@ function renderAuthProfilesTable(assessment: SetupAssessment): string {
 function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: RunDetailsResponse): void {
   logInfo(globals, ctx, `Run ${details.run.id} (${details.run.runType})`);
   logInfo(globals, ctx, `Status: ${details.run.status}`);
+  logInfo(globals, ctx, `Retention: ${formatRunRetention(details.run)}`);
   logInfo(globals, ctx, "");
   logInfo(globals, ctx, renderSummaryTable(details.summary));
   logInfo(globals, ctx, "");
@@ -1084,9 +1221,9 @@ function extractReplayHtmlFromHar(harPath: string, preferredUrl: string): { html
   const htmlEntries = entries
     .map((entry) => {
       const mimeType =
-        entry.response?.content?.mimeType
-        ?? entry.response?.headers?.find((header) => header.name?.toLowerCase() === "content-type")?.value
-        ?? "";
+        entry.response?.content?.mimeType ??
+        entry.response?.headers?.find((header) => header.name?.toLowerCase() === "content-type")?.value ??
+        "";
       const text = entry.response?.content?.text;
       if (!text || !/text\/html|application\/xhtml\+xml/i.test(mimeType)) {
         return null;
@@ -1147,9 +1284,9 @@ async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOption
   const selected =
     (options.source
       ? candidates.find((attempt) => attempt.source_name.toLowerCase().includes(options.source!.toLowerCase()))
-      : undefined)
-    ?? candidates[toPositiveInt(options.index, 1) - 1]
-    ?? candidates[0];
+      : undefined) ??
+    candidates[toPositiveInt(options.index, 1) - 1] ??
+    candidates[0];
 
   if (!selected) {
     throw new InputValidationError(`No replayable attempt found for run ${options.runId}.`);
@@ -1244,6 +1381,17 @@ async function handleArtifactGc(ctx: CliContext, options: ArtifactGcOptions, com
   logInfo(globals, ctx, `Remaining bytes: ${result.remaining_bytes}`);
 }
 
+async function handleStorageUsage(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const summary = await requestJson<StorageUsageResponse>(ctx, globals, "GET", "/storage/usage");
+  printJson(globals, ctx, summary);
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, renderStorageUsageTable(summary));
+}
+
 async function handleReviewQueue(ctx: CliContext, options: ReviewQueueOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const details = await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`);
@@ -1255,7 +1403,13 @@ async function handleReviewQueue(ctx: CliContext, options: ReviewQueueOptions, c
   );
 
   const rows = (details.review_queue ?? [])
-    .filter((item) => (statusFilter === "open" ? item.status === "pending" : statusFilter === "resolved" ? item.status !== "pending" : true))
+    .filter((item) =>
+      statusFilter === "open"
+        ? item.status === "pending"
+        : statusFilter === "resolved"
+          ? item.status !== "pending"
+          : true
+    )
     .map((item) => {
       const leftSource = sourceByRecord.get(item.left_record_key) ?? "unknown";
       const rightSource = sourceByRecord.get(item.right_record_key) ?? "unknown";
@@ -1380,15 +1534,14 @@ function buildCanaryResult(fixturesRoot: string, definition: CanaryFixtureDefini
   const observedPriceType = evaluated.parsed.priceType;
   const listingExpansionReady = /\/(?:lot|eser|urun)\//i.test(html);
   const expectsListingExpansion = definition.passMode === "listing_expansion";
-  const status =
-    expectsListingExpansion
-      ? (listingExpansionReady ? "pass" : "fail")
-      : (
-        (definition.expectedPriceType == null || observedPriceType === definition.expectedPriceType)
-        && evaluated.acceptance.acceptedForEvidence
-      )
-        ? "pass"
-        : "fail";
+  const status = expectsListingExpansion
+    ? listingExpansionReady
+      ? "pass"
+      : "fail"
+    : (definition.expectedPriceType == null || observedPriceType === definition.expectedPriceType) &&
+        evaluated.acceptance.acceptedForEvidence
+      ? "pass"
+      : "fail";
 
   return {
     id: randomUUID(),
@@ -1421,7 +1574,9 @@ async function handleCanariesRun(ctx: CliContext, options: CanaryRunOptions, com
     ? path.resolve(options.fixturesRoot)
     : path.resolve(process.cwd(), "data/fixtures/adapters");
   const { storage, resolved } = openLocalStorage();
-  const results = PRIORITY_CANARY_FIXTURES.map((definition) => storage.saveCanaryResult(buildCanaryResult(fixturesRoot, definition)));
+  const results = PRIORITY_CANARY_FIXTURES.map((definition) =>
+    storage.saveCanaryResult(buildCanaryResult(fixturesRoot, definition))
+  );
   const summary = {
     pass: results.filter((item) => item.status === "pass").length,
     fail: results.filter((item) => item.status === "fail").length
@@ -1526,11 +1681,7 @@ async function handleResearch(
   const globals = resolveGlobals(command);
   const query = buildQuery(options, runType === "work");
   const path =
-    runType === "artist"
-      ? "/research/artist"
-      : runType === "work"
-        ? "/research/work"
-        : "/crawl/artist-market";
+    runType === "artist" ? "/research/artist" : runType === "work" ? "/research/work" : "/crawl/artist-market";
   const planPath =
     runType === "artist"
       ? "/research/artist/plan"
@@ -1577,13 +1728,7 @@ async function handleResearch(
     return;
   }
 
-  const created = await requestJson<{ runId: string; status: RunStatus }>(
-    ctx,
-    globals,
-    "POST",
-    path,
-    { query }
-  );
+  const created = await requestJson<{ runId: string; status: RunStatus }>(ctx, globals, "POST", path, { query });
 
   if (!options.wait) {
     printJson(globals, ctx, created);
@@ -1652,6 +1797,23 @@ async function handleRunsWatch(ctx: CliContext, options: RunsWatchOptions, comma
   }
 }
 
+async function handleRunsPinMutation(
+  ctx: CliContext,
+  options: RunsShowOptions,
+  command: Command,
+  pinned: boolean
+): Promise<void> {
+  const globals = resolveGlobals(command);
+  const run = await requestJson<RunEntity>(ctx, globals, "POST", `/runs/${options.runId}/${pinned ? "pin" : "unpin"}`);
+  printJson(globals, ctx, run);
+  if (globals.json) {
+    return;
+  }
+
+  logInfo(globals, ctx, `${pinned ? "Pinned" : "Unpinned"} run ${run.id}.`);
+  logInfo(globals, ctx, `Retention: ${formatRunRetention(run)}`);
+}
+
 async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const result = await runSetupWizard();
@@ -1683,6 +1845,16 @@ async function handleDoctor(ctx: CliContext, command: Command): Promise<void> {
   logInfo(globals, ctx, renderSetupAssessment(assessment));
   logInfo(globals, ctx, "");
   logInfo(globals, ctx, renderSetupIssues(assessment));
+}
+
+async function handleTui(ctx: CliContext, command: Command): Promise<void> {
+  if (ctx.noTui) {
+    throw new InputValidationError(
+      "TUI launch is disabled by --no-tui or ARTBOT_NO_TUI. Remove it to open the interactive UI."
+    );
+  }
+
+  ctx.exitCode = await ctx.deps.startInteractive();
 }
 
 async function handleBackendStart(ctx: CliContext, command: Command): Promise<void> {
@@ -1856,11 +2028,12 @@ function registerResearchCommands(program: Command, ctx: CliContext): void {
       await handleResearch(ctx, options, command, "work");
     });
 
-  addCommonResearchFlags(program.command("research-artist").description("Research artist prices (legacy)"), true).action(
-    async (options: CommonOptions, command: Command) => {
-      await handleResearch(ctx, options, command, "artist");
-    }
-  );
+  addCommonResearchFlags(
+    program.command("research-artist").description("Research artist prices (legacy)"),
+    true
+  ).action(async (options: CommonOptions, command: Command) => {
+    await handleResearch(ctx, options, command, "artist");
+  });
 
   addCommonResearchFlags(program.command("research-work").description("Research specific work prices (legacy)"), false)
     .requiredOption("--title <title>", "Work title")
@@ -1872,11 +2045,12 @@ function registerResearchCommands(program: Command, ctx: CliContext): void {
 function registerCrawlCommands(program: Command, ctx: CliContext): void {
   const crawlGroup = program.command("crawl").description("Long-running crawl commands");
 
-  addCommonResearchFlags(crawlGroup.command("artist-market").description("Deep crawl artist market inventory"), true).action(
-    async (options: CommonOptions, command: Command) => {
-      await handleResearch(ctx, options, command, "artist_market_inventory");
-    }
-  );
+  addCommonResearchFlags(
+    crawlGroup.command("artist-market").description("Deep crawl artist market inventory"),
+    true
+  ).action(async (options: CommonOptions, command: Command) => {
+    await handleResearch(ctx, options, command, "artist_market_inventory");
+  });
 }
 
 function registerRunsCommands(program: Command, ctx: CliContext): void {
@@ -1908,6 +2082,22 @@ function registerRunsCommands(program: Command, ctx: CliContext): void {
       await handleRunsWatch(ctx, options, command);
     });
 
+  runsGroup
+    .command("pin")
+    .description("Preserve a run and its retained artifacts during cleanup")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .action(async (options: RunsShowOptions, command: Command) => {
+      await handleRunsPinMutation(ctx, options, command, true);
+    });
+
+  runsGroup
+    .command("unpin")
+    .description("Return a run to the default retention policy")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .action(async (options: RunsShowOptions, command: Command) => {
+      await handleRunsPinMutation(ctx, options, command, false);
+    });
+
   program
     .command("run-status")
     .description("Show run details summary (legacy alias)")
@@ -1918,6 +2108,13 @@ function registerRunsCommands(program: Command, ctx: CliContext): void {
 }
 
 function registerSetupCommands(program: Command, ctx: CliContext): void {
+  program
+    .command("tui")
+    .description("Launch the interactive terminal UI")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleTui(ctx, command);
+    });
+
   program
     .command("setup")
     .description("Guided local onboarding for LM Studio, backend services, and auth profiles")
@@ -2044,6 +2241,13 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
       await handleGraphExplain(ctx, options, command);
     });
 
+  program
+    .command("storage")
+    .description("Show storage usage visibility")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleStorageUsage(ctx, command);
+    });
+
   const opsGroup = program.command("ops").description("Operational maintenance commands");
   const cleanupCommand = program
     .command("cleanup")
@@ -2053,7 +2257,10 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .option("--runs-root <path>", "Runs root to scan")
     .option("--dry-run", "Report what cleanup would delete without mutating artifacts")
     .option("--max-size-gb <number>", "Trim retained artifacts until the runs root is at or below this size budget")
-    .option("--keep-last <number>", "Preserve the newest completed runs in full unless the size budget still requires purging")
+    .option(
+      "--keep-last <number>",
+      "Preserve the newest completed runs in full unless the size budget still requires purging"
+    )
     .action(async (options: ArtifactGcOptions, command: Command) => {
       await handleArtifactGc(ctx, options, command);
     });
@@ -2064,7 +2271,10 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .option("--runs-root <path>", "Runs root to scan")
     .option("--dry-run", "Report what GC would delete without mutating artifacts")
     .option("--max-size-gb <number>", "Trim retained artifacts until the runs root is at or below this size budget")
-    .option("--keep-last <number>", "Preserve the newest completed runs in full unless the size budget still requires purging")
+    .option(
+      "--keep-last <number>",
+      "Preserve the newest completed runs in full unless the size budget still requires purging"
+    )
     .action(async (options: ArtifactGcOptions, command: Command) => {
       await handleArtifactGc(ctx, options, command);
     });
@@ -2094,12 +2304,21 @@ function defaultDeps(partial: CliDeps = {}): Required<CliDeps> {
     sleep: partial.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))),
     spinnerFactory: partial.spinnerFactory ?? ((text: string) => ora(text)),
     stdout: partial.stdout ?? ((text: string) => process.stdout.write(text)),
-    stderr: partial.stderr ?? ((text: string) => process.stderr.write(text))
+    stderr: partial.stderr ?? ((text: string) => process.stderr.write(text)),
+    startInteractive:
+      partial.startInteractive ??
+      (async () => {
+        const { startInteractive } = await import("./interactive.js");
+        return startInteractive();
+      })
   };
 }
 
 function mapErrorToExitCode(error: unknown): number {
-  if (error instanceof CommanderError && (error.code === "commander.helpDisplayed" || error.code === "commander.version")) {
+  if (
+    error instanceof CommanderError &&
+    (error.code === "commander.helpDisplayed" || error.code === "commander.version")
+  ) {
     return EXIT_CODES.OK;
   }
   if (error instanceof CommanderError) {
@@ -2175,7 +2394,8 @@ export function createProgram(ctx: CliContext): Command {
     .option("--api-base-url <url>", "API base URL")
     .option("--api-key <key>", "API key override")
     .option("--verbose", "Verbose diagnostics")
-    .option("--quiet", "Suppress non-error human output");
+    .option("--quiet", "Suppress non-error human output")
+    .option("--no-tui", "Disable interactive UI launch and stay in command-only mode");
 
   registerResearchCommands(program, ctx);
   registerCrawlCommands(program, ctx);
@@ -2187,27 +2407,37 @@ export function createProgram(ctx: CliContext): Command {
 
 export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<number> {
   loadWorkspaceEnv();
+  const userArgs = argv.slice(2);
 
   const ctx: CliContext = {
     deps: defaultDeps(deps),
-    exitCode: EXIT_CODES.OK
+    exitCode: EXIT_CODES.OK,
+    noTui: isNoTuiEnabled(userArgs)
   };
 
-  // Launch interactive mode when no arguments provided and stdout is a TTY
-  const userArgs = argv.slice(2);
-  if (userArgs.length === 0 && process.stdout.isTTY) {
-    const { startInteractive } = await import("./interactive.js");
-    return startInteractive();
-  }
-
   const program = createProgram(ctx);
+  const wantsHelp = userArgs.includes("-h") || userArgs.includes("--help");
+  const wantsVersion = userArgs.includes("-V") || userArgs.includes("--version");
+  if (!wantsHelp && !wantsVersion) {
+    const { operands, unknown } = program.parseOptions(userArgs);
+    const onlyGlobalOptions = operands.length === 0 && unknown.length === 0;
+    if (onlyGlobalOptions) {
+      program.outputHelp();
+      return EXIT_CODES.OK;
+    }
+  }
 
   try {
     await program.parseAsync(argv);
     return ctx.exitCode;
   } catch (error) {
     const exitCode = mapErrorToExitCode(error);
-    if (!(error instanceof CommanderError && (error.code === "commander.helpDisplayed" || error.code === "commander.version"))) {
+    if (
+      !(
+        error instanceof CommanderError &&
+        (error.code === "commander.helpDisplayed" || error.code === "commander.version")
+      )
+    ) {
       const globals = (() => {
         try {
           return resolveGlobals(program);
@@ -2217,7 +2447,8 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
             apiBaseUrl: process.env.API_BASE_URL ?? "http://localhost:4000",
             apiKey: process.env.ARTBOT_API_KEY,
             verbose: false,
-            quiet: false
+            quiet: false,
+            noTui: isTruthyEnvFlag(process.env.ARTBOT_NO_TUI)
           } satisfies GlobalOptions;
         }
       })();

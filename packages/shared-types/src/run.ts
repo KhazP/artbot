@@ -36,6 +36,8 @@ export const runEntitySchema = z.object({
   runType: z.enum(["artist", "work", "artist_market_inventory"]),
   query: researchQuerySchema,
   status: z.enum(["pending", "running", "completed", "failed"]),
+  pinned: z.boolean().default(false),
+  pinnedAt: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   error: z.string().optional(),
@@ -44,6 +46,29 @@ export const runEntitySchema = z.object({
 });
 
 export type RunEntity = z.infer<typeof runEntitySchema>;
+
+export const storageUsageBreakdownSchema = z.object({
+  runs: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative()
+});
+export type StorageUsageBreakdown = z.infer<typeof storageUsageBreakdownSchema>;
+
+export const storageCleanupObservationSchema = z.object({
+  reclaimed_bytes: z.number().int().nonnegative(),
+  timestamp: z.string(),
+  dry_run: z.boolean()
+});
+export type StorageCleanupObservation = z.infer<typeof storageCleanupObservationSchema>;
+
+export const storageUsageSummarySchema = z.object({
+  total_runs: z.number().int().nonnegative(),
+  total_bytes: z.number().int().nonnegative(),
+  pinned: storageUsageBreakdownSchema,
+  expirable: storageUsageBreakdownSchema,
+  last_cleanup: storageCleanupObservationSchema.nullable(),
+  observed_cleanup: storageCleanupObservationSchema.optional()
+});
+export type StorageUsageSummary = z.infer<typeof storageUsageSummarySchema>;
 
 export const runSummarySchema = z.object({
   run_id: z.string(),
