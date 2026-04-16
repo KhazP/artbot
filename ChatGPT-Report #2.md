@@ -1,112 +1,121 @@
-## Section A: Executive verdict
+## Section A: Executive verdict (Implemented / current-state, refreshed 2026-04-16 Europe/Istanbul)
 
-* **Verdict: not fully implemented yet.**
+* **Status note:** this document is refreshed from live repo/runtime evidence as of **2026-04-16 Europe/Istanbul**. When sources disagree, `var/data/artbot.db` is authoritative over current code comments, run artifacts, and older prose.
+* **Document split:** Sections **A-B** and the implemented portion of **Section H** describe current state. Sections **C-K** are a proposed / target-state blueprint unless a subsection explicitly says otherwise.
+* **Verdict:** the implementation milestones are in code, but live validation remains partial and final acceptance is still open.
 * The core design is real in code: curated source-family packs with legal posture, source-policy enforcement, selection-time family quotas, multi-lane hooks, transport/data-insufficient recovery, surface normalization, diagnostics, and LM-Studio-compatible local-AI hooks already exist.
-* The missing pieces are the **runtime control plane**: execution-time family fairness, verified route fingerprinting, Artam-grade specialization, lane-aware host health, overwrite-safe lane merging, and full parity between the standard pipeline and the long-running inventory path.
-* The bundled DB proves the gap: recent runs reached **178–226 attempts** with only **0–9 records** and **0–7 priced records**; one run can still “meet” the current coverage target because `valuation_readiness_ratio` is computed on a tiny accepted set.
-* The biggest problem is **breadth illusion**: selection is diversified, but runtime scheduling still lets blocked or low-yield families consume too much of the frontier.
-* The second biggest problem is **evidence loss**: later browser/auth/block outcomes can overwrite earlier acceptable cheap-fetch evidence.
+* The missing pieces are still the **runtime control plane**: execution-time family fairness, verified route fingerprinting, Artam-grade specialization, lane-aware host health, overwrite-safe lane merging, and full parity between the standard pipeline and the long-running inventory path.
+* Current runtime evidence still shows an incomplete validation picture: breadth canary `88014f04-0d66-450c-ae50-b6eff5459cc7` completed and failed; original balanced runs `1286d896-c8d3-447d-8cfe-f3ac576aba33` and `0105dd33-7fd4-47f5-abc5-5b341dde7d2c` are now `failed` with a recorded supersession error; post-patch fast reruns `541e76cf-9a03-43d7-ac16-824207d4afc0` and `9834eaa4-fbba-4beb-b705-88d723ad8ffa` repeated the no-evidence outcome; later fast rerun `01ee89fb-8ada-4fd4-a58f-cfa065b1bcba` produced accepted evidence but still missed the composite coverage gates.
+* The biggest problem remains **breadth illusion**: selection is diversified, but runtime scheduling can still let blocked or low-yield families consume too much of the frontier.
+* The second biggest problem remains **evidence loss** risk: later browser/auth/block outcomes can still challenge earlier acceptable cheap-fetch evidence, even though the merge/diagnostic groundwork is now in code.
 * Assumption used below: **core painting coverage** means paintings + original works on paper; signed prints/serigraphs stay in a secondary 2D bucket and do **not** satisfy the core valuation gate.
-* With the P0 changes below, reaching **85%+ valuation readiness**, **250+ total 2D Abidin Dino records**, and **150+ unique painting/work-on-paper records** is realistic **without relaxing quality gates**.
+* No completed run currently reaches the final acceptance thresholds in this document.
 
-## Section A.1: Implementation progress (2026-04-15)
+## Section A.1: Implementation progress (Implemented / current-state)
 
-- [x] Milestone 1 code path implemented in both orchestrators:
+- Milestone 1 code path in both orchestrators: **completed**.
   - lane-outcome merge policy added (`lane-outcomes.ts`) and wired into pipeline + inventory paths.
   - `browser_overwrite_prevented_count` diagnostics added to both run summaries.
   - inventory failure-attempt attribution bug fixed (`source_family` now uses real family, not adapter id).
-- [x] Milestone 2 code path implemented:
+- Milestone 2 code path: **completed**.
   - runtime frontier fairness scoring added (`frontier-fairness.ts`) and wired into standard and inventory schedulers.
   - frontier metadata extended (`source_family`, `source_family_bucket`) and propagated through enqueue paths.
   - unverified synthetic search seed routing disabled by default unless explicitly allowed.
-- [x] Milestone 3 code path implemented:
+- Milestone 3 code path: **completed**.
   - composite coverage gates implemented in `buildEvaluationMetrics`.
   - diagnostics expanded (`unverified_search_seed_count`, family share, lane-host breakdown, confidence/freshness mix, unique/duplicate counts).
   - report/browser surfaces updated to reflect composite gate status.
-- [ ] Canary A (120 attempts) validated.
-- [ ] Canary B (300 attempts) validated.
-- [ ] Canary C (200 attempts) validated.
+- Fixture canaries (priority fixture pack recorded in `canary_results`): **completed**.
+  - Current DB evidence shows `40/40` passing canary results across four recorded batches.
+- Live Canary A (120 attempts): **failed**.
+  - Failed on run `88014f04-0d66-450c-ae50-b6eff5459cc7`.
+- Live Canary B (300 attempts): **open**.
+  - Original validation run `1286d896-c8d3-447d-8cfe-f3ac576aba33` is now `failed` and `superseded`.
+- Live Canary C (200 attempts): **open**.
+  - Original validation run `0105dd33-7fd4-47f5-abc5-5b341dde7d2c` is now `failed` and `superseded`.
 
-## Section A.2: Execution checklist status (2026-04-15, Europe/Istanbul)
+## Section A.2: Execution checklist status (Implemented / current-state, refreshed 2026-04-16 Europe/Istanbul)
 
 ### Runtime normalization
 
-- [x] Canonical runtime storage chosen as `var/data/artbot.db` and `var/runs`.
-- [x] `.env` updated to absolute canonical paths:
-  - `DATABASE_PATH=/Users/alpyalay/Documents/GitHub/CCGAgent/var/data/artbot.db`
-  - `RUNS_ROOT=/Users/alpyalay/Documents/GitHub/CCGAgent/var/runs`
-- [x] API/worker/CLI now resolve relative `DATABASE_PATH` and `RUNS_ROOT` as workspace-root-relative in workspace mode.
-- [x] Startup guardrails added:
-  - resolved paths are logged on startup,
-  - shared manifest is enforced at `var/state/runtime-storage-paths.json`,
-  - role mismatch (api/worker/cli) fails fast.
-- [x] Non-canonical DB files were preserved for backup during validation (not deleted).
+- Canonical runtime storage chosen as `var/data/artbot.db` and `var/runs`: **completed**.
+- `.env` updated to absolute canonical paths (`DATABASE_PATH` and `RUNS_ROOT` under the workspace `var/` tree): **completed**.
+- API/worker/CLI resolve relative `DATABASE_PATH` and `RUNS_ROOT` as workspace-root-relative in workspace mode: **completed**.
+- Startup guardrails (`var/state/runtime-storage-paths.json`, resolved-path logging, role mismatch failure): **completed**.
+- Non-canonical DB files preserved during validation instead of being deleted: **completed**.
 
 ### Test and canary reruns
 
-- [x] `pnpm test` passed after normalization changes.
-- [x] `pnpm --filter artbot dev canaries run --fixtures-root /Users/alpyalay/Documents/GitHub/CCGAgent/data/fixtures/adapters --json` passed with `pass=10`, `fail=0`.
-- [x] Backend started and verified with `pnpm --filter artbot dev backend status --json` (API + worker running, logs under `var/logs`).
+- `pnpm test` after normalization changes: **completed**.
+- Fixture canary evidence in `canary_results`: **completed**.
+  - Current DB state is `40/40` passing results across four recorded batches; this is separate from live-run validation.
+- Backend/API worker state check: **completed**.
+  - `var/state/backend-state.json` shows workspace mode plus live API/worker PIDs and log paths, updated `2026-04-15T14:42:10.499Z`.
 
 ### Staged live validation runs
 
-- [x] Run 1 launched and completed:
-  - id: `88014f04-0d66-450c-ae50-b6eff5459cc7`
-  - mode/scope: `fast`, `turkey_plus_international`
-  - run summary snapshot: `attempts=12`, `evidence_records=0`, `valuation_eligible_records=0`, `unverified_search_seed_count=3`, `family_coverage_ratio=0`, `blocked_access_share=0`
-- [ ] Run 1 gate passed (`family_coverage_ratio >= 0.50`, `blocked_access_share < 0.40`, `unverified_search_seed_count = 0`) — **status: fail**.
+| Validation slot | Run | DB status | Current evidence | Validation status |
+| --- | --- | --- | --- | --- |
+| Breadth canary | `88014f04-0d66-450c-ae50-b6eff5459cc7` | `completed` | Artifact summary shows `attempts=12`, `evidence_records=0`, `valuation_eligible_records=0`, `unverified_search_seed_count=3`, `family_coverage_ratio=0`, `blocked_access_share=0`. | **failed** |
+| Turkey-depth original run | `1286d896-c8d3-447d-8cfe-f3ac576aba33` | `failed` | DB shows `attempts=2827`, `evidence=334`, `accepted_for_valuation_attempts=0`, `blocked_access_share=0.5964`; run error is `Superseded by post-patch validation rerun (2026-04-15).` | **superseded** |
+| Global-enrichment original run | `0105dd33-7fd4-47f5-abc5-5b341dde7d2c` | `failed` | DB shows `attempts=1476`, `evidence=4`, `accepted_for_valuation_attempts=4`, `blocked_access_share=0`; run error is `Superseded by post-patch validation rerun (2026-04-15).` | **superseded** |
 
-- [x] Run 2 launched:
-  - id: `1286d896-c8d3-447d-8cfe-f3ac576aba33`
-  - mode/scope: `balanced`, `turkey_only`
-  - run summary snapshot (still running, `2026-04-15 17:08 +03`): `attempts=2559`, `evidence_records=334`, `valuation_eligible_records=0`, `priced_record_count=0`, `family_coverage_ratio=0`, `blocked_access_share=0.5889`
-- [ ] Run 2 gate passed (`priced_record_count >= 40`, `inventory_record_count_2d >= 100`, `generic_shell_page_share < 0.15`) — **status: pending (run not terminal)**.
+### Current post-patch run state
 
-- [x] Run 3 launched:
-  - id: `0105dd33-7fd4-47f5-abc5-5b341dde7d2c`
-  - mode/scope: `balanced`, `turkey_plus_international`
-  - run summary snapshot (still running, `2026-04-15 17:08 +03`): `attempts=1317`, `evidence_records=0`, `valuation_eligible_records=0`, `priced_record_count=0`, `unique_artwork_count=0`, `family_coverage_ratio=0`
-- [ ] Run 3 gate passed (`>=20` new unique artworks and `>=2` global families with priced records) — **status: pending (run not terminal)**.
+When DB status and run artifacts disagree, the DB is authoritative. In particular, runs `541e76cf-9a03-43d7-ac16-824207d4afc0`, `9834eaa4-fbba-4beb-b705-88d723ad8ffa`, and `01ee89fb-8ada-4fd4-a58f-cfa065b1bcba` are `completed` in the DB even though their `results.json` payloads still embed `run.status: "running"`.
+
+| Run | DB status | Current evidence | Current-state read |
+| --- | --- | --- | --- |
+| `541e76cf-9a03-43d7-ac16-824207d4afc0` | `completed` | DB shows `attempts=12`, `evidence=0`, `accepted_for_valuation_attempts=0`; artifact summary still shows `unverified_search_seed_count=3` and zero accepted evidence. | **failed** |
+| `9834eaa4-fbba-4beb-b705-88d723ad8ffa` | `completed` | DB shows `attempts=12`, `evidence=0`, `accepted_for_valuation_attempts=0`; artifact summary still shows `unverified_search_seed_count=3` and zero accepted evidence. | **failed** |
+| `01ee89fb-8ada-4fd4-a58f-cfa065b1bcba` | `completed` | Artifact summary reports `attempts=18`, `evidence_records=12`, `valuation_eligible_records=12`, `priced_record_count=12`, `family_coverage_ratio=0.5`, `blocked_access_share=0`, `coverage_target_met=false`; authoritative DB state shows `records=12`, `priced_like=12`, but currently `valuation_eligible=0` in the `records` table. | **partial** |
+| `077bb178-b752-4041-addd-5a251ff233f5` | `running` | DB shows `>19k attempts`, `evidence=12`, `accepted_for_valuation_attempts=12`, `records=12`, `priced_like=12`; no terminal `results.json` or `report.md` is present yet. | **running** |
 
 ### Final acceptance
 
-- [ ] Final acceptance met in a single completed run:
-  - `valuation_readiness_ratio >= 0.85`
-  - `priced_record_count >= 120`
-  - `core_price_evidence_count >= 80`
-  - `inventory_record_count_2d >= 250`
-  - `unique_artwork_count >= 150`
-  - `family_coverage_ratio >= 0.70`
-  - `blocked_access_share < 0.25`
-  - **status: pending (requires a single terminal run that satisfies all gates)**
+Final acceptance in a single completed run remains **open**.
+
+- `valuation_readiness_ratio >= 0.85`
+- `priced_record_count >= 120`
+- `core_price_evidence_count >= 80`
+- `inventory_record_count_2d >= 250`
+- `unique_artwork_count >= 150`
+- `family_coverage_ratio >= 0.70`
+- `blocked_access_share < 0.25`
+
+No terminal run currently satisfies all of these thresholds.
 
 ### Gate Audit Table (Strict)
 
-| Run | Terminal state | Gate | Observed metrics | Status |
+| Validation target | Terminal state | Gate | Observed metrics | Status |
 | --- | --- | --- | --- | --- |
-| Run 1 `88014f04-0d66-450c-ae50-b6eff5459cc7` | completed | `family_coverage_ratio >= 0.50`, `blocked_access_share < 0.40`, `unverified_search_seed_count = 0` | `family_coverage_ratio=0`, `blocked_access_share=0`, `unverified_search_seed_count=3` | **fail** |
-| Run 2 `1286d896-c8d3-447d-8cfe-f3ac576aba33` | running | `priced_record_count >= 40`, `inventory_record_count_2d >= 100`, `generic_shell_page_share < 0.15` | `priced_record_count=0`, `inventory_record_count_2d=585` (global inventory snapshot), `generic_shell_page_share=unavailable until terminal summary` | **pending** |
-| Run 3 `0105dd33-7fd4-47f5-abc5-5b341dde7d2c` | running | `>=20` new unique artworks, `>=2` global families with priced records | `run-scoped priced/new-unique metrics unavailable until terminal summary` | **pending** |
-| Final acceptance (single run) | not reached | All final thresholds in this section | No terminal run currently satisfies the run-level prerequisites | **pending** |
+| Live Canary A / Run 1 `88014f04-0d66-450c-ae50-b6eff5459cc7` | `completed` | `family_coverage_ratio >= 0.50`, `blocked_access_share < 0.40`, `unverified_search_seed_count = 0` | `family_coverage_ratio=0`, `blocked_access_share=0`, `unverified_search_seed_count=3` | **failed** |
+| Live Canary B / original run `1286d896-c8d3-447d-8cfe-f3ac576aba33` | `failed` | `priced_record_count >= 40`, `inventory_record_count_2d >= 100`, `generic_shell_page_share < 0.15` | DB: `attempts=2827`, `evidence=334`, `accepted_for_valuation_attempts=0`, `blocked_access_share=0.5964`; error=`Superseded by post-patch validation rerun (2026-04-15).` | **superseded** |
+| Live Canary C / original run `0105dd33-7fd4-47f5-abc5-5b341dde7d2c` | `failed` | `>=20` new unique artworks, `>=2` global families with priced records | DB: `attempts=1476`, `evidence=4`, `accepted_for_valuation_attempts=4`, `blocked_access_share=0`; error=`Superseded by post-patch validation rerun (2026-04-15).` | **superseded** |
+| Final acceptance (single run) | `not reached` | All final thresholds in this section | No completed run currently satisfies the full run-level prerequisites. | **open** |
 
 ---
 
-## Section B: Requirement audit matrix
+## Section B: Requirement audit matrix (Implemented / current-state)
 
-| Target capability                                                                          | Status      | Confidence | Why                                                                                                                                                                                                                                                            |
-| ------------------------------------------------------------------------------------------ | ----------- | ---------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source-family registry with curated packs and legal posture metadata                       | **Done**    |       High | `source-families.ts` has curated packs, buckets, trust tiers, supported surfaces, host patterns, entry paths, crawl budgets; `source-policy.ts` enforces legal posture and opt-in licensed/probe behavior.                                                     |
-| Discovery-first strategy with family quotas and broad query variants                       | **Partial** |       High | Family quotas exist in `familyQuotaProfile()`, but they apply to **source selection**, not runtime frontier fairness. Breadth is not guaranteed once execution starts.                                                                                         |
-| Host fingerprint routing that avoids synthetic search assumptions                          | **Partial** |       High | Some routing logic exists, but dynamic adapters still synthesize `/search?q=` or `/?q=` and generic entrypoint builders still bias toward search-like routes.                                                                                                  |
-| Multi-lane crawl flow (L0 deterministic, L1 cheap fetch, L2 Crawlee, L3 browser truth)     | **Partial** |       High | Standard pipeline contains cheap-fetch, Crawlee recovery/expansion, browser truth capture, and deterministic lane markers. Historical persisted runs do not yet show lane usage clearly, and the inventory path does not fully mirror browser-truth semantics. |
-| Re-parse and re-accept logic after each lane                                               | **Partial** |       High | Browser/Crawlee raw snapshots are reparsed and re-evaluated, but there is no durable **best-lane ledger**; later outcomes can overwrite earlier good evidence.                                                                                                 |
-| Trigger rules for transport failures and data-insufficient extraction                      | **Done**    |       High | `shouldTriggerCrawleeRecoveryForTransport()` and `shouldTriggerCrawleeRecoveryForAttempt()` are implemented and already cover the right failure classes.                                                                                                       |
-| Guardrails for blocked/legal/auth-invalid cases                                            | **Done**    |       High | Auth/licensed/probe policy gating exists; blocked/auth pages are recognized and rejected from valuation.                                                                                                                                                       |
-| Surface normalization (`source_surface`, `sale_channel`, `price_visibility`, `crawl_lane`) | **Done**    |       High | These fields exist in attempts/records and are annotated in both orchestrators.                                                                                                                                                                                |
-| Lane-aware host health scoring                                                             | **Missing** |       High | Persisted host health is keyed only by host, not by lane/access/surface. Browser or auth failures can suppress otherwise useful cheap-fetch paths.                                                                                                             |
-| Promotion flow from dynamic host success to curated family                                 | **Partial** |     Medium | Promotion candidates are reported in summaries, but there is no operational promotion pipeline that writes/approves curated family packs.                                                                                                                      |
-| Mirrored behavior in both orchestration paths                                              | **Partial** |       High | The long-running inventory path has Crawlee recovery and diagnostics, but not full browser-truth parity; it also contains at least one source-family attribution bug on failure attempts.                                                                      |
-| Extended diagnostics and run summary breakdowns                                            | **Partial** |       High | Diagnostics are already rich, but the metrics that matter for breadth are missing: absolute priced count, family coverage ratio, lane success ratio, volume-weighted coverage, unique-vs-duplicate counts, confidence/freshness mix.                           |
+| Target capability                                                                          | Status        | Confidence | Why                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------ | ------------- | ---------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source-family registry with curated packs and legal posture metadata                       | **completed** |       High | `source-families.ts` has curated packs, buckets, trust tiers, supported surfaces, host patterns, entry paths, crawl budgets; `source-policy.ts` enforces legal posture and opt-in licensed/probe behavior.                                                     |
+| Discovery-first strategy with family quotas and broad query variants                       | **partial**   |       High | Family quotas exist in `familyQuotaProfile()`, and runtime fairness scoring is now wired in, but live validation has not yet proven that breadth is preserved once execution starts.                                                                           |
+| Host fingerprint routing that avoids synthetic search assumptions                          | **partial**   |       High | Unverified synthetic search routing is disabled by default, but repeated fast reruns still show `unverified_search_seed_count=3`, so route verification is not yet clean in observed artifacts.                                                                  |
+| Multi-lane crawl flow (L0 deterministic, L1 cheap fetch, L2 Crawlee, L3 browser truth)    | **partial**   |       High | Standard pipeline contains cheap-fetch, Crawlee recovery/expansion, browser truth capture, and deterministic lane markers. Historical persisted runs do not yet show lane usage clearly, and the inventory path does not fully mirror browser-truth semantics. |
+| Re-parse and re-accept logic after each lane                                               | **partial**   |       High | Browser/Crawlee raw snapshots are reparsed and re-evaluated, and merge policy exists in code, but there is still no persisted first-class **best-lane ledger** in storage/reporting.                                                                          |
+| Trigger rules for transport failures and data-insufficient extraction                      | **completed** |       High | `shouldTriggerCrawleeRecoveryForTransport()` and `shouldTriggerCrawleeRecoveryForAttempt()` are implemented and already cover the right failure classes.                                                                                                       |
+| Guardrails for blocked/legal/auth-invalid cases                                            | **completed** |       High | Auth/licensed/probe policy gating exists; blocked/auth pages are recognized and rejected from valuation.                                                                                                                                                       |
+| Surface normalization (`source_surface`, `sale_channel`, `price_visibility`, `crawl_lane`) | **completed** |       High | These fields exist in attempts/records and are annotated in both orchestrators.                                                                                                                                                                                |
+| Lane-aware host health scoring                                                             | **open**      |       High | Persisted host health is keyed only by host, not by lane/access/surface. Browser or auth failures can suppress otherwise useful cheap-fetch paths.                                                                                                             |
+| Promotion flow from dynamic host success to curated family                                 | **partial**   |     Medium | Promotion candidates are reported in summaries, but there is no operational promotion pipeline that writes/approves curated family packs.                                                                                                                      |
+| Mirrored behavior in both orchestration paths                                              | **partial**   |       High | Fairness wiring and lane-merge handling now exist in both orchestrators, but operational parity is still not clean: DB/artifact status mismatches remain, and run `01ee89fb-8ada-4fd4-a58f-cfa065b1bcba` currently shows artifact/DB disagreement on `valuation_eligible` state. |
+| Extended diagnostics and run summary breakdowns                                            | **partial**   |       High | Diagnostics now include `unverified_search_seed_count`, family share, lane-host breakdown, unique/duplicate counts, confidence/freshness mix, and composite evaluation metrics; remaining gaps are explicit medium breakdown, decay counters, promotion conversion, and lane-specific success scoring. |
+
+## Transition: Proposed / target-state blueprint
+
+Sections **C-K** shift from current-state evidence to the proposed hardening plan. When these sections describe metrics, tests, rerun strategy, or acceptance thresholds, treat them as target-state design unless a subsection explicitly marks a field as implemented today.
 
 ---
 
@@ -114,15 +123,15 @@
 
 1. **Runtime breadth is not guaranteed, so coverage can look healthy while volume stays low.**
 
-   * `familyQuotaProfile()` diversifies **selected sources**, but standard scheduling is only **source round-robin**, and inventory scheduling is plain **FIFO by `created_at`**.
-   * Once one family emits many candidates, it dominates the frontier.
-   * Blocked families keep consuming attempts because there is no family-level decay, pause, or share cap.
+   * `familyQuotaProfile()` diversifies **selected sources**, and runtime fairness is now wired in, but live validation has not yet shown that breadth holds under real run pressure.
+   * Fast reruns still concentrate into a small family set, so the breadth problem is operationally unresolved even after the scheduler work landed.
+   * The next proof point is not another design patch; it is a terminal run that actually broadens accepted priced evidence across families.
 
 2. **Synthetic search assumptions create dead ends.**
 
-   * Dynamic adapters still manufacture `/?q=` or `/search?q=` seeds.
-   * Many art-market hosts do not expose useful public search pages, so these routes turn into `blocked_access` or `generic_shell_page`.
-   * This wastes frontier budget before the crawler reaches lot/detail pages.
+   * Unverified synthetic search routing is disabled by default now, but observed fast reruns still show `unverified_search_seed_count=3`.
+   * Many art-market hosts do not expose useful public search pages, so any residual search-like routing still risks `blocked_access` or `generic_shell_page`.
+   * This remains a live validation problem until the observed reruns stop generating those seeds entirely.
 
 3. **High-yield families are still under-specialized.**
 
@@ -131,8 +140,8 @@
 
 4. **Acceptance overwrite destroys useful evidence.**
 
-   * Current browser truth capture can mark a record blocked/auth and clear `accepted_for_evidence` / `accepted_for_valuation`.
-   * That means an earlier cheap-fetch estimate/asking/realized signal can vanish from the final accepted set.
+   * Merge policy now exists in code, but there is still no persisted first-class lane ledger in storage/reporting.
+   * That means later verification outcomes are harder to audit than they should be, even if the most destructive overwrite path is now guarded.
 
 5. **Host health is global when it must be contextual.**
 
@@ -143,14 +152,14 @@
 6. **The current success metric is partly an illusion.**
 
    * Current `valuation_readiness_ratio` is `valuationEligibleRecords / acceptedRecords`.
-   * One sampled run produced **9 accepted records, 7 valuation-ready** after **215 attempts**. That is **77.8%**, above the default `0.75` target, but operationally it is nowhere near “hundreds of records.”
-   * There is no absolute priced-count gate, no family-coverage gate, and no duplicate-adjusted volume gate.
+   * Fast rerun `01ee89fb-8ada-4fd4-a58f-cfa065b1bcba` reports `valuation_readiness_ratio=1`, `priced_record_count=12`, and `coverage_target_met=false`. That is the clearest current proof that ratio alone is not enough.
+   * Current code now adds absolute priced-count and family-coverage gates, but duplicate-adjusted volume and broader quality-shape gates are still target-state work.
 
 7. **Standard and inventory orchestration are not truly mirrored.**
 
-   * The inventory path uses FIFO frontier consumption and does not implement the same browser-truth merge behavior as the standard path.
-   * It also has a concrete attribution bug: failure attempts are created with `source_family: frontier.adapter_id` instead of the real family.
-   * Result: summaries and fairness diagnostics are weaker exactly where long-running inventory should be strongest.
+   * Both orchestrators now have fairness wiring and merge-policy support, so the gap is no longer simply “missing code.”
+   * The remaining problem is operational consistency: completed run artifacts can still disagree with DB status, and `01ee89fb-8ada-4fd4-a58f-cfa065b1bcba` currently shows artifact/DB disagreement on `valuation_eligible` state.
+   * Result: parity is better in code than it is in the persisted evidence trail.
 
 8. **Parser semantics still leak quality.**
 
@@ -167,6 +176,8 @@
 ---
 
 ## Section D: P0 / P1 / P2 patch blueprint
+
+Historical note as of **2026-04-16**: P0.1-P0.3 are now implemented in code and are retained here as the blueprint that drove the patch set. The remaining items in this section should be read as target-state or partially realized hardening work.
 
 ### P0 (immediate, must-do)
 
@@ -899,43 +910,80 @@ This fixes the current problem where browser failures suppress cheap-fetch on th
 
 ---
 
-## Section H: Metrics, diagnostics, and acceptance thresholds
+## Section H: Implemented metrics today vs proposed target metrics
 
-### 1) Metrics to define and use
+### 1) Implemented metrics in code today
 
-| Metric                           | Definition                                                                                          |                                             Target / threshold |
-| -------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------: |
-| `valuation_readiness_ratio`      | `priced_record_count / max(1, evidence_record_count)`                                               |                                                     **≥ 0.85** |
-| `priced_record_count`            | accepted valuation-ready records with numeric price/estimate and currency                           |                                                      **≥ 120** |
-| `core_price_evidence_count`      | valuation-ready **realized + estimate** records, plus fixed-price first-party asking pages only     |                                                       **≥ 80** |
-| `family_coverage_ratio`          | families that hit minimum attempts **and** yielded ≥1 priced record / selected families             |                                                     **≥ 0.70** |
-| `lane_success_ratio[lane]`       | accepted evidence attempts in lane / attempts in lane                                               | cheap_fetch **≥ 0.18**, crawlee **≥ 0.12**, browser **≥ 0.25** |
-| `volume_weighted_coverage_score` | `0.45*min(1, priced/120) + 0.25*familyCoverage + 0.20*valuationReadiness + 0.10*min(1, unique/150)` |                                                     **≥ 0.85** |
-| `unique_artwork_count`           | deduped cluster count among core painting/work-on-paper records                                     |                                                      **≥ 150** |
-| `duplicate_listing_rate`         | `(raw_core_records - unique_artworks) / raw_core_records`                                           |                    **≤ 0.45** overall, **≤ 0.25** among priced |
-| `fresh_record_ratio`             | priced records dated within last 15 years / all priced records                                      |                                                     **≥ 0.40** |
-| `confidence_mix`                 | high / medium / low confidence proportions among priced records                                     |                                         high+medium **≥ 0.90** |
-| `high_trust_priced_count`        | priced records from trust-tier-high official families                                               |                                                       **≥ 60** |
-| `inventory_record_count_2d`      | total accepted 2D visual-art records (core + secondary print bucket)                                |                                                      **≥ 250** |
+These definitions match `packages/orchestrator/src/run-insights.ts` as of **2026-04-16**.
 
-### 2) Diagnostics to add
+| Metric | Implemented definition in code today |
+| --- | --- |
+| `accepted_record_precision` | `acceptedRecords / runnableAttempts`, where runnable attempts exclude `blocked` and `auth_required` attempts. |
+| `priced_source_recall` | unique priced source names / runnable selected sources with `candidate_count > 0`. |
+| `source_completeness_ratio` | `min(1, attemptedSources / selectedSources)`. |
+| `valuation_readiness_ratio` | `valuationEligibleRecords / acceptedRecords`. |
+| `priced_record_count` | explicit input value, otherwise `valuationEligibleRecords`. |
+| `core_price_evidence_count` | explicit input value, otherwise accepted priced attempts whose `acceptance_reason` is one of `valuation_ready`, `estimate_range_ready`, or `asking_price_ready`. |
+| `family_coverage_ratio` | selected source families with at least one priced attempt / selected source families. |
+| `unique_artwork_count` | explicit input value, otherwise `acceptedRecords`. |
+| `blocked_access_share` | `blocked` or `auth_required` attempts / total attempts. |
+| `manual_override_rate` | `manualOverrideCount / acceptedRecords`. |
+| `coverage_target_met` | `valuation_readiness_ratio`, `priced_record_count`, `core_price_evidence_count`, `family_coverage_ratio`, `unique_artwork_count`, and `blocked_access_share` must all satisfy the current thresholds. |
 
-Add these to both summaries:
+Current default thresholds in code:
+
+* `coverage_target=0.85`
+* `min_priced_record_count=120`
+* `min_core_price_evidence_count=80`
+* `min_family_coverage_ratio=0.70`
+* `min_unique_artwork_count=150`
+* `max_blocked_access_share=0.25`
+
+### 2) Implemented diagnostics already present
+
+These diagnostics are already emitted in current summaries, although older run artifacts may not backfill all of them consistently:
 
 * `browser_overwrite_prevented_count`
 * `unverified_search_seed_count`
-* `family_block_decay_count`
 * `family_share_breakdown`
 * `lane_host_health_breakdown`
 * `core_price_evidence_count`
-* `record_medium_breakdown`
 * `unique_artwork_count`
 * `duplicate_listing_count`
 * `confidence_mix`
 * `freshness_mix`
-* `promotion_candidate_conversion_count`
+* `evaluation_metrics`
 
-### 3) “Done” means all of the following
+### 3) Proposed target metrics and thresholds
+
+The table below is the target-state metric set. When a definition differs from current code, that difference is intentional and should be read as a proposed refinement.
+
+| Metric | Proposed target-state definition | Target / threshold |
+| --- | --- | ---: |
+| `valuation_readiness_ratio` | `priced_record_count / max(1, evidence_record_count)` rather than the current `valuationEligibleRecords / acceptedRecords` implementation. | **≥ 0.85** |
+| `priced_record_count` | accepted valuation-ready records with numeric price/estimate and currency | **≥ 120** |
+| `core_price_evidence_count` | valuation-ready **realized + estimate** records, plus fixed-price first-party asking pages only | **≥ 80** |
+| `family_coverage_ratio` | families that hit minimum attempts **and** yielded ≥1 priced record / selected families, rather than any priced attempt in a selected family | **≥ 0.70** |
+| `lane_success_ratio[lane]` | accepted evidence attempts in lane / attempts in lane | cheap_fetch **≥ 0.18**, crawlee **≥ 0.12**, browser **≥ 0.25** |
+| `volume_weighted_coverage_score` | `0.45*min(1, priced/120) + 0.25*familyCoverage + 0.20*valuationReadiness + 0.10*min(1, unique/150)` | **≥ 0.85** |
+| `unique_artwork_count` | deduped cluster count among core painting/work-on-paper records | **≥ 150** |
+| `duplicate_listing_rate` | `(raw_core_records - unique_artworks) / raw_core_records` | **≤ 0.45** overall, **≤ 0.25** among priced |
+| `fresh_record_ratio` | priced records dated within last 15 years / all priced records | **≥ 0.40** |
+| `confidence_mix` | high / medium / low confidence proportions among priced records | high+medium **≥ 0.90** |
+| `high_trust_priced_count` | priced records from trust-tier-high official families | **≥ 60** |
+| `inventory_record_count_2d` | total accepted 2D visual-art records (core + secondary print bucket) | **≥ 250** |
+
+### 4) Proposed diagnostics to add
+
+The following remain target-state additions rather than implemented summary fields:
+
+* `family_block_decay_count`
+* `record_medium_breakdown`
+* `promotion_candidate_conversion_count`
+* `generic_shell_page_share`
+* `unknown_price_type_share`
+
+### 5) Proposed “done” criteria
 
 * `valuation_readiness_ratio >= 0.85`
 * `priced_record_count >= 120`

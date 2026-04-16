@@ -1,5 +1,7 @@
 Below is a repo-first assessment followed by a research-backed strategy report.
 
+Updated as of **2026-04-16**. This remains a strategic repo-first assessment; the documentation and roadmap status notes below were lightly re-audited against the current repo/docs.
+
 **Evidence labels**
 
 * **[Repo]** directly supported by the code/docs I inspected
@@ -151,16 +153,16 @@ I inspected the main apps, core packages, storage layer, orchestrator, adapter s
 
 # 3. Documentation Audit
 
-## Missing docs
+## Missing or incomplete docs
 
-* **[Repo]** There is no clear single document that explains the full lifecycle from query → discovery → extraction → evidence → normalization → valuation → reporting → retention.
-* **[Repo]** There is no proper artifact taxonomy or retention/GC document.
-* **[Repo]** There is no serious source adapter authoring manual with examples, invariants, and test expectations.
-* **[Repo]** There is no auth/session handling runbook for operators.
-* **[Repo]** There is no explicit data contract doc for `PriceRecord`, cluster membership, valuation eligibility, or source access status beyond code.
-* **[Repo]** There is no incident guide for site breakage, WAF spikes, stale run recovery, or credential expiry.
-* **[Repo]** There is no benchmark/eval handbook explaining how accuracy is measured and maintained.
-* **[Repo]** There is no legal/allowed-use matrix by source.
+* **[Repo]** There is still no clear single document that explains the full lifecycle from query → discovery → extraction → evidence → normalization → valuation → reporting → retention.
+* **[Repo]** There is still no proper artifact taxonomy or retention/GC document.
+* **[Repo]** `docs/adapter-authoring.md` exists, but it is still too thin to count as a serious adapter authoring manual with examples, invariants, and test expectations.
+* **[Repo]** `docs/ops.md` exists, but it is still not a full auth/session handling runbook for operators.
+* **[Repo]** There is still no explicit data contract doc for `PriceRecord`, cluster membership, valuation eligibility, or source access status beyond code.
+* **[Repo]** `docs/ops.md` includes failure buckets, but there is still no incident guide for site breakage, WAF spikes, stale run recovery, or credential expiry.
+* **[Repo]** `docs/evals.md` exists, but it is still a thin protocol rather than a benchmark/eval handbook that explains how accuracy is measured and maintained.
+* **[Repo]** `docs/source-matrix.md` exists, but it is still not a full legal/allowed-use matrix by source.
 
 ## Weak docs
 
@@ -952,7 +954,7 @@ Retention target: 7–30 days.
 
 # 12. Strategic Roadmap
 
-## Status update (2026-04-14)
+## Status update (2026-04-16)
 
 Legend:
 
@@ -977,9 +979,9 @@ Legend:
 * `[x]` Evidence review/adjudication console now includes queue inspection plus explicit adjudication actions through API/CLI.
 * `[x]` Artam cached extraction now preserves recovery escalation (Crawlee/browser) for non-parseable candidates.
 * `[ ]` Continuous watchlists and market monitoring remain open.
-* `[ ]` Stronger duplicate embeddings remain open.
-* `[ ]` Benchmark-backed valuation calibration remains open.
-* `[ ]` Source usage/legal matrix and counsel review remain open.
+* `[~]` Stronger duplicate embeddings are partially present through lightweight image vectors and cosine similarity in inventory clustering, but higher-quality embeddings and calibration remain open.
+* `[~]` Eval protocol and replay/golden scaffolding exist, but benchmark-backed valuation calibration remains open.
+* `[~]` Source matrix and legal-posture labeling exist, but a complete source-usage/legal matrix and counsel review remain open.
 * `[ ]` Litestream/object-storage durability and hot/warm/cold tiering remain open.
 * `[ ]` OpenTelemetry-grade observability remains open.
 
