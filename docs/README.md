@@ -9,6 +9,7 @@
 - [Evals](evals.md)
 - [Dependency Decisions](dependency-decisions.md)
 - [Next Adapters](next-adapters.md)
+- [CLI Package README (npm)](../apps/cli/README.md)
 
 ## Development
 - [Development Docs](development/README.md)

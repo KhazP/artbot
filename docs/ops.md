@@ -2,11 +2,11 @@
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - pnpm 10+
 - Playwright browser binaries (`pnpm exec playwright install`)
 
-Note: `node:sqlite` may emit an experimental warning depending on Node version.
+Note: direct API/worker node entrypoints may emit a `node:sqlite` experimental warning depending on Node version. The published `artbot` CLI suppresses this specific warning.
 
 ## Environment
 
@@ -88,9 +88,20 @@ Capture/update browser session states (manual login):
 - `pnpm --filter artbot dev -- runs list --status completed --limit 20`
 - `pnpm --filter artbot dev -- runs show --run-id <id>`
 - `pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2`
+- `pnpm --filter artbot dev -- runs pin --run-id <id>`
+- `pnpm --filter artbot dev -- runs unpin --run-id <id>`
+- `pnpm --filter artbot dev -- storage`
 - `pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --preview-only`
+- `pnpm --filter artbot dev -- --json runs list --limit 20`
+- `pnpm --filter artbot dev -- --json runs show --run-id <id>`
 - `pnpm --filter artbot dev -- --json replay attempt --run-id <id>`
+- `pnpm --filter artbot dev -- --json storage`
 - `pnpm --filter artbot dev -- --json cleanup --dry-run`
+
+Operational notes:
+
+- Source-plan generation may take around 45-60 seconds on a cold start; CLI progress output confirms the command is active.
+- When `--no-tui` or `ARTBOT_NO_TUI=1` is set, `artbot setup` exits without interactive prompts and prints non-interactive guidance.
 
 CLI global options:
 

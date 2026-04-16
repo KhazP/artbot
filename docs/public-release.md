@@ -1,6 +1,6 @@
 # Public GitHub Release Guide
 
-This guide is tailored to `https://github.com/KhazP/artbot` and reflects the repository state prepared on **April 11, 2026**.
+This guide is tailored to `https://github.com/KhazP/artbot` and reflects the repository state prepared on **April 16, 2026**.
 
 ## About Box
 
@@ -9,14 +9,14 @@ Use these exact values in the repository "About" box:
 | Field       | Recommended value                                                                                                                |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Description | `Local-first CLI and evidence pipeline for Turkish art market research and valuation.`                                           |
-| Website     | Leave empty until a public docs or package URL is live. After npm publish, use `https://www.npmjs.com/package/artbot`.           |
+| Website     | `https://www.npmjs.com/package/artbot`                                                                                              |
 | Topics      | `artbot`, `art-market`, `turkish-art`, `valuation`, `research-automation`, `cli`, `typescript`, `nodejs`, `playwright`, `sqlite` |
 
 For the social preview image, use a clean 1280x640 image with:
 
 - the wordmark `ArtBot`
 - the subtitle `Turkish art market research and valuation`
-- a restrained background, not a sc reenshot collage
+- a restrained background, not a screenshot collage
 
 ## Repository Front Page
 
@@ -53,9 +53,9 @@ Recommended default labels:
 
 Recommended milestones:
 
-- `v0.2.x stabilization`
-- `v0.3.0 adapters`
-- `v0.3.0 docs and onboarding`
+- `v0.3.x stabilization`
+- `v0.4.0 adapters`
+- `v0.4.0 docs and onboarding`
 
 ### Pull requests tab
 

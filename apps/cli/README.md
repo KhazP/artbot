@@ -5,23 +5,48 @@ CLI for running ArtBot market research locally.
 ## Install
 
 ```bash
+# recommended: global CLI install
 npm install -g artbot
+
+# optional: one-off run without global install
+npx artbot@latest --help
 ```
+
+> npmjs.com may show `npm i artbot` in the sidebar. That installs `artbot` as a local project dependency.
+> For a globally available `artbot` command in your shell, use `npm install -g artbot`.
+
+## Requirements
+
+- Node.js 22+
+- A local model endpoint (LM Studio recommended)
 
 ## Fastest setup
 
 ArtBot is designed to run with a local backend on your machine. No hosted ArtBot service is required.
 
 1. Start LM Studio and enable its local OpenAI-compatible server.
-2. Run:
+2. Start local services directly:
+
+```bash
+artbot backend start
+```
+
+3. Check health:
+
+```bash
+artbot backend status
+```
+
+4. Optional guided onboarding (interactive):
 
 ```bash
 artbot setup
 ```
 
-By default, `artbot setup` configures and starts a local API and worker on `http://localhost:4000`.
+By default, `artbot setup` configures and can start a local API and worker on `http://localhost:4000`.
 The default LM Studio target is `http://127.0.0.1:1234/v1`, and `artbot setup` will normalize `http://127.0.0.1:1234` to that automatically.
 The generated local config also pins structured extraction to the OpenAI-compatible local endpoint so LM Studio is used even if you have other model provider keys in your shell.
+Plan generation for research commands can take roughly 45-60 seconds on a cold start. Keep the command running until progress completes.
 
 ArtBot stores its local state here:
 
@@ -53,8 +78,10 @@ artbot backend stop
 artbot
 artbot tui
 artbot runs list
+artbot --json runs list --limit 20
 artbot research artist --artist "Burhan Dogancay" --wait
 artbot runs show --run-id <id>
+artbot --json runs show --run-id <id>
 artbot runs watch --run-id <id> --interval 2
 artbot runs pin --run-id <id>
 artbot runs unpin --run-id <id>
@@ -99,6 +126,8 @@ artbot --json auth list
 artbot --json auth status
 artbot --json research artist --artist "Burhan Dogancay" --preview-only
 artbot --json research artist --artist "Burhan Dogancay" --wait
+artbot --json runs list --limit 20
+artbot --json runs show --run-id <id>
 artbot --json replay attempt --run-id <id>
 artbot --json runs pin --run-id <id>
 artbot --json runs unpin --run-id <id>
@@ -111,6 +140,8 @@ If an automation wrapper must hard-disable the interactive UI, pass `--no-tui` o
 ```bash
 export ARTBOT_NO_TUI=1
 ```
+
+When `--no-tui` (or `ARTBOT_NO_TUI=1`) is active, `artbot setup` will not open interactive prompts and instead prints non-interactive guidance.
 
 ## Remote API override
 

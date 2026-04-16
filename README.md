@@ -106,19 +106,32 @@ pnpm --filter artbot dev -- tui
 ## 📦 Install From npm
 
 ```bash
+# recommended: global CLI install
 npm install -g artbot
+
+# optional: one-off run without global install
+npx artbot@latest --help
+
 artbot
 artbot tui
-artbot setup
+artbot backend start
 artbot backend status
 artbot research artist --artist "Burhan Dogancay" --wait
+# optional guided onboarding
+artbot setup
 ```
+
+> [!TIP]
+> npmjs.com may show `npm i artbot` in the sidebar. That installs `artbot` as a local project dependency.
+> For a globally available `artbot` command in your shell, use `npm install -g artbot`.
 
 > [!NOTE]
 > The npm package includes a local ArtBot API and worker runtime — **no hosting required**.
 > Config, auth state, logs, and local data live under `~/.artbot`.
 >
 > [LM Studio](https://lmstudio.ai/) works out of the box with the default local server URL `http://127.0.0.1:1234/v1`.
+>
+> `artbot backend start` bootstraps local runtime files automatically. `artbot setup` is optional and mainly for guided interactive onboarding.
 
 Bare `artbot` is help-first. Use `artbot tui` only when you explicitly want the interactive UI.
 
@@ -188,6 +201,8 @@ artbot runs pin --run-id <id>  # preserve a run before cleanup
 
 **Automation guardrail:** `ARTBOT_NO_TUI=1` disables interactive UI launch.
 
+When no-TUI mode is active, `artbot setup` exits without opening prompts and prints non-interactive guidance.
+
 ## 🤖 Command-First Agent Usage
 
 For agent and automation work, prefer the repo-local CLI entrypoint plus `--json`:
@@ -199,6 +214,7 @@ pnpm --filter artbot dev -- --json auth list
 pnpm --filter artbot dev -- --json auth status
 pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --preview-only
 pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --wait
+pnpm --filter artbot dev -- --json runs list --limit 20
 pnpm --filter artbot dev -- --json runs show --run-id <id>
 pnpm --filter artbot dev -- --json replay attempt --run-id <id>
 pnpm --filter artbot dev -- --json runs pin --run-id <id>
@@ -206,6 +222,8 @@ pnpm --filter artbot dev -- --json runs unpin --run-id <id>
 pnpm --filter artbot dev -- --json storage
 pnpm --filter artbot dev -- --json cleanup --dry-run
 ```
+
+Plan generation can take roughly 45-60 seconds on a cold start. Keep the command running until the spinner completes.
 
 Repo instruction files are committed at the root:
 
