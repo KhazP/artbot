@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { researchQuerySchema } from "@artbot/shared-types";
 import { buildRunArtifactManifest, writeArtifactManifest } from "@artbot/storage";
 import type { RunDetailsResponse } from "./index.js";
-import { runCli } from "./index.js";
+import { buildStorageCleanupTip, runCli } from "./index.js";
 
 const cliPackageVersion = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
   version: string;
@@ -211,7 +211,9 @@ describe("artbot cli v2", () => {
     const { stdout, stderr } = io.read();
     expect(code).toBe(0);
     expect(stdout).toContain("local");
-    expect(stdout).toContain("research-work");
+    expect(stdout).not.toContain("research-work");
+    expect(stdout).not.toContain("research-artist");
+    expect(stdout).not.toContain("run-status");
     expect(stdout).toContain("runs");
     expect(stdout).toContain("--no-tui");
     expect(stdout).toContain("tui");
@@ -334,6 +336,47 @@ describe("artbot cli v2", () => {
     const { stderr } = io.read();
     expect(code).toBe(2);
     expect(stderr).toContain("required option '--artist <name>' not specified");
+  });
+
+  it("returns structured JSON errors for missing flags in --json mode", async () => {
+    const io = createMockIo();
+    const code = await runCli(["node", "artbot", "--json", "research", "artist"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+
+    const payload = JSON.parse(stderr) as {
+      ok: boolean;
+      code: string;
+      message: string;
+      exitCode: number;
+    };
+
+    expect(payload.ok).toBe(false);
+    expect(payload.code).toBe("commander.missingMandatoryOptionValue");
+    expect(payload.message).toContain("required option '--artist <name>' not specified");
+    expect(payload.exitCode).toBe(2);
+  });
+
+  it("builds storage cleanup tips only when thresholds are exceeded", () => {
+    const quiet = buildStorageCleanupTip({
+      total_var_bytes: 200_000_000,
+      expirable_runs: 5
+    });
+    expect(quiet).toBeNull();
+
+    const noisy = buildStorageCleanupTip({
+      total_var_bytes: 3_000_000_000,
+      expirable_runs: 40
+    });
+    expect(noisy).toContain("Tip: local storage is growing");
+    expect(noisy).toContain("artbot cleanup --dry-run");
   });
 
   it("prints strict JSON for non-wait research mode", async () => {

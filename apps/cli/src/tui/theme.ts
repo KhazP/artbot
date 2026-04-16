@@ -16,6 +16,9 @@ export interface TuiTheme {
     success: string;
     warning: string;
     danger: string;
+    localActive: string;
+    thinking: string;
+    sandbox: string;
     keycap: string;
     selection: string;
     subtle: string;
@@ -38,6 +41,9 @@ const THEMES: Record<TuiThemeName, TuiTheme> = {
       success: "#34d399",
       warning: "#fbbf24",
       danger: "#fb7185",
+      localActive: "#10b981",
+      thinking: "#f472b6",
+      sandbox: "#60a5fa",
       keycap: "#22d3ee",
       selection: "#38bdf8",
       subtle: "#64748b"
@@ -58,6 +64,9 @@ const THEMES: Record<TuiThemeName, TuiTheme> = {
       success: "green",
       warning: "yellow",
       danger: "red",
+      localActive: "green",
+      thinking: "magenta",
+      sandbox: "blue",
       keycap: "cyan",
       selection: "blue",
       subtle: "gray"
@@ -78,6 +87,9 @@ const THEMES: Record<TuiThemeName, TuiTheme> = {
       success: "#4ade80",
       warning: "#bef264",
       danger: "#86efac",
+      localActive: "#4ade80",
+      thinking: "#ec4899",
+      sandbox: "#60a5fa",
       keycap: "#4ade80",
       selection: "#22c55e",
       subtle: "#166534"

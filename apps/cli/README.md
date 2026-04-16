@@ -91,6 +91,26 @@ artbot cleanup --dry-run
 
 Bare `artbot` prints help. Open the interactive UI explicitly with `artbot tui`.
 
+## Interactive UI (Local-First)
+
+The TUI status strip is tuned for local-first usage:
+
+- persistent `CLOUD OFFLINE (LOCAL-ONLY)` status,
+- `PRIVACY LOCKED` badge,
+- sandbox indicator (`ISOLATED: ...`),
+- active model metadata with detected quantization (when available),
+- high-speed `THINKING` pulse during active inference,
+- animated run-stage spinner in the main run panel while research is active.
+
+This release does not include local hardware telemetry in the UI.
+
+Optional environment flags for the sandbox badge:
+
+```bash
+export ARTBOT_AIR_GAPPED=1          # shows ISOLATED: NO-NETWORK
+export ARTBOT_SANDBOX_MODE=landlock # shows ISOLATED: LANDLOCK
+```
+
 ## Run retention and storage visibility
 
 Use run pinning to preserve a completed run and retained artifacts through automatic cleanup and manual GC:

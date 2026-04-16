@@ -69,6 +69,41 @@ function resolveCliVersion(): string {
 
 const CLI_VERSION = resolveCliVersion();
 
+const SQLITE_WARNING_FILTER_FLAG = "__ARTBOT_SQLITE_WARNING_FILTER_INSTALLED__";
+
+function shouldSuppressSqliteExperimentalWarning(warning: unknown, args: unknown[]): boolean {
+  const warningName =
+    typeof warning === "object" && warning && "name" in warning && typeof (warning as { name?: unknown }).name === "string"
+      ? (warning as { name: string }).name
+      : typeof args[0] === "string"
+        ? args[0]
+        : "";
+  const warningMessage =
+    typeof warning === "string"
+      ? warning
+      : typeof warning === "object" && warning && "message" in warning && typeof (warning as { message?: unknown }).message === "string"
+        ? (warning as { message: string }).message
+        : "";
+
+  return warningName === "ExperimentalWarning" && /node:sqlite|SQLite is an experimental feature/i.test(warningMessage);
+}
+
+function installSqliteWarningFilter(): void {
+  const markerProcess = process as NodeJS.Process & Record<string, unknown>;
+  if (markerProcess[SQLITE_WARNING_FILTER_FLAG]) return;
+
+  const originalEmitWarning = process.emitWarning.bind(process);
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    if (shouldSuppressSqliteExperimentalWarning(warning, args)) {
+      return;
+    }
+    (originalEmitWarning as (...innerArgs: unknown[]) => void)(warning, ...args);
+  }) as typeof process.emitWarning;
+  markerProcess[SQLITE_WARNING_FILTER_FLAG] = true;
+}
+
+installSqliteWarningFilter();
+
 const EXIT_CODES = {
   OK: 0,
   INPUT: 2,
@@ -330,7 +365,19 @@ interface CliContext {
   deps: Required<CliDeps>;
   exitCode: number;
   noTui: boolean;
+  jsonRequested: boolean;
 }
+
+interface JsonErrorPayload {
+  ok: false;
+  code: string;
+  message: string;
+  exitCode: number;
+  details?: unknown;
+}
+
+const STORAGE_USAGE_HINT_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024;
+const STORAGE_USAGE_HINT_THRESHOLD_EXPIRABLE_RUNS = 20;
 
 function toNumber(value?: string): number | undefined {
   if (!value) return undefined;
@@ -502,12 +549,138 @@ function logVerbose(globals: GlobalOptions, ctx: CliContext, text: string): void
   writeLine(ctx.deps.stderr, picocolors.dim(text));
 }
 
-function logError(globals: GlobalOptions, ctx: CliContext, text: string): void {
+function logError(globals: GlobalOptions, ctx: CliContext, payload: string | JsonErrorPayload): void {
   if (globals.json) {
-    writeLine(ctx.deps.stderr, text);
+    const envelope =
+      typeof payload === "string"
+        ? {
+            ok: false,
+            code: "unknown_error",
+            message: payload,
+            exitCode: EXIT_CODES.API
+          }
+        : payload;
+    writeLine(ctx.deps.stderr, JSON.stringify(envelope, null, 2));
     return;
   }
+  const text = typeof payload === "string" ? payload : payload.message;
   writeLine(ctx.deps.stderr, picocolors.red(text));
+}
+
+function formatZodIssuePath(path: Array<string | number>): string {
+  if (path.length === 0) return "input";
+
+  let result = "";
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      result += `[${segment}]`;
+      continue;
+    }
+    if (!result) {
+      result = segment;
+      continue;
+    }
+    result += `.${segment}`;
+  }
+
+  return result;
+}
+
+function formatZodIssuesForHuman(error: ZodError): string {
+  return error.issues
+    .map((issue) => `${formatZodIssuePath(issue.path)}: ${issue.message}`)
+    .join("; ");
+}
+
+function buildJsonErrorPayload(error: unknown, exitCode: number): JsonErrorPayload {
+  const message = formatError(error);
+
+  if (error instanceof ApiRequestError) {
+    return {
+      ok: false,
+      code:
+        error.status === 401
+          ? "api_auth_failed"
+          : error.status === 404
+            ? "api_not_found"
+            : error.status >= 500
+              ? "api_server_error"
+              : "api_request_failed",
+      message,
+      exitCode,
+      details: {
+        status: error.status,
+        body: error.body
+      }
+    };
+  }
+
+  if (error instanceof InputValidationError) {
+    return {
+      ok: false,
+      code: "input_validation",
+      message,
+      exitCode
+    };
+  }
+
+  if (error instanceof ZodError) {
+    return {
+      ok: false,
+      code: "input_validation",
+      message,
+      exitCode,
+      details: {
+        issues: error.issues.map((issue) => ({
+          path: formatZodIssuePath(issue.path),
+          message: issue.message,
+          code: issue.code
+        }))
+      }
+    };
+  }
+
+  if (error instanceof TerminalStateError) {
+    return {
+      ok: false,
+      code: "terminal_state_failed",
+      message,
+      exitCode,
+      details: {
+        runId: error.details.run.id,
+        status: error.details.run.status
+      }
+    };
+  }
+
+  if (error instanceof CommanderError) {
+    return {
+      ok: false,
+      code: error.code || "input_validation",
+      message,
+      exitCode,
+      details: {
+        commanderCode: error.code,
+        commanderExitCode: error.exitCode
+      }
+    };
+  }
+
+  if (error instanceof TypeError && /fetch/i.test(error.message)) {
+    return {
+      ok: false,
+      code: "api_unreachable",
+      message,
+      exitCode
+    };
+  }
+
+  return {
+    ok: false,
+    code: "unknown_error",
+    message,
+    exitCode
+  };
 }
 
 function printJson(globals: GlobalOptions, ctx: CliContext, payload: unknown): void {
@@ -826,6 +999,45 @@ export function renderStorageUsageTable(summary: StorageUsageResponse): string {
   );
 
   return table.toString();
+}
+
+export function buildStorageCleanupTip(summary: StorageUsageResponse): string | null {
+  const totalVarBytes = readNestedNumber(summary, [
+    ["total_var_bytes"],
+    ["total_var_usage_bytes"],
+    ["total_bytes"],
+    ["totals", "var_bytes"],
+    ["totals", "total_var_bytes"],
+    ["usage", "total_bytes"],
+    ["usage", "total_var_bytes"],
+    ["usage", "var_bytes"]
+  ]);
+  const expirableRuns = readNestedNumber(summary, [
+    ["expirable_runs"],
+    ["expirable", "runs"],
+    ["run_counts", "expirable"],
+    ["runs", "expirable"],
+    ["usage", "expirable", "runs"]
+  ]);
+
+  const exceedsBytes = typeof totalVarBytes === "number" && totalVarBytes >= STORAGE_USAGE_HINT_THRESHOLD_BYTES;
+  const exceedsExpirableRuns =
+    typeof expirableRuns === "number" && expirableRuns >= STORAGE_USAGE_HINT_THRESHOLD_EXPIRABLE_RUNS;
+
+  if (!exceedsBytes && !exceedsExpirableRuns) {
+    return null;
+  }
+
+  const reasons: string[] = [];
+  if (exceedsBytes && typeof totalVarBytes === "number") {
+    reasons.push(`${formatBytesCompact(totalVarBytes)} in var`);
+  }
+  if (exceedsExpirableRuns && typeof expirableRuns === "number") {
+    reasons.push(`${Math.round(expirableRuns).toLocaleString("en-US")} expirable runs`);
+  }
+
+  const reasonText = reasons.length > 0 ? ` (${reasons.join(", ")})` : "";
+  return `Tip: local storage is growing${reasonText}. Run \"artbot cleanup --dry-run\" to preview reclaimable artifacts.`;
 }
 
 type ReviewQueueFilterStatus = "open" | "resolved" | undefined;
@@ -1771,6 +1983,20 @@ async function handleResearch(
   }
 }
 
+async function maybeLogStorageCleanupTip(ctx: CliContext, globals: GlobalOptions): Promise<void> {
+  if (globals.json || globals.quiet) return;
+
+  try {
+    const summary = await requestJson<StorageUsageResponse>(ctx, globals, "GET", "/storage/usage");
+    const tip = buildStorageCleanupTip(summary);
+    if (tip) {
+      logInfo(globals, ctx, tip);
+    }
+  } catch (error) {
+    logVerbose(globals, ctx, `Storage hint unavailable: ${formatError(error)}`);
+  }
+}
+
 async function handleRunsList(ctx: CliContext, options: RunsListOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const status = parseRunStatus(options.status);
@@ -1787,10 +2013,12 @@ async function handleRunsList(ctx: CliContext, options: RunsListOptions, command
 
   if (payload.runs.length === 0) {
     logInfo(globals, ctx, "No runs found for the selected filters.");
+    await maybeLogStorageCleanupTip(ctx, globals);
     return;
   }
 
   logInfo(globals, ctx, renderRunsTable(payload.runs));
+  await maybeLogStorageCleanupTip(ctx, globals);
 }
 
 async function handleRunsShow(ctx: CliContext, options: RunsShowOptions, command: Command): Promise<void> {
@@ -1881,6 +2109,7 @@ async function handleDoctor(ctx: CliContext, command: Command): Promise<void> {
   logInfo(globals, ctx, renderSetupAssessment(assessment));
   logInfo(globals, ctx, "");
   logInfo(globals, ctx, renderSetupIssues(assessment));
+  await maybeLogStorageCleanupTip(ctx, globals);
 }
 
 async function handleTui(ctx: CliContext, command: Command): Promise<void> {
@@ -2064,16 +2293,21 @@ function registerResearchCommands(program: Command, ctx: CliContext): void {
       await handleResearch(ctx, options, command, "work");
     });
 
-  addCommonResearchFlags(
-    program.command("research-artist").description("Research artist prices (legacy)"),
+  const researchArtistLegacy = addCommonResearchFlags(
+    program.command("research-artist", { hidden: true }).description("Research artist prices (legacy)"),
     true
-  ).action(async (options: CommonOptions, command: Command) => {
+  );
+  researchArtistLegacy.action(async (options: CommonOptions, command: Command) => {
+    const globals = resolveGlobals(command);
+    logInfo(globals, ctx, 'Warning: "research-artist" is deprecated. Use "research artist".');
     await handleResearch(ctx, options, command, "artist");
   });
 
-  addCommonResearchFlags(program.command("research-work").description("Research specific work prices (legacy)"), false)
+  const researchWorkLegacy = addCommonResearchFlags(program.command("research-work", { hidden: true }).description("Research specific work prices (legacy)"), false)
     .requiredOption("--title <title>", "Work title")
     .action(async (options: CommonOptions, command: Command) => {
+      const globals = resolveGlobals(command);
+      logInfo(globals, ctx, 'Warning: "research-work" is deprecated. Use "research work".');
       await handleResearch(ctx, options, command, "work");
     });
 }
@@ -2134,11 +2368,13 @@ function registerRunsCommands(program: Command, ctx: CliContext): void {
       await handleRunsPinMutation(ctx, options, command, false);
     });
 
-  program
-    .command("run-status")
+  const runStatusLegacy = program
+    .command("run-status", { hidden: true })
     .description("Show run details summary (legacy alias)")
     .requiredOption("--run-id <id>", "Run identifier")
     .action(async (options: RunsShowOptions, command: Command) => {
+      const globals = resolveGlobals(command);
+      logInfo(globals, ctx, 'Warning: "run-status" is deprecated. Use "runs show".');
       await handleRunsShow(ctx, options, command);
     });
 }
@@ -2301,8 +2537,8 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
       await handleArtifactGc(ctx, options, command);
     });
 
-  opsGroup
-    .command("gc")
+  const gcLegacy = opsGroup
+    .command("gc", { hidden: true })
     .description("Run artifact retention and garbage collection over run artifacts (legacy alias)")
     .option("--runs-root <path>", "Runs root to scan")
     .option("--dry-run", "Report what GC would delete without mutating artifacts")
@@ -2312,6 +2548,8 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
       "Preserve the newest completed runs in full unless the size budget still requires purging"
     )
     .action(async (options: ArtifactGcOptions, command: Command) => {
+      const globals = resolveGlobals(command);
+      logInfo(globals, ctx, 'Warning: "ops gc" is deprecated. Use "cleanup".');
       await handleArtifactGc(ctx, options, command);
     });
 
@@ -2399,7 +2637,7 @@ function formatError(error: unknown): string {
     return `${error.message} Next: run command with --help to verify valid options.`;
   }
   if (error instanceof ZodError) {
-    return `Invalid input: ${error.issues.map((issue) => issue.message).join("; ")} Next: run command with --help to verify required flags.`;
+    return `Invalid input: ${formatZodIssuesForHuman(error)} Next: run command with --help to verify required flags.`;
   }
   if (error instanceof TerminalStateError) {
     return `Run ${error.details.run.id} reached a failed or blocked terminal state. Next: run "artbot runs show --run-id ${error.details.run.id}" for diagnostics.`;
@@ -2417,13 +2655,19 @@ export function createProgram(ctx: CliContext): Command {
   const program = new Command();
   program.name("artbot").description("ArtBot market research CLI").version(CLI_VERSION);
 
-  program
-    .showHelpAfterError()
-    .exitOverride()
-    .configureOutput({
-      writeOut: (text) => ctx.deps.stdout(text),
-      writeErr: (text) => ctx.deps.stderr(text)
-    });
+  if (ctx.jsonRequested) {
+    program.showHelpAfterError(false);
+  } else {
+    program.showHelpAfterError();
+  }
+
+  program.exitOverride().configureOutput({
+    writeOut: (text) => ctx.deps.stdout(text),
+    writeErr: (text) => {
+      if (ctx.jsonRequested) return;
+      ctx.deps.stderr(text);
+    }
+  });
 
   program
     .option("--json", "Machine-readable JSON output")
@@ -2450,7 +2694,8 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
   const ctx: CliContext = {
     deps: defaultDeps(deps),
     exitCode: EXIT_CODES.OK,
-    noTui: isNoTuiEnabled(normalizedUserArgs)
+    noTui: isNoTuiEnabled(normalizedUserArgs),
+    jsonRequested: normalizedUserArgs.includes("--json")
   };
 
   const program = createProgram(ctx);
@@ -2490,7 +2735,11 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
           } satisfies GlobalOptions;
         }
       })();
-      logError(globals, ctx, formatError(error));
+      if (globals.json) {
+        logError(globals, ctx, buildJsonErrorPayload(error, exitCode));
+      } else {
+        logError(globals, ctx, formatError(error));
+      }
     }
     return exitCode;
   }

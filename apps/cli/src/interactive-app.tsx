@@ -76,6 +76,16 @@ function parseWorkCommand(value: string): { artist: string; title: string } | nu
   };
 }
 
+export function buildComposerInputKey(input: {
+  overlay: Overlay;
+  focusTarget: TuiSurfaceState["focusTarget"];
+  promptSymbol: string;
+  submitNonce: number;
+}): string {
+  const overlay = input.overlay === "none" ? "base" : input.overlay;
+  return `composer:${overlay}:${input.focusTarget}:${input.promptSymbol}:${input.submitNonce}`;
+}
+
 function useTerminalDimensions() {
   const [dimensions, setDimensions] = useState(() => ({
     columns: process.stdout.columns ?? 120,
@@ -131,6 +141,8 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
   const [message, setMessage] = useState("Slash command ready.");
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [browserReportPath, setBrowserReportPath] = useState<string | null>(null);
+  const [thinkingTick, setThinkingTick] = useState(0);
+  const [composerSubmitNonce, setComposerSubmitNonce] = useState(0);
   const [preferences, setPreferences] = useState<TuiPreferences>(initialPreferences);
   const [uiState, setUiState] = useState<TuiSurfaceState>(() => ({
     sidePane: initialAssessment?.issues.length ? ("setup" as const) : ("none" as const),
@@ -400,6 +412,21 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     }
   }, [uiState.selectedRecentRunIndex, visibleRecentRuns.length]);
 
+  useEffect(() => {
+    if (primaryView !== "running") {
+      setThinkingTick(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setThinkingTick((current) => current + 1);
+    }, 80);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [primaryView]);
+
   const startResearch = useCallback(
     async (kind: "artist" | "work" | "artist_market_inventory", artist: string, title?: string) => {
       setBusy(true);
@@ -588,6 +615,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       setHistory((current) => [trimmed, ...current.filter((entry) => entry !== trimmed)].slice(0, 12));
       setHistoryIndex(-1);
       setInput("");
+      setComposerSubmitNonce((current) => current + 1);
 
       try {
         if (!trimmed.startsWith("/")) {
@@ -842,6 +870,16 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
   const composerValue =
     uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay" ? uiState.recentRunsQuery : input;
+  const composerInputKey = useMemo(
+    () =>
+      buildComposerInputKey({
+        overlay: uiState.overlay,
+        focusTarget: uiState.focusTarget,
+        promptSymbol: composerState.promptSymbol,
+        submitNonce: composerSubmitNonce
+      }),
+    [composerState.promptSymbol, composerSubmitNonce, uiState.focusTarget, uiState.overlay]
+  );
   const messageColor =
     message.startsWith("✗") || message.startsWith("Failed") || message.includes("error")
       ? theme.colors.danger
@@ -867,6 +905,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         selectedThemeIndex={uiState.selectedThemeIndex}
         recentRuns={visibleRecentRuns}
         runStartedAt={runStartedAt}
+        thinkingTick={thinkingTick}
         browserReportPath={browserReportPath}
         terminalWidth={dimensions.columns}
       />
@@ -877,7 +916,13 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
             {composerState.promptSymbol === "artbot" ? "❯" : `${composerState.promptSymbol}>`}
           </Text>
           <Box marginLeft={1} flexGrow={1}>
-            <TextInput value={composerValue} onChange={handleComposerChange} onSubmit={handleSubmit} placeholder={composerState.placeholder} />
+            <TextInput
+              key={composerInputKey}
+              value={composerValue}
+              onChange={handleComposerChange}
+              onSubmit={handleSubmit}
+              placeholder={composerState.placeholder}
+            />
           </Box>
         </Box>
 

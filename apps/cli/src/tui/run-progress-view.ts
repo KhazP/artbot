@@ -1,14 +1,14 @@
 import { formatElapsed, progressBar, spacer, stack, text } from "./helpers.js";
 import type { TuiComponent, TuiNode, TuiRunProgressModel, TuiTone } from "./types.js";
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export const RUNNING_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 function stageIcon(state: string, tick: number): { symbol: string; tone: TuiTone } {
   switch (state) {
     case "done":
       return { symbol: "✓", tone: "success" };
     case "running":
-      return { symbol: SPINNER[tick % SPINNER.length], tone: "accent" };
+      return { symbol: RUNNING_SPINNER_FRAMES[tick % RUNNING_SPINNER_FRAMES.length], tone: "accent" };
     case "blocked":
       return { symbol: "!", tone: "warning" };
     case "failed":
@@ -46,7 +46,7 @@ export const RunProgressView: TuiComponent<RunProgressViewProps> = ({ progress }
       : progress.status === "failed"
         ? "✗"
         : isActive
-          ? SPINNER[tick % SPINNER.length]
+          ? RUNNING_SPINNER_FRAMES[tick % RUNNING_SPINNER_FRAMES.length]
           : "▶";
 
   // ── Header line: icon + artist + status + elapsed ──

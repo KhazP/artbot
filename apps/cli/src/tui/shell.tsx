@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import type { RunEntity } from "@artbot/shared-types";
 import type { SetupAssessment } from "../setup/index.js";
 import type { TuiPreferences } from "./preferences.js";
+import { RUNNING_SPINNER_FRAMES } from "./run-progress-view.js";
 import { COMPLETED_REPORT_SURFACE_OPTIONS, type FocusTarget, type Overlay, type PipelineDetails, type PrimaryView, type SidePane } from "./state.js";
 import { getTuiThemeOptions, type TuiTheme } from "./theme.js";
 
@@ -22,6 +23,7 @@ interface ArtbotInteractiveShellProps {
   selectedThemeIndex: number;
   selectedReportSurfaceIndex: number;
   runStartedAt: number | null;
+  thinkingTick: number;
   browserReportPath: string | null;
   terminalWidth: number;
 }
@@ -42,6 +44,7 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
         overlay={props.overlay}
         focusTarget={props.focusTarget}
         preferences={props.preferences}
+        thinkingTick={props.thinkingTick}
       />
       <Box flexDirection={stackMain ? "column" : "row"} marginTop={1}>
         <Box flexGrow={3} marginRight={!stackMain && showSidePane ? 1 : 0} marginBottom={stackMain && showSidePane ? 1 : 0}>
@@ -52,6 +55,7 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
             activeArtist={props.activeArtist}
             primaryView={props.primaryView}
             runStartedAt={props.runStartedAt}
+            thinkingTick={props.thinkingTick}
             focusTarget={props.focusTarget}
           />
         </Box>
@@ -144,6 +148,7 @@ function TopStatusStrip(props: {
   overlay: Overlay;
   focusTarget: FocusTarget;
   preferences: TuiPreferences;
+  thinkingTick: number;
 }) {
   const modeLabel =
     props.overlay !== "none"
@@ -151,47 +156,66 @@ function TopStatusStrip(props: {
       : props.primaryView === "idle"
         ? "ready"
         : props.primaryView;
+  const modelId = props.assessment?.llmHealth.modelId;
+  const quantization = extractQuantization(modelId);
+  const activeSessions = props.assessment?.sessionStates.filter((session) => session.exists && !session.expired).length ?? 0;
+  const totalSessions = props.assessment?.sessionStates.length ?? 0;
+  const sandboxLabel = resolveSandboxMode();
+  const thinkingActive = props.primaryView === "running";
+  const thinkingPulse = thinkingActive ? buildKnightRiderPulse(props.thinkingTick, 14) : "idle";
 
   return (
     <Panel
       theme={props.theme}
       title="ArtBot"
-      subtitle={`Hybrid REPL console · ${props.preferences.theme} theme · ${props.preferences.diffLayout} layout`}
+      subtitle={`Local-first inference shell · privacy-first mode · ${props.preferences.theme} theme · ${props.preferences.diffLayout} layout`}
     >
-      <Box justifyContent="space-between" flexWrap="wrap">
-        <Box>
-          <InlineChip theme={props.theme} tone="accent" label={`Mode ${modeLabel.toUpperCase()}`} />
-          <InlineChip theme={props.theme} tone="muted" label={`Focus ${props.focusTarget}`} />
+      <Box flexDirection="column">
+        <Box justifyContent="space-between" flexWrap="wrap">
+          <Box>
+            <InlineChip theme={props.theme} tone="accent" label={`MODE ${modeLabel.toUpperCase()}`} />
+            <InlineChip theme={props.theme} tone="muted" label={`FOCUS ${props.focusTarget.toUpperCase()}`} />
+            <InlineChip theme={props.theme} tone="local" label="CLOUD OFFLINE (LOCAL-ONLY)" />
+            <InlineChip theme={props.theme} tone="local" label="PRIVACY LOCKED" />
+            <InlineChip theme={props.theme} tone="sandbox" label={sandboxLabel} />
+          </Box>
+          <Box>
+            <StatusChip
+              theme={props.theme}
+              label="LM"
+              state={props.assessment?.llmHealth.ok ? "healthy" : "offline"}
+              detail={modelId ?? props.assessment?.llmHealth.reason ?? "checking"}
+            />
+            <StatusChip
+              theme={props.theme}
+              label="API"
+              state={props.assessment?.apiHealth.ok ? "healthy" : "offline"}
+              detail={props.assessment?.apiHealth.reason ?? props.assessment?.apiBaseUrl ?? "checking"}
+            />
+            <StatusChip
+              theme={props.theme}
+              label="Auth"
+              state={props.assessment ? (activeSessions > 0 ? "healthy" : "degraded") : "unknown"}
+              detail={props.assessment ? `${activeSessions}/${totalSessions}` : "checking"}
+            />
+          </Box>
         </Box>
-        <Box>
-          <StatusChip
-            theme={props.theme}
-            label="LM"
-            state={props.assessment?.llmHealth.ok ? "healthy" : "offline"}
-            detail={props.assessment?.llmHealth.modelId ?? props.assessment?.llmHealth.reason ?? "checking"}
-          />
-          <StatusChip
-            theme={props.theme}
-            label="API"
-            state={props.assessment?.apiHealth.ok ? "healthy" : "offline"}
-            detail={props.assessment?.apiHealth.reason ?? props.assessment?.apiBaseUrl ?? "checking"}
-          />
-          <StatusChip
-            theme={props.theme}
-            label="Auth"
-            state={
-              props.assessment
-                ? props.assessment.sessionStates.some((session) => session.exists && !session.expired)
-                  ? "healthy"
-                  : "degraded"
-                : "unknown"
-            }
-            detail={
-              props.assessment
-                ? `${props.assessment.sessionStates.filter((session) => session.exists && !session.expired).length}/${props.assessment.sessionStates.length}`
-                : "checking"
-            }
-          />
+        <Box marginTop={1} justifyContent="space-between" flexWrap="wrap">
+          <Box>
+            <InlineChip
+              theme={props.theme}
+              tone={thinkingActive ? "thinking" : "muted"}
+              label={thinkingActive ? `THINKING ${thinkingPulse}` : "THINKING IDLE"}
+            />
+          </Box>
+          <Box>
+            <InlineChip theme={props.theme} tone="muted" label={`MODEL ${truncate(modelId ?? "not loaded", 32)}`} />
+            <InlineChip
+              theme={props.theme}
+              tone={quantization === "unknown" ? "warning" : "local"}
+              label={`QUANT ${quantization.toUpperCase()}`}
+            />
+          </Box>
         </Box>
       </Box>
     </Panel>
@@ -205,6 +229,7 @@ function PrimaryPane(props: {
   activeArtist: string;
   primaryView: PrimaryView;
   runStartedAt: number | null;
+  thinkingTick: number;
   focusTarget: FocusTarget;
 }) {
   if (props.primaryView === "idle") {
@@ -212,7 +237,7 @@ function PrimaryPane(props: {
       <Panel
         theme={props.theme}
         title="Ready"
-        subtitle="Prompt-first research shell with overlays for history, setup, and theme controls."
+        subtitle="Prompt-first local shell with privacy badges, overlays, and low-latency command flow."
         accentColor={props.focusTarget === "main" ? props.theme.colors.selection : undefined}
       >
         <Text color={props.theme.colors.text} bold>
@@ -271,7 +296,7 @@ function PrimaryPane(props: {
         />
       </Box>
       <Box marginTop={1} flexDirection="column">
-        {buildStageRows(run, props.theme).map((stage) => (
+        {buildStageRows(run, props.theme, props.thinkingTick).map((stage) => (
           <Text key={stage.label} color={stage.color}>
             {stage.symbol} {stage.label}
             <Text color={props.theme.colors.muted}> {stage.detail}</Text>
@@ -562,14 +587,84 @@ function StatusChip(props: {
   );
 }
 
-function InlineChip(props: { theme: TuiTheme; tone: "accent" | "muted"; label: string }) {
+function InlineChip(props: {
+  theme: TuiTheme;
+  tone: "accent" | "muted" | "local" | "thinking" | "warning" | "sandbox";
+  label: string;
+}) {
+  const color =
+    props.tone === "accent"
+      ? props.theme.colors.accent
+      : props.tone === "local"
+        ? props.theme.colors.localActive
+        : props.tone === "thinking"
+          ? props.theme.colors.thinking
+          : props.tone === "warning"
+            ? props.theme.colors.warning
+            : props.tone === "sandbox"
+              ? props.theme.colors.sandbox
+              : props.theme.colors.muted;
+
   return (
     <Box marginRight={2}>
-      <Text color={props.tone === "accent" ? props.theme.colors.accent : props.theme.colors.muted} bold={props.tone === "accent"}>
+      <Text color={color} bold={props.tone !== "muted"}>
         {props.label}
       </Text>
     </Box>
   );
+}
+
+function resolveSandboxMode(): string {
+  const airGapped = (process.env.ARTBOT_AIR_GAPPED ?? "").trim().toLowerCase();
+  if (airGapped === "1" || airGapped === "true" || airGapped === "yes") {
+    return "ISOLATED: NO-NETWORK";
+  }
+
+  const mode = (process.env.ARTBOT_SANDBOX_MODE ?? "").trim();
+  if (mode) {
+    return `ISOLATED: ${mode.toUpperCase()}`;
+  }
+
+  return "ISOLATED: LOCAL-RUNTIME";
+}
+
+export function extractQuantization(modelId: string | undefined): string {
+  if (!modelId) return "unknown";
+
+  const patterns = [
+    /\b(q\d(?:[_-][a-z0-9]+)+)\b/i,
+    /\b(q\d+[a-z0-9_-]*)\b/i,
+    /\b(fp16|fp8|bf16|int8|int4)\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = modelId.match(pattern);
+    if (match?.[1]) {
+      return match[1].replace(/-/g, "_");
+    }
+  }
+
+  return "unknown";
+}
+
+export function buildKnightRiderPulse(tick: number, width = 14): string {
+  const trackWidth = Math.max(6, Math.floor(width));
+  const cycle = trackWidth * 2 - 2;
+  const offset = ((tick % cycle) + cycle) % cycle;
+  const head = offset < trackWidth ? offset : cycle - offset;
+
+  let frame = "";
+  for (let index = 0; index < trackWidth; index += 1) {
+    const distance = Math.abs(index - head);
+    frame += distance === 0 ? "█" : distance === 1 ? "▓" : distance === 2 ? "▒" : "░";
+  }
+
+  return frame;
+}
+
+export function getRunningSpinnerFrame(tick: number): string {
+  const offset = Math.abs(Math.floor(tick));
+  return RUNNING_SPINNER_FRAMES[offset % RUNNING_SPINNER_FRAMES.length] ?? RUNNING_SPINNER_FRAMES[0]!;
 }
 
 function RecordRow(props: {
@@ -595,27 +690,43 @@ function RecordRow(props: {
   );
 }
 
-function buildStageRows(details: PipelineDetails | null, theme: TuiTheme): Array<{ symbol: string; label: string; detail: string; color: string }> {
+export function buildStageRows(
+  details: PipelineDetails | null,
+  theme: TuiTheme,
+  tick: number
+): Array<{ symbol: string; label: string; detail: string; color: string }> {
   const summary = details?.summary;
   const status = details?.run?.status;
+  const spinner = getRunningSpinnerFrame(tick);
+  const queueRunning = status === "pending";
+  const scanRunning = status === "running" && !summary;
+  const analyzeRunning = status === "running" && Boolean(summary);
+
   return [
     {
-      symbol: status ? "✓" : "○",
+      symbol: queueRunning ? spinner : status ? "✓" : "○",
       label: "Queue",
-      detail: status === "pending" ? "waiting" : "passed",
-      color: status ? theme.colors.success : theme.colors.muted
+      detail: queueRunning ? "waiting" : status ? "passed" : "pending",
+      color: queueRunning ? theme.colors.thinking : status ? theme.colors.success : theme.colors.muted
     },
     {
-      symbol: summary ? "✓" : status ? "•" : "○",
+      symbol: summary ? "✓" : scanRunning ? spinner : "○",
       label: "Scan",
-      detail: summary ? `${summary.total_attempts ?? 0} attempts` : "running",
-      color: summary ? theme.colors.success : theme.colors.accent
+      detail: summary ? `${summary.total_attempts ?? 0} attempts` : scanRunning ? "running" : "queued",
+      color: summary ? theme.colors.success : scanRunning ? theme.colors.thinking : theme.colors.muted
     },
     {
-      symbol: summary?.accepted_records ? "✓" : status === "failed" ? "✗" : "•",
+      symbol: status === "failed" ? "✗" : summary ? (analyzeRunning ? spinner : "✓") : "○",
       label: "Analyze",
-      detail: summary ? `${summary.accepted_records} accepted` : "pending",
-      color: status === "failed" ? theme.colors.danger : summary ? theme.colors.success : theme.colors.accent
+      detail: summary ? `${summary.accepted_records ?? 0} accepted` : status === "failed" ? "failed" : "pending",
+      color:
+        status === "failed"
+          ? theme.colors.danger
+          : summary
+            ? analyzeRunning
+              ? theme.colors.thinking
+              : theme.colors.success
+            : theme.colors.muted
     },
     {
       symbol: status === "completed" ? "✓" : status === "failed" ? "✗" : "○",

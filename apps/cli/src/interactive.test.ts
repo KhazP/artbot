@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { resolvePipelineDefaultsFromEnv, summarizeAttemptBlockers } from "./interactive.js";
+import { buildComposerInputKey } from "./interactive-app.js";
 
 const envSnapshot = {
   DEFAULT_ANALYSIS_MODE: process.env.DEFAULT_ANALYSIS_MODE,
@@ -105,5 +106,41 @@ describe("blocker triage", () => {
 
   it("returns null for empty attempt list", () => {
     expect(summarizeAttemptBlockers([])).toBeNull();
+  });
+});
+
+describe("composer input key", () => {
+  it("changes when submit nonce increments", () => {
+    const keyA = buildComposerInputKey({
+      overlay: "none",
+      focusTarget: "composer",
+      promptSymbol: "artbot",
+      submitNonce: 0
+    });
+    const keyB = buildComposerInputKey({
+      overlay: "none",
+      focusTarget: "composer",
+      promptSymbol: "artbot",
+      submitNonce: 1
+    });
+
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it("changes when overlay context changes", () => {
+    const commandKey = buildComposerInputKey({
+      overlay: "none",
+      focusTarget: "composer",
+      promptSymbol: "artbot",
+      submitNonce: 1
+    });
+    const runsOverlayKey = buildComposerInputKey({
+      overlay: "recent-runs",
+      focusTarget: "overlay",
+      promptSymbol: "runs",
+      submitNonce: 1
+    });
+
+    expect(commandKey).not.toBe(runsOverlayKey);
   });
 });
