@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthManager } from "@artbot/auth-manager";
 import { researchQuerySchema, type HostHealthRecord } from "@artbot/shared-types";
 import { deriveDefaultSourceCapabilities, type SourceAdapter } from "@artbot/source-adapters";
@@ -95,8 +95,23 @@ function healthRecord(overrides: Partial<HostHealthRecordWithDimensions> = {}): 
   };
 }
 
+const originalWebDiscoveryEnabled = process.env.WEB_DISCOVERY_ENABLED;
+
+beforeEach(() => {
+  // Keep routing unit tests deterministic by opting out of implicit network discovery.
+  process.env.WEB_DISCOVERY_ENABLED = "false";
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+afterAll(() => {
+  if (originalWebDiscoveryEnabled === undefined) {
+    delete process.env.WEB_DISCOVERY_ENABLED;
+  } else {
+    process.env.WEB_DISCOVERY_ENABLED = originalWebDiscoveryEnabled;
+  }
 });
 
 describe("planSources", () => {
