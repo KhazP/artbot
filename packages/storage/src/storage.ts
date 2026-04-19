@@ -605,7 +605,7 @@ export class ArtbotStorage {
     for (const row of runRows) {
       const runBytes = this.getRunDirectorySizeBytes(row.id);
       totalBytes += runBytes;
-      if (Boolean(row.pinned)) {
+      if (row.pinned) {
         pinned.runs += 1;
         pinned.bytes += runBytes;
         continue;
