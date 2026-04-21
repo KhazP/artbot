@@ -4,7 +4,6 @@
 <br />
 
 **Production-oriented, painting price research bot**<br/>
-_Session-aware extraction · Evidence capture · Strict structured outputs_
 
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10.x-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
