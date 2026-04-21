@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://i.imgur.com/Nrxm4Ih.png" alt="artbot banner" width="100%" />
+<img src="https://i.imgur.com/px99yMV.png" alt="artbot banner" width="100%" />
 <br />
 
 **Production-oriented, painting price research bot**<br/>
