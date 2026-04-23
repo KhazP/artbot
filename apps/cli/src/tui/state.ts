@@ -1,4 +1,4 @@
-import type { RunEntity } from "@artbot/shared-types";
+import type { DeepResearchResult, RunEntity } from "@artbot/shared-types";
 import type { PerPaintingStat, ReportRecord, ReportSummary, ReportValuation } from "../ui/report.js";
 import type { TuiPreferences } from "./preferences.js";
 import { TUI_THEME_NAMES, type TuiThemeName } from "./theme.js";
@@ -22,6 +22,7 @@ export interface PipelineDetails {
   duplicates?: ReportRecord[];
   valuation?: ReportValuation;
   per_painting_stats?: PerPaintingStat[];
+  deepResearch?: DeepResearchResult;
   inventory?: Array<{
     record_key: string;
     payload: {

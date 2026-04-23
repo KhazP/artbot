@@ -43,7 +43,8 @@ describe("tui preferences", () => {
       theme: "matrix",
       density: "compact",
       showSecondaryPane: false,
-      diffLayout: "stacked"
+      diffLayout: "stacked",
+      experimental: DEFAULT_TUI_PREFERENCES.experimental
     });
 
     expect(filePath).toBe(resolveTuiPreferencesPath());
@@ -53,7 +54,8 @@ describe("tui preferences", () => {
       theme: "matrix",
       density: "compact",
       showSecondaryPane: false,
-      diffLayout: "stacked"
+      diffLayout: "stacked",
+      experimental: DEFAULT_TUI_PREFERENCES.experimental
     });
   });
 });

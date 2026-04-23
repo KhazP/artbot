@@ -75,7 +75,15 @@ describe("tui state", () => {
       theme: "artbot",
       density: "comfortable",
       showSecondaryPane: true,
-      diffLayout: "auto"
+      diffLayout: "auto",
+      experimental: {
+        enabled: false,
+        plannerModel: "gemini-pro-latest",
+        researchMode: "deep_research_max",
+        warnOnRun: true,
+        spendCapReminderUsd: 20,
+        openFullReportAfterRun: true
+      }
     });
 
     expect(next.showSecondaryPane).toBe(false);
@@ -108,7 +116,15 @@ describe("tui state", () => {
           theme: "artbot",
           density: "comfortable",
           showSecondaryPane: false,
-          diffLayout: "auto"
+          diffLayout: "auto",
+          experimental: {
+            enabled: false,
+            plannerModel: "gemini-pro-latest",
+            researchMode: "deep_research_max",
+            warnOnRun: true,
+            spendCapReminderUsd: 20,
+            openFullReportAfterRun: true
+          }
         },
         hasSetupIssues: false
       })
@@ -124,7 +140,15 @@ describe("tui state", () => {
           theme: "artbot",
           density: "comfortable",
           showSecondaryPane: false,
-          diffLayout: "auto"
+          diffLayout: "auto",
+          experimental: {
+            enabled: false,
+            plannerModel: "gemini-pro-latest",
+            researchMode: "deep_research_max",
+            warnOnRun: true,
+            spendCapReminderUsd: 20,
+            openFullReportAfterRun: true
+          }
         },
         hasSetupIssues: false
       })
@@ -142,7 +166,15 @@ describe("tui state", () => {
           theme: "artbot",
           density: "comfortable",
           showSecondaryPane: true,
-          diffLayout: "auto"
+          diffLayout: "auto",
+          experimental: {
+            enabled: false,
+            plannerModel: "gemini-pro-latest",
+            researchMode: "deep_research_max",
+            warnOnRun: true,
+            spendCapReminderUsd: 20,
+            openFullReportAfterRun: true
+          }
         },
         hasSetupIssues: true
       })

@@ -400,7 +400,15 @@ function InkSetupOnboarding(props: {
         theme: "artbot",
         density: "comfortable",
         showSecondaryPane: true,
-        diffLayout: "auto"
+        diffLayout: "auto",
+        experimental: {
+          enabled: false,
+          plannerModel: "gemini-pro-latest",
+          researchMode: "deep_research_max",
+          warnOnRun: true,
+          spendCapReminderUsd: 20,
+          openFullReportAfterRun: true
+        }
       }
     })
   );

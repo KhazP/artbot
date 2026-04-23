@@ -627,7 +627,7 @@ function OverlayPanel(props: {
 
   if (props.overlay === "settings") {
     const options = getTuiThemeOptions();
-    const settingRows = [
+    const generalRows = [
       `${translate(props.locale, "tui.settings.language")}: ${translate(props.locale, "tui.language.english")}`,
       `${translate(props.locale, "tui.settings.language")}: ${translate(props.locale, "tui.language.turkish")}`,
       `${translate(props.locale, "tui.settings.theme")}: ${options[0]?.label ?? "ArtBot"}`,
@@ -641,6 +641,27 @@ function OverlayPanel(props: {
           : translate(props.locale, "tui.settings.value.disabled")
       }`
     ];
+    const experimentalRows = [
+      `${translate(props.locale, "tui.settings.experimental.enabled")}: ${
+        props.preferences.experimental.enabled
+          ? translate(props.locale, "tui.settings.value.enabled")
+          : translate(props.locale, "tui.settings.value.disabled")
+      }`,
+      `${translate(props.locale, "tui.settings.experimental.plannerModel")}: ${props.preferences.experimental.plannerModel}`,
+      `${translate(props.locale, "tui.settings.experimental.researchMode")}: ${props.preferences.experimental.researchMode}`,
+      `${translate(props.locale, "tui.settings.experimental.warnOnRun")}: ${
+        props.preferences.experimental.warnOnRun
+          ? translate(props.locale, "tui.settings.value.enabled")
+          : translate(props.locale, "tui.settings.value.disabled")
+      }`,
+      `${translate(props.locale, "tui.settings.experimental.spendCapReminder")}: $${props.preferences.experimental.spendCapReminderUsd}`,
+      `${translate(props.locale, "tui.settings.experimental.openFullReportAfterRun")}: ${
+        props.preferences.experimental.openFullReportAfterRun
+          ? translate(props.locale, "tui.settings.value.enabled")
+          : translate(props.locale, "tui.settings.value.disabled")
+      }`
+    ];
+    const settingRows = [...generalRows, ...experimentalRows];
 
     return (
       <Panel
@@ -649,8 +670,25 @@ function OverlayPanel(props: {
         subtitle={translate(props.locale, "tui.overlay.settings.subtitle")}
         accentColor={props.theme.colors.overlayBorder}
       >
+        <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.settings.section.general")}</Text>
         {settingRows.map((row, index) => {
           const selected = index === props.selectedSettingsIndex;
+          if (index === generalRows.length) {
+            return (
+              <Box key="experimental-settings" flexDirection="column">
+                <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.settings.section.experimental")}</Text>
+                <Text color={props.theme.colors.muted}>
+                  {translate(props.locale, "tui.settings.experimental.summary")}
+                </Text>
+                <Text color={props.theme.colors.warning}>
+                  {translate(props.locale, "tui.settings.experimental.detail")}
+                </Text>
+                <Text color={selected ? props.theme.colors.selection : props.theme.colors.text}>
+                  {selected ? ">" : " "} {row}
+                </Text>
+              </Box>
+            );
+          }
           return (
             <Text key={row} color={selected ? props.theme.colors.selection : props.theme.colors.text}>
               {selected ? ">" : " "} {row}
