@@ -48,7 +48,10 @@ function readManifest(manifestPath: string): RuntimeStorageManifest | null {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
       `Runtime storage guard manifest is unreadable at ${manifestPath}. Reason: ${reason}. ` +
-      "Delete the manifest file and restart API/worker/CLI."
+      "Delete the manifest file and restart API/worker/CLI.",
+      {
+        cause: error
+      }
     );
   }
 

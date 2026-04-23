@@ -395,6 +395,19 @@ pnpm test             # Run monorepo test suite
 - [Docs Index](docs/README.md)
 - [Changelog](CHANGELOG.md)
 
+## 🧬 Datasets, Models, and Dependencies
+
+- **Datasets used for evaluation and examples:** [`data/fixtures`](data/fixtures) and [`data/golden-results`](data/golden-results)
+- **Source-domain coverage and policies:** [`docs/source-matrix.md`](docs/source-matrix.md)
+- **Model integrations and constraints:** local OpenAI-compatible endpoints (for example LM Studio) and Gemini support are documented in [Model Policy](#-model-policy)
+- **Dependencies and contributor acknowledgements:** workspace dependencies are declared in [`package.json`](package.json) and [`pnpm-lock.yaml`](pnpm-lock.yaml); contributors are listed in the [GitHub contributors graph](https://github.com/KhazP/artbot/graphs/contributors)
+
+## 🔁 Reproducibility Notes
+
+- Core normalization and valuation logic are deterministic for a fixed input set.
+- Runtime randomness is used only for operational concerns (for example temporary IDs and retry jitter), not for scoring formulas.
+- Reproducible validation inputs/outputs are committed under [`data/fixtures`](data/fixtures) and [`data/golden-results`](data/golden-results).
+
 ---
 
 ## 🤝 Community
