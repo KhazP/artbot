@@ -27,6 +27,7 @@ apps/*/data/*.db
 apps/*/data/**/*.db
 data/**/*.db
 playwright/.auth
+apps/cli/undefined/
 
 # Internal planning/audit docs should remain local
 docs/internal/

@@ -83,14 +83,14 @@ function resolveInitialHistory(restore?: TuiSessionSnapshot): string[] {
   return restore?.history ? [...restore.history] : [];
 }
 
-function resolveInitialSidePane(initialAssessment: SetupAssessment | null, startup?: InteractiveStartupState, restore?: TuiSessionSnapshot): SidePane {
+function resolveInitialSidePane(_initialAssessment: SetupAssessment | null, startup?: InteractiveStartupState, restore?: TuiSessionSnapshot): SidePane {
   if (startup?.sidePane) {
     return startup.sidePane;
   }
   if (restore?.sidePane) {
     return restore.sidePane;
   }
-  return initialAssessment?.issues.length ? "setup" : "none";
+  return "none";
 }
 
 function resolveInitialFocusTarget(startup?: InteractiveStartupState, restore?: TuiSessionSnapshot): TuiSurfaceState["focusTarget"] {
@@ -265,7 +265,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [busy, setBusy] = useState(false);
   const [activeArtist, setActiveArtist] = useState("");
-  const [message, setMessage] = useState(startup?.message ?? "Slash command ready.");
+  const [message, setMessage] = useState(startup?.message ?? "");
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [browserReportPath, setBrowserReportPath] = useState<string | null>(null);
   const [fxCacheStats, setFxCacheStats] = useState<PipelineDetails["fx_cache_stats"] | undefined>(undefined);
@@ -1228,12 +1228,13 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
           </Box>
         </Box>
 
-        <Box justifyContent="space-between">
-          <Text color={messageColor} dimColor>
-            {message}
-          </Text>
-          <Text color={theme.colors.muted}>{composerState.helperText}</Text>
-        </Box>
+        {message ? (
+          <Box>
+            <Text color={messageColor} dimColor>
+              {message}
+            </Text>
+          </Box>
+        ) : null}
 
         <TuiKeyHintRail theme={theme} overlay={uiState.overlay} locale={locale} />
       </Box>

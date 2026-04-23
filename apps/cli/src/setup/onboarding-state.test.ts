@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { applyProviderPreset, buildOnboardingDraft, inferProviderPreset, validateOnboardingDraft } from "./onboarding-state.js";
+import {
+  applyProviderPreset,
+  buildOnboardingDraft,
+  buildOnboardingReviewItems,
+  inferProviderPreset,
+  maskSecretValue,
+  validateOnboardingDraft
+} from "./onboarding-state.js";
 
 describe("setup onboarding state", () => {
   it("infers NVIDIA presets from the configured base URL", () => {
@@ -77,5 +84,28 @@ describe("setup onboarding state", () => {
         reportSurface: "ask"
       })
     ).toBe("base_url_required");
+  });
+
+  it("masks API keys in onboarding display and review state", () => {
+    expect(maskSecretValue("")).toBe("-");
+    expect(maskSecretValue("lm-studio")).toBe("not required for local LM Studio");
+    expect(maskSecretValue("secret-token")).toBe("configured (hidden)");
+
+    const items = buildOnboardingReviewItems({
+      language: "en",
+      providerPreset: "custom",
+      llmBaseUrl: "https://example.com/v1",
+      llmApiKey: "secret-token",
+      llmModel: "foo",
+      stagehandMode: "LOCAL",
+      runtimeMode: "remote",
+      apiBaseUrl: "http://localhost:4000",
+      enableOptionalProbes: false,
+      enableLicensedIntegrations: false,
+      reportSurface: "ask"
+    });
+
+    expect(items).toContainEqual({ label: "API key", value: "configured (hidden)" });
+    expect(items).not.toContainEqual({ label: "API key", value: "secret-token" });
   });
 });

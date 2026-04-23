@@ -133,11 +133,24 @@ export function validateOnboardingDraft(draft: OnboardingDraft): string | null {
   return null;
 }
 
+export function maskSecretValue(value: string): string {
+  if (!value.trim()) {
+    return "-";
+  }
+
+  if (value === "lm-studio") {
+    return "not required for local LM Studio";
+  }
+
+  return "configured (hidden)";
+}
+
 export function buildOnboardingReviewItems(draft: OnboardingDraft): OnboardingReviewItem[] {
   return [
     { label: "Language", value: draft.language },
     { label: "LLM preset", value: draft.providerPreset },
     { label: "Base URL", value: draft.llmBaseUrl },
+    { label: "API key", value: maskSecretValue(draft.llmApiKey) },
     { label: "Model", value: draft.llmModel },
     { label: "Stagehand", value: draft.stagehandMode },
     { label: "Backend mode", value: draft.runtimeMode },

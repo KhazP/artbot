@@ -65,6 +65,7 @@ describe("setup onboarding interactions", () => {
     const draft = buildDraft({
       providerPreset: "custom",
       llmBaseUrl: "https://example.com/v1",
+      llmApiKey: "secret-token",
       llmModel: "custom/model"
     });
     const rows = buildOnboardingRows("llm", "en", draft, 3);
@@ -76,6 +77,11 @@ describe("setup onboarding interactions", () => {
     expect(rows[1]).toMatchObject({
       id: "llmBaseUrl",
       value: "https://example.com/v1"
+    });
+    expect(rows[2]).toMatchObject({
+      id: "llmApiKey",
+      value: "configured (hidden)",
+      secret: true
     });
     expect(rows[3]).toMatchObject({
       id: "llmModel",

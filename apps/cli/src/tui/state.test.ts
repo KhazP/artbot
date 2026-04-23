@@ -181,6 +181,32 @@ describe("tui state", () => {
     ).toBe("none");
   });
 
+  it("keeps the idle screen focused even when setup has warnings", () => {
+    expect(
+      resolveDisplayedSidePane({
+        primaryView: "idle",
+        requestedSidePane: "none",
+        sidePaneDismissed: false,
+        preferences: {
+          language: "en",
+          theme: "artbot",
+          density: "comfortable",
+          showSecondaryPane: true,
+          diffLayout: "auto",
+          experimental: {
+            enabled: false,
+            plannerModel: "gemini-pro-latest",
+            researchMode: "deep_research_max",
+            warnOnRun: true,
+            spendCapReminderUsd: 20,
+            openFullReportAfterRun: true
+          }
+        },
+        hasSetupIssues: true
+      })
+    ).toBe("none");
+  });
+
   it("switches the composer into report chooser mode when a completed run asks how to render", () => {
     const next = openOverlay(DEFAULT_SURFACE_STATE, "report-surface");
     const composer = buildComposerState({

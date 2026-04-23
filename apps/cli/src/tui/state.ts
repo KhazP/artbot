@@ -154,12 +154,12 @@ export function resolveDisplayedSidePane(input: {
     return "none";
   }
 
-  if (input.hasSetupIssues) {
-    return "setup";
-  }
-
   if (input.primaryView === "idle") {
     return "none";
+  }
+
+  if (input.hasSetupIssues) {
+    return "setup";
   }
 
   return "run-details";

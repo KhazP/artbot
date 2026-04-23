@@ -74,6 +74,11 @@ async function main() {
     env: cliEnv
   });
 
+  run(process.execPath, [cliEntry, "trust", "allow"], {
+    cwd: tempRoot,
+    env: cliEnv
+  });
+
   try {
     run(process.execPath, [cliEntry, "--api-base-url", apiBaseUrl, "backend", "start"], {
       cwd: tempRoot,

@@ -11,6 +11,7 @@ import {
   buildOnboardingDraft,
   buildOnboardingExplainer,
   buildOnboardingReviewItems,
+  maskSecretValue,
   validateOnboardingDraft,
   type OnboardingRuntimeMode,
   type OnboardingDraft,
@@ -56,6 +57,7 @@ export interface OnboardingRowDescriptor {
   focused: boolean;
   chosen: boolean;
   field?: EditableField;
+  secret?: boolean;
 }
 
 function buildExternalOpenCommand(target: string, platform = process.platform): { command: string; args: string[] } {
@@ -234,10 +236,11 @@ export function buildOnboardingRows(
         id: "llmApiKey",
         kind: "field",
         label: translate(locale, "onboarding.field.apiKey"),
-        value: draft.llmApiKey || "-",
+        value: maskSecretValue(draft.llmApiKey),
         focused: isFocused(2),
         chosen: false,
-        field: "llmApiKey"
+        field: "llmApiKey",
+        secret: true
       },
       {
         id: "llmModel",
@@ -592,8 +595,8 @@ function InkSetupOnboarding(props: {
         <Box marginTop={1} flexWrap="wrap">
           {STEP_ORDER.map((entry, index) => (
             <Box key={entry} marginRight={1}>
-              <Text color={index === stepIndex ? "cyan" : "gray"}>
-                {index + 1}. {stepLabel(locale, entry)}
+              <Text color={index === stepIndex ? "cyan" : index < stepIndex ? "green" : "gray"} bold={index === stepIndex}>
+                {index < stepIndex ? "✓" : index === stepIndex ? "●" : "○"} {index + 1}. {stepLabel(locale, entry)}
               </Text>
             </Box>
           ))}
@@ -624,6 +627,7 @@ function InkSetupOnboarding(props: {
                 label={row.label}
                 value={row.value ?? "-"}
                 editValue={editValue}
+                secret={row.secret ?? false}
                 onChange={setEditValue}
                 onSubmit={commitEdit}
               />
@@ -675,6 +679,7 @@ function EditableRow(props: {
   label: string;
   value: string;
   editValue: string;
+  secret: boolean;
   onChange: (value: string) => void;
   onSubmit: () => void;
 }) {
@@ -682,7 +687,13 @@ function EditableRow(props: {
     return (
       <Box>
         <Text color="cyan">{buildRowPrefix("field", true, false)} {props.label}: </Text>
-        <TextInput value={props.editValue} onChange={props.onChange} onSubmit={props.onSubmit} />
+        <TextInput
+          value={props.editValue}
+          onChange={props.onChange}
+          onSubmit={props.onSubmit}
+          mask={props.secret ? "*" : undefined}
+        />
+        {props.secret ? <Text color="gray" dimColor> hidden</Text> : null}
       </Box>
     );
   }

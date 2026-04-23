@@ -140,18 +140,15 @@ export function TuiKeyHintRail({ theme, overlay, locale }: TuiKeyHintRailProps) 
               ];
 
   return (
-    <Box flexDirection="row" marginTop={1} justifyContent="space-between">
-      <Text color={theme.colors.muted}>Keyboard</Text>
-      <Box>
-        {items.map((item, index) => (
-          <Box key={`${item.key}-${item.label}`} marginLeft={index === 0 ? 0 : 2}>
-            <Text color={theme.colors.keycap} bold>
-              [{item.key}]
-            </Text>
-            <Text color={theme.colors.muted}> {item.label}</Text>
-          </Box>
-        ))}
-      </Box>
+    <Box flexDirection="row" marginTop={1}>
+      {items.map((item, index) => (
+        <Box key={`${item.key}-${item.label}`} marginLeft={index === 0 ? 0 : 2}>
+          <Text color={theme.colors.keycap} bold>
+            {item.key}
+          </Text>
+          <Text color={theme.colors.muted}> {item.label}</Text>
+        </Box>
+      ))}
     </Box>
   );
 }
@@ -173,69 +170,51 @@ function TopStatusStrip(props: {
         ? "ready"
         : props.primaryView;
   const modelId = props.assessment?.llmHealth.modelId;
-  const quantization = extractQuantization(modelId);
   const activeSessions = props.assessment?.sessionStates.filter((session) => session.exists && !session.expired).length ?? 0;
   const totalSessions = props.assessment?.sessionStates.length ?? 0;
-  const sandboxLabel = resolveSandboxMode();
-  const thinkingActive = props.primaryView === "running";
-  const providerLabel = resolveLlmProviderLabel(props.assessment?.llmProvider, props.locale);
-  const stagehandLabel = props.assessment?.stagehandMode ?? "DISABLED";
+  const issueCount = resolveIssueList(props.assessment).length;
+  const modeTone =
+    props.primaryView === "failed"
+      ? "warning"
+      : props.primaryView === "running"
+        ? "thinking"
+        : props.primaryView === "completed"
+          ? "local"
+          : "accent";
 
   return (
-    <Panel
-      theme={props.theme}
-      title="ArtBot"
-      subtitle={`OpenAI-compatible operator cockpit · ${props.preferences.theme} theme · ${props.preferences.diffLayout} layout`}
-    >
-      <Box flexDirection="column">
-        <Box justifyContent="space-between" flexWrap="wrap">
-          <Box>
-            <InlineChip theme={props.theme} tone="accent" label={`MODE ${modeLabel.toUpperCase()}`} />
-            <InlineChip theme={props.theme} tone="muted" label={`FOCUS ${props.focusTarget.toUpperCase()}`} />
-            <InlineChip theme={props.theme} tone="local" label={providerLabel.toUpperCase()} />
-            <InlineChip theme={props.theme} tone="muted" label={`STAGEHAND ${stagehandLabel}`} />
-            <InlineChip theme={props.theme} tone="sandbox" label={sandboxLabel} />
-          </Box>
-          <Box>
-            <StatusChip
-              theme={props.theme}
-              label={translate(props.locale, "tui.status.llm")}
-              state={props.assessment?.llmHealth.ok ? "healthy" : "offline"}
-              detail={modelId ?? props.assessment?.llmHealth.reason ?? "checking"}
-            />
-            <StatusChip
-              theme={props.theme}
-              label={translate(props.locale, "tui.status.api")}
-              state={props.assessment?.apiHealth.ok ? "healthy" : "offline"}
-              detail={props.assessment?.apiHealth.reason ?? props.assessment?.apiBaseUrl ?? "checking"}
-            />
-            <StatusChip
-              theme={props.theme}
-              label={translate(props.locale, "tui.status.auth")}
-              state={props.assessment ? (activeSessions > 0 ? "healthy" : "degraded") : "unknown"}
-              detail={props.assessment ? `${activeSessions}/${totalSessions}` : "checking"}
-            />
-          </Box>
-        </Box>
-        <Box marginTop={1} justifyContent="space-between" flexWrap="wrap">
-          <Box>
-            <InlineChip
-              theme={props.theme}
-              tone={thinkingActive ? "thinking" : "muted"}
-              label={thinkingActive ? "ACTIVITY RUNNING" : "ACTIVITY IDLE"}
-            />
-          </Box>
-          <Box>
-            <InlineChip theme={props.theme} tone="muted" label={`MODEL ${truncate(modelId ?? "not loaded", 32)}`} />
-            <InlineChip
-              theme={props.theme}
-              tone={quantization === "unknown" ? "warning" : "local"}
-              label={`QUANT ${quantization.toUpperCase()}`}
-            />
-          </Box>
-        </Box>
+    <Box justifyContent="space-between" flexWrap="wrap">
+      <Box>
+        <Text color={props.theme.colors.accent} bold>ArtBot</Text>
+        <Text color={props.theme.colors.muted}> · </Text>
+        <InlineChip theme={props.theme} tone={modeTone} label={modeLabel.toUpperCase()} />
       </Box>
-    </Panel>
+      <Box>
+        <StatusDot
+          theme={props.theme}
+          label="LLM"
+          ok={Boolean(props.assessment?.llmHealth.ok)}
+          detail={truncate(modelId ?? props.assessment?.llmHealth.reason ?? "checking", 28)}
+        />
+        <StatusDot
+          theme={props.theme}
+          label="API"
+          ok={Boolean(props.assessment?.apiHealth.ok)}
+          detail={props.assessment?.apiHealth.ok ? "ready" : truncate(props.assessment?.apiHealth.reason ?? "checking", 24)}
+        />
+        <StatusDot
+          theme={props.theme}
+          label="Auth"
+          ok={activeSessions > 0}
+          detail={props.assessment ? `${activeSessions}/${totalSessions}` : "checking"}
+        />
+        {issueCount ? (
+          <Box marginLeft={2}>
+            <InlineChip theme={props.theme} tone="warning" label={`${issueCount} setup`} />
+          </Box>
+        ) : null}
+      </Box>
+    </Box>
   );
 }
 
@@ -255,36 +234,35 @@ function PrimaryPane(props: {
     return (
       <Panel
         theme={props.theme}
-        title={translate(props.locale, "tui.shell.readyTitle")}
-        subtitle={translate(props.locale, "tui.shell.readySubtitle")}
+        title="Start"
         accentColor={props.focusTarget === "main" ? props.theme.colors.selection : undefined}
       >
         <Text color={props.theme.colors.text} bold>
-          {translate(props.locale, "tui.shell.startPrompt")}
+          Type an artist name, or use a command.
         </Text>
         <Box marginTop={1} flexDirection="column">
-          <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.quickActions")}</Text>
-          <Text color={props.theme.colors.accent}>/research &lt;artist&gt;</Text>
-          <Text color={props.theme.colors.accent}>/work &lt;artist&gt; --title &lt;title&gt;</Text>
-          <Text color={props.theme.colors.accent}>/runs</Text>
-          <Text color={props.theme.colors.accent}>/sources</Text>
-          <Text color={props.theme.colors.accent}>/normalize</Text>
-          <Text color={props.theme.colors.accent}>/review</Text>
-          <Text color={props.theme.colors.accent}>/fx</Text>
-          <Text color={props.theme.colors.accent}>/errors</Text>
-          <Text color={props.theme.colors.accent}>/setup</Text>
-          <Text color={props.theme.colors.accent}>/settings</Text>
+          <CommandActionRows
+            theme={props.theme}
+            rows={[
+              { command: "/research <artist>", detail: "artist market research" },
+              { command: "/work <artist> --title <title>", detail: "specific artwork" },
+              { command: "/runs", detail: "recent runs" },
+              { command: "/setup", detail: issueCount ? `${issueCount} setup items` : "setup is healthy" },
+              { command: "/help", detail: "all commands" }
+            ]}
+          />
         </Box>
         {props.assessment?.recommendedNextAction ? (
           <Box marginTop={1} flexDirection="column">
-            <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.setupNext")}</Text>
-            <Text color={props.theme.colors.text}>{props.assessment.recommendedNextAction}</Text>
+            <Text color={issueCount ? props.theme.colors.warning : props.theme.colors.muted}>
+              Setup: {props.assessment.recommendedNextAction}
+            </Text>
           </Box>
         ) : null}
-        <Box marginTop={1}>
-          <Metric tone="success" theme={props.theme} label="API" value={props.assessment?.apiHealth.ok ? "ready" : "offline"} />
-          <Metric tone="accent" theme={props.theme} label="Profiles" value={String(props.assessment?.profiles.length ?? 0)} />
-          <Metric tone={issueCount ? "warning" : "success"} theme={props.theme} label="Setup" value={issueCount ? `${issueCount} issues` : "healthy"} />
+        <Box marginTop={1} flexWrap="wrap">
+          <ReadinessItem theme={props.theme} label="API" value={props.assessment?.apiHealth.ok ? "ready" : "offline"} tone={props.assessment?.apiHealth.ok ? "success" : "danger"} />
+          <ReadinessItem theme={props.theme} label="Profiles" value={String(props.assessment?.profiles.length ?? 0)} tone="accent" />
+          <ReadinessItem theme={props.theme} label="Setup" value={issueCount ? `${issueCount} items` : "healthy"} tone={issueCount ? "warning" : "success"} />
         </Box>
       </Panel>
     );
@@ -605,18 +583,23 @@ function OverlayPanel(props: {
         accentColor={props.theme.colors.overlayBorder}
       >
         <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.helpCommands")}</Text>
-        <Text color={props.theme.colors.accent}>/research &lt;artist&gt;</Text>
-        <Text color={props.theme.colors.accent}>/work &lt;artist&gt; --title &lt;title&gt;</Text>
-        <Text color={props.theme.colors.accent}>/runs</Text>
-        <Text color={props.theme.colors.accent}>/sources</Text>
-        <Text color={props.theme.colors.accent}>/normalize</Text>
-        <Text color={props.theme.colors.accent}>/review</Text>
-        <Text color={props.theme.colors.accent}>/fx</Text>
-        <Text color={props.theme.colors.accent}>/errors</Text>
-        <Text color={props.theme.colors.accent}>/setup</Text>
-        <Text color={props.theme.colors.accent}>/auth</Text>
-        <Text color={props.theme.colors.accent}>/settings</Text>
-        <Text color={props.theme.colors.accent}>/report cli | /report web</Text>
+        <CommandActionRows
+          theme={props.theme}
+          rows={[
+            { command: "/research <artist>", detail: translate(props.locale, "tui.commandHint.research") },
+            { command: "/work <artist> --title <title>", detail: translate(props.locale, "tui.commandHint.work") },
+            { command: "/runs", detail: translate(props.locale, "tui.commandHint.runs") },
+            { command: "/sources", detail: "inspect source attempts and priced outcomes" },
+            { command: "/normalize", detail: "inspect normalized prices and FX reasoning" },
+            { command: "/review", detail: "open the duplicate review queue" },
+            { command: "/fx", detail: "inspect cached exchange rates" },
+            { command: "/errors", detail: "inspect recent transport and parse failures" },
+            { command: "/setup", detail: translate(props.locale, "tui.commandHint.setup") },
+            { command: "/auth", detail: translate(props.locale, "tui.commandHint.auth") },
+            { command: "/settings", detail: "change language, theme, density, and report defaults" },
+            { command: "/report cli | /report web", detail: "choose the completed-run report surface" }
+          ]}
+        />
         <Box marginTop={1} flexDirection="column">
           <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.helpShortcuts")}</Text>
           <Text color={props.theme.colors.text}>Ctrl+K help · Ctrl+R runs · Ctrl+S setup · Ctrl+T settings · Ctrl+U pane</Text>
@@ -778,17 +761,53 @@ function Panel(props: {
   );
 }
 
+function CommandActionRows(props: { theme: TuiTheme; rows: Array<{ command: string; detail: string }> }) {
+  return (
+    <Box flexDirection="column">
+      {props.rows.map((row) => (
+        <Text key={row.command} color={props.theme.colors.text}>
+          <Text color={props.theme.colors.accent} bold>
+            {row.command.padEnd(32)}
+          </Text>
+          <Text color={props.theme.colors.muted}>{row.detail}</Text>
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+type ShellTone = "accent" | "success" | "warning" | "danger" | "muted";
+
+function toneToColor(theme: TuiTheme, tone: ShellTone): string {
+  if (tone === "success") return theme.colors.success;
+  if (tone === "warning") return theme.colors.warning;
+  if (tone === "danger") return theme.colors.danger;
+  if (tone === "muted") return theme.colors.muted;
+  return theme.colors.accent;
+}
+
+function ReadinessItem(props: { theme: TuiTheme; label: string; value: string; tone: ShellTone }) {
+  return (
+    <Box marginRight={2}>
+      <Text color={props.theme.colors.muted}>{props.label} </Text>
+      <Text color={toneToColor(props.theme, props.tone)} bold>
+        {props.value}
+      </Text>
+    </Box>
+  );
+}
+
+function StatusDot(props: { theme: TuiTheme; label: string; ok: boolean; detail: string }) {
+  return (
+    <Box marginLeft={2}>
+      <Text color={props.ok ? props.theme.colors.success : props.theme.colors.warning}>● {props.label}</Text>
+      <Text color={props.theme.colors.muted}> {props.detail}</Text>
+    </Box>
+  );
+}
+
 function Metric(props: { theme: TuiTheme; label: string; value: string; tone: "accent" | "success" | "warning" | "danger" | "muted" }) {
-  const color =
-    props.tone === "success"
-      ? props.theme.colors.success
-      : props.tone === "warning"
-        ? props.theme.colors.warning
-        : props.tone === "danger"
-          ? props.theme.colors.danger
-          : props.tone === "muted"
-            ? props.theme.colors.muted
-            : props.theme.colors.accent;
+  const color = toneToColor(props.theme, props.tone);
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginRight={1}>
@@ -796,29 +815,6 @@ function Metric(props: { theme: TuiTheme; label: string; value: string; tone: "a
       <Text color={color} bold>
         {props.value}
       </Text>
-    </Box>
-  );
-}
-
-function StatusChip(props: {
-  theme: TuiTheme;
-  label: string;
-  state: "healthy" | "degraded" | "offline" | "unknown";
-  detail: string;
-}) {
-  const color =
-    props.state === "healthy"
-      ? props.theme.colors.success
-      : props.state === "degraded"
-        ? props.theme.colors.warning
-        : props.state === "offline"
-          ? props.theme.colors.danger
-          : props.theme.colors.muted;
-
-  return (
-    <Box marginLeft={2}>
-      <Text color={color}>● {props.label}</Text>
-      <Text color={props.theme.colors.muted}>: {truncate(props.detail, 22)}</Text>
     </Box>
   );
 }
@@ -850,37 +846,10 @@ function InlineChip(props: {
   );
 }
 
-function resolveSandboxMode(): string {
-  const airGapped = (process.env.ARTBOT_AIR_GAPPED ?? "").trim().toLowerCase();
-  if (airGapped === "1" || airGapped === "true" || airGapped === "yes") {
-    return "ISOLATED: NO-NETWORK";
-  }
-
-  const mode = (process.env.ARTBOT_SANDBOX_MODE ?? "").trim();
-  if (mode) {
-    return `ISOLATED: ${mode.toUpperCase()}`;
-  }
-
-  return "ISOLATED: LOCAL-RUNTIME";
-}
-
 function resolveIssueList(assessment: SetupAssessment | null): SetupAssessment["issues"] {
   if (!assessment) return [];
   if (assessment.issues.length) return assessment.issues;
   return [...assessment.blockingIssues, ...assessment.optionalIssues];
-}
-
-function resolveLlmProviderLabel(provider: SetupAssessment["llmProvider"] | undefined, locale: AppLocale): string {
-  switch (provider) {
-    case "local_lm_studio":
-      return translate(locale, "setup.provider.localLmStudio");
-    case "nvidia":
-      return translate(locale, "setup.provider.nvidia");
-    case "openai_compatible_custom":
-      return translate(locale, "setup.provider.custom");
-    default:
-      return translate(locale, "setup.provider.openaiCompatible");
-  }
 }
 
 export function extractQuantization(modelId: string | undefined): string {
