@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   ReportCanary,
+  ReportDeepResearch,
   ResearchRunReportData,
   ResearchRunReportItem,
   ReportAction,
@@ -143,6 +144,34 @@ const runPayloadSchema = z.object({
     }).passthrough().optional(),
     resultsPath: z.string().optional()
   }).passthrough(),
+  deepResearch: z.object({
+    enabled: z.boolean(),
+    status: z.string(),
+    summary: z.string().nullable().optional(),
+    promptPlan: z.object({
+      normalRunSummary: z.string(),
+      missingEvidenceSummary: z.string(),
+      researchObjectives: z.array(z.string()),
+      followUpQuestions: z.array(z.string()),
+      prioritySearchTargets: z.array(z.string()),
+      finalReportInstructions: z.string()
+    }).nullable().optional(),
+    reportMarkdown: z.string().nullable().optional(),
+    citations: z.array(z.object({
+      title: z.string(),
+      url: z.string(),
+      snippet: z.string().optional()
+    })).optional(),
+    warnings: z.array(z.string()).optional(),
+    providerMetadata: z.object({
+      plannerModel: z.string(),
+      researchMode: z.string(),
+      agentId: z.string().optional(),
+      planningDurationMs: z.number().optional(),
+      researchDurationMs: z.number().optional(),
+      completedAt: z.string().optional()
+    }).optional()
+  }).optional(),
   summary: z.object({
     accepted_records: z.number().int().nonnegative().default(0),
     rejected_candidates: z.number().int().nonnegative().default(0),
@@ -308,6 +337,36 @@ const runPayloadSchema = z.object({
   })).optional(),
   gaps: z.array(z.string()).optional()
 }).passthrough();
+
+function buildDeepResearch(input: z.infer<typeof runPayloadSchema>["deepResearch"]): ReportDeepResearch | null {
+  if (!input) return null;
+
+  return {
+    enabled: input.enabled,
+    status: input.status,
+    summary: input.summary ?? null,
+    promptPlan: input.promptPlan ?? null,
+    reportMarkdown: input.reportMarkdown ?? null,
+    citations: (input.citations ?? []).map((citation) => ({
+      title: citation.title,
+      url: citation.url,
+      snippet: citation.snippet
+    })),
+    warnings: input.warnings ?? [],
+    providerMetadata: [
+      input.providerMetadata?.plannerModel ? `Planner model: ${input.providerMetadata.plannerModel}` : null,
+      input.providerMetadata?.researchMode ? `Research mode: ${input.providerMetadata.researchMode}` : null,
+      input.providerMetadata?.agentId ? `Agent: ${input.providerMetadata.agentId}` : null,
+      typeof input.providerMetadata?.planningDurationMs === "number"
+        ? `Planning: ${(input.providerMetadata.planningDurationMs / 1000).toFixed(1)}s`
+        : null,
+      typeof input.providerMetadata?.researchDurationMs === "number"
+        ? `Research: ${(input.providerMetadata.researchDurationMs / 1000).toFixed(1)}s`
+        : null,
+      input.providerMetadata?.completedAt ? `Completed: ${input.providerMetadata.completedAt}` : null
+    ].filter((entry): entry is string => Boolean(entry))
+  };
+}
 
 function buildSourceHealthItems(sourceHealth: Record<string, number>): ReportDistributionItem[] {
   return Object.entries(sourceHealth)
@@ -794,6 +853,7 @@ function normalizeExternalReport(input: z.infer<typeof externalReportSchema>): R
     ),
     failureBreakdown: [],
     localAi: null,
+    deepResearch: null,
     gaps: [],
     diagnosticsNotes: input.valuation?.generated
       ? []
@@ -828,6 +888,7 @@ function normalizeRunPayload(input: z.infer<typeof runPayloadSchema>): ResearchR
   const canaries = buildCanaries(summary);
   const discoveryDiagnostics = buildDiscoveryDiagnostics(summary);
   const localAi = buildLocalAiAnalysis(summary);
+  const deepResearch = buildDeepResearch(input.deepResearch);
 
   return finalizeReport({
     runId: input.run.id,
@@ -873,9 +934,11 @@ function normalizeRunPayload(input: z.infer<typeof runPayloadSchema>): ResearchR
     reasonBreakdown: buildReasonItems(summary?.acceptance_reason_breakdown),
     failureBreakdown: buildReasonItems(summary?.failure_class_breakdown),
     localAi,
+    deepResearch,
     gaps: input.gaps ?? [],
     diagnosticsNotes: [
       ...(input.valuation?.generated ?? summary?.valuation_generated ? [] : [valuationReason]),
+      ...(deepResearch?.summary ? [`Experimental AI research: ${deepResearch.summary}`] : []),
       ...(localAi
         ? [
             `Local AI: accepted=${localAi.accepted} queued=${localAi.queued} rejected=${localAi.rejected} veto=${localAi.deterministicVetoCount}${localAi.model ? ` · model=${localAi.model}` : ""}`

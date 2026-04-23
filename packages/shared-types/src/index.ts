@@ -1,5 +1,6 @@
 export * from "./enums.js";
 export * from "./env.js";
+export * from "./deep-research.js";
 export * from "./query.js";
 export * from "./record.js";
 export * from "./normalization.js";

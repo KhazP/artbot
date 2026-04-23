@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AcceptanceReason, FailureClass, RunStatus, RunType, SourceAccessStatus } from "./enums.js";
+import { deepResearchResultSchema } from "./deep-research.js";
 import { sourceAttemptSchema } from "./evidence.js";
 import {
   artistMarketInventorySummarySchema,
@@ -192,6 +193,7 @@ export const runDetailsResponseSchema = z.object({
   summary: runSummarySchema,
   records: z.array(priceRecordSchema),
   attempts: z.array(sourceAttemptSchema),
+  deepResearch: deepResearchResultSchema.optional(),
   source_plan: z.array(sourcePlanItemSchema).optional(),
   recommended_actions: z.array(recommendedActionSchema).optional(),
   artifact_manifest: artifactManifestSchema.optional(),

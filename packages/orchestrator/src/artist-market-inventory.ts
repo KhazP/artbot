@@ -68,6 +68,7 @@ import {
   scoreFrontierItem
 } from "./frontier-fairness.js";
 import { applyMergedLaneOutcome, captureLaneOutcome, mergeLaneOutcome, type LaneOutcome } from "./lane-outcomes.js";
+import { maybeRunDeepResearchAfterCompletion } from "./deep-research.js";
 import { buildEvaluationMetrics, buildRecommendedActions } from "./run-insights.js";
 
 interface TargetImageFeatures {
@@ -1435,6 +1436,21 @@ export class ArtistMarketInventoryOrchestrator {
     writeArtifactManifest(runRoot, artifactManifest);
 
     this.storage.completeRun(run.id, reportPath, resultsPath);
+    await maybeRunDeepResearchAfterCompletion({
+      runId: run.id,
+      resultsPath,
+      payload: {
+        run,
+        summary,
+        local_ai_decisions: clustered.localAiDecisions,
+        source_plan: sourcePlan,
+        recommended_actions: recommendedActions,
+        inventory_summary: inventorySummary,
+        records: clustered.inventory,
+        attempts,
+        gaps: []
+      }
+    });
   }
 
   private async planInventorySources(run: RunEntity): Promise<SourcePlanningResult> {

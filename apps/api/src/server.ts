@@ -11,6 +11,7 @@ import {
   acceptanceReasonList,
   artistMarketInventoryResultsPayloadSchema,
   artistMarketInventoryRequestSchema,
+  deepResearchResultSchema,
   failureClassList,
   researchArtistRequestSchema,
   researchWorkRequestSchema,
@@ -273,6 +274,7 @@ app.get("/runs/:id", async (request, reply) => {
   let recommendedActions: unknown[] = [];
   let persistedSourceHealth: unknown[] = [];
   let localAiDecisions: unknown[] = [];
+  let deepResearch: unknown = undefined;
   let persistedPayload: Record<string, unknown> | null = null;
   let persistedInventoryPayload: ArtistMarketInventoryResultsPayload | null = null;
   let persistedSummary: RunSummary | null = null;
@@ -308,6 +310,16 @@ app.get("/runs/:id", async (request, reply) => {
   const artifactManifest = details.run.resultsPath
     ? readArtifactManifest(path.join(path.dirname(details.run.resultsPath), ARTIFACT_MANIFEST_FILE))
     : null;
+  if (details.run.resultsPath) {
+    const deepResearchPath = path.join(path.dirname(details.run.resultsPath), "deep-research.json");
+    if (fs.existsSync(deepResearchPath)) {
+      try {
+        deepResearch = deepResearchResultSchema.parse(JSON.parse(fs.readFileSync(deepResearchPath, "utf-8")));
+      } catch {
+        deepResearch = undefined;
+      }
+    }
+  }
 
   const acceptedForEvidenceCount = details.records.length > 0
     ? details.records.length
@@ -410,6 +422,7 @@ app.get("/runs/:id", async (request, reply) => {
     summary,
     records: details.records,
     attempts: details.attempts,
+    deepResearch,
     source_plan: sourcePlan,
     recommended_actions: recommendedActions,
     artifact_manifest: artifactManifest ?? undefined,

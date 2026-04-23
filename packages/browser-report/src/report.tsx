@@ -8,6 +8,7 @@ import { z } from "zod";
 import { normalizeResearchRunReport } from "./normalize.js";
 import type {
   ReportCanary,
+  ReportDeepResearch,
   ResearchRunReportData,
   ReportAction,
   ReportComparable,
@@ -44,6 +45,7 @@ function metricValueTone(value: string): string {
 }
 
 function sectionTitleIcon(title: string) {
+  if (title.includes("Experimental")) return Sparkles;
   if (title.includes("Valuation")) return CircleDollarSign;
   if (title.includes("Diagnostics")) return ShieldAlert;
   if (title.includes("Record") || title.includes("Inventory")) return GlobeLock;
@@ -149,6 +151,28 @@ const diagnosticsPropsSchema = z.object({
   failures: z.array(reasonSchema),
   gaps: z.array(z.string()),
   notes: z.array(z.string())
+});
+
+const deepResearchPropsSchema = z.object({
+  enabled: z.boolean(),
+  status: z.string(),
+  summary: z.string().nullable(),
+  promptPlan: z.object({
+    normalRunSummary: z.string(),
+    missingEvidenceSummary: z.string(),
+    researchObjectives: z.array(z.string()),
+    followUpQuestions: z.array(z.string()),
+    prioritySearchTargets: z.array(z.string()),
+    finalReportInstructions: z.string()
+  }).nullable(),
+  reportMarkdown: z.string().nullable(),
+  citations: z.array(z.object({
+    title: z.string(),
+    url: z.string(),
+    snippet: z.string().optional()
+  })),
+  warnings: z.array(z.string()),
+  providerMetadata: z.array(z.string())
 });
 
 const actionSchema = z.object({
@@ -259,6 +283,10 @@ const catalog = (defineCatalog as (...args: any[]) => any)(schema, {
     DiagnosticsPanel: {
       props: diagnosticsPropsSchema,
       description: "Diagnostics, blockers, and gap breakdown"
+    },
+    ExperimentalResearchPanel: {
+      props: deepResearchPropsSchema,
+      description: "Experimental Gemini deep research output"
     },
     NextActionsPanel: {
       props: nextActionsPropsSchema,
@@ -491,6 +519,86 @@ const { registry } = defineRegistry(catalog, {
             </ul>
           </div>
         </div>
+      </div>
+    ),
+    ExperimentalResearchPanel: ({ props }: { props: ReportDeepResearch }) => (
+      <div className="space-y-4">
+        <div className="rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-4 text-sm text-fuchsia-100">
+          <div className="flex items-center gap-2 font-semibold">
+            <Sparkles className="h-4 w-4" />
+            Experimental, cloud-run, and potentially expensive
+          </div>
+          <div className="mt-2 space-y-1">
+            {props.warnings.length > 0
+              ? props.warnings.map((warning) => <div key={warning}>{warning}</div>)
+              : <div>This section supplements the normal ArtBot run and does not replace accepted evidence.</div>}
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Status</div>
+            <div className="mt-2 text-lg font-semibold text-white">{props.status}</div>
+            {props.summary ? <div className="mt-2 text-sm text-zinc-300">{props.summary}</div> : null}
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Provider metadata</div>
+            <div className="mt-2 space-y-1 text-sm text-zinc-300">
+              {props.providerMetadata.length > 0
+                ? props.providerMetadata.map((entry) => <div key={entry}>{entry}</div>)
+                : <div>No provider metadata recorded.</div>}
+            </div>
+          </div>
+        </div>
+
+        {props.promptPlan ? (
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 space-y-3">
+            <div className="text-sm font-semibold text-white">Planner brief</div>
+            <div className="text-sm text-zinc-300">{props.promptPlan.normalRunSummary}</div>
+            <div className="text-sm text-zinc-300">{props.promptPlan.missingEvidenceSummary}</div>
+            <div>
+              <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Objectives</div>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-zinc-300">
+                {props.promptPlan.researchObjectives.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">Follow-up questions</div>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-zinc-300">
+                {props.promptPlan.followUpQuestions.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          </div>
+        ) : null}
+
+        {props.reportMarkdown ? (
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <div className="text-sm font-semibold text-white">Deep Research report</div>
+            <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-300">{props.reportMarkdown}</pre>
+          </div>
+        ) : null}
+
+        {props.citations.length > 0 ? (
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+            <div className="text-sm font-semibold text-white">Linked sources</div>
+            <div className="mt-3 space-y-2">
+              {props.citations.map((citation) => (
+                <a
+                  key={`${citation.title}-${citation.url}`}
+                  className="block rounded-xl border border-zinc-800 px-3 py-2 text-sm text-sky-200 hover:border-sky-500/40 hover:bg-sky-500/5"
+                  href={citation.url}
+                >
+                  <div className="flex items-center gap-2 font-medium">
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    {citation.title}
+                  </div>
+                  <div className="mt-1 text-xs text-zinc-400">{citation.url}</div>
+                  {citation.snippet ? <div className="mt-1 text-xs text-zinc-300">{citation.snippet}</div> : null}
+                </a>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
     ),
     NextActionsPanel: ({ props }: { props: { actions: ReportAction[]; sourcePlan: ReportSourcePlanItem[] } }) => (
@@ -805,6 +913,24 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
     subtitle: "Acceptance reasons, failure classes, crawl gaps, and run notes."
   }, [diagnostics]);
 
+  const experimentalSection = input.deepResearch
+    ? add("Section", {
+      title: "Experimental AI Research",
+      subtitle: "Expensive Gemini-assisted follow-up analysis layered on top of the normal ArtBot run."
+    }, [
+      add("ExperimentalResearchPanel", {
+        enabled: input.deepResearch.enabled,
+        status: input.deepResearch.status,
+        summary: input.deepResearch.summary,
+        promptPlan: input.deepResearch.promptPlan,
+        reportMarkdown: input.deepResearch.reportMarkdown,
+        citations: input.deepResearch.citations,
+        warnings: input.deepResearch.warnings,
+        providerMetadata: input.deepResearch.providerMetadata
+      })
+    ])
+    : null;
+
   const root = add("Layout", {
     artist: input.artist,
     runId: input.runId,
@@ -812,7 +938,15 @@ export function buildResearchRunSpec(input: ResearchRunReportData): Record<strin
     runType: input.runType,
     analysisMode: input.analysisMode,
     createdAt: input.createdAt
-  }, [overview, reliabilitySection, valuationSection, nextActionsSection, recordsSection, diagnosticsSection]);
+  }, [
+    overview,
+    reliabilitySection,
+    valuationSection,
+    nextActionsSection,
+    recordsSection,
+    diagnosticsSection,
+    ...(experimentalSection ? [experimentalSection] : [])
+  ]);
 
   return {
     root,

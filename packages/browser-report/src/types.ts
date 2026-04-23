@@ -101,6 +101,32 @@ export interface ReportLocalAiAnalysis {
   avgLatencyMs: number | null;
 }
 
+export interface ReportDeepResearchCitation {
+  title: string;
+  url: string;
+  snippet?: string;
+}
+
+export interface ReportDeepResearchPlan {
+  normalRunSummary: string;
+  missingEvidenceSummary: string;
+  researchObjectives: string[];
+  followUpQuestions: string[];
+  prioritySearchTargets: string[];
+  finalReportInstructions: string;
+}
+
+export interface ReportDeepResearch {
+  enabled: boolean;
+  status: string;
+  summary: string | null;
+  promptPlan: ReportDeepResearchPlan | null;
+  reportMarkdown: string | null;
+  citations: ReportDeepResearchCitation[];
+  warnings: string[];
+  providerMetadata: string[];
+}
+
 export interface ReportSourcePlanItem {
   sourceName: string;
   venueName: string;
@@ -183,6 +209,7 @@ export interface ResearchRunReportData {
   reasonBreakdown: ReportReasonItem[];
   failureBreakdown: ReportReasonItem[];
   localAi: ReportLocalAiAnalysis | null;
+  deepResearch: ReportDeepResearch | null;
   gaps: string[];
   diagnosticsNotes: string[];
 }

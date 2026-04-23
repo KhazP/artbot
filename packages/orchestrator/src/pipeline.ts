@@ -52,6 +52,7 @@ import {
   evaluateDiscoveryCandidateWithLocalAi,
   type LocalAiRelevanceConfig
 } from "./local-ai-relevance.js";
+import { maybeRunDeepResearchAfterCompletion } from "./deep-research.js";
 import { buildEvaluationMetrics, buildRecommendedActions } from "./run-insights.js";
 
 export interface OrchestratorOptions {
@@ -1405,6 +1406,11 @@ export class ResearchOrchestrator {
     writeArtifactManifest(runRoot, artifactManifest);
 
     this.storage.completeRun(run.id, reportPath, resultsPath);
+    await maybeRunDeepResearchAfterCompletion({
+      runId: run.id,
+      resultsPath,
+      payload
+    });
 
     logger.info("Research run completed", {
       traceId,
