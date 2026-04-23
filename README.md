@@ -190,6 +190,7 @@ artbot runs pin --run-id <id>  # preserve a run before cleanup
 | Option                 | Description                   |
 | ---------------------- | ----------------------------- |
 | `--json`               | Strict JSON on stdout         |
+| `--output-format <f>`  | `text`, `json`, `stream-json` |
 | `--api-base-url <url>` | API endpoint override         |
 | `--api-key <key>`      | Authentication key            |
 | `--verbose`            | Verbose logging               |
@@ -220,6 +221,7 @@ pnpm --filter artbot dev -- --json runs pin --run-id <id>
 pnpm --filter artbot dev -- --json runs unpin --run-id <id>
 pnpm --filter artbot dev -- --json storage
 pnpm --filter artbot dev -- --json cleanup --dry-run
+pnpm --filter artbot dev -- --output-format stream-json runs watch --run-id <id>
 ```
 
 Plan generation can take roughly 45-60 seconds on a cold start. Keep the command running until the spinner completes.
@@ -229,6 +231,22 @@ Repo-specific automation guidance lives in `AGENTS.md`.
 The reusable Codex skill lives at `skills/artbot-cli`.
 
 Install it explicitly into Codex from a clone by copying or symlinking `skills/artbot-cli` into `~/.codex/skills/artbot-cli`, or use your normal GitHub-path skill installer flow. The npm package does not auto-write into `$CODEX_HOME`.
+
+Interactive setup, TUI launch, auth capture, and local backend start/stop now respect workspace trust:
+
+```bash
+pnpm --filter artbot dev -- trust status
+pnpm --filter artbot dev -- trust allow
+```
+
+Saved local session checkpoints are available for the Ink shell and `runs watch`:
+
+```bash
+pnpm --filter artbot dev -- sessions list
+pnpm --filter artbot dev -- sessions resume
+```
+
+The upstream inspiration matrix for this selective OSS CLI uplift lives in [docs/cli-oss-intake.md](docs/cli-oss-intake.md).
 
 ---
 
@@ -265,6 +283,7 @@ Each run produces a structured evidence directory:
 ```
 var/runs/<run_id>/
 ├── results.json
+├── deep-research.json   # Optional experimental Gemini sidecar
 ├── report.md
 └── evidence/
     ├── screenshots/       # Page captures
@@ -291,6 +310,26 @@ var/runs/<run_id>/
 | `LLM_API_KEY`             | OpenAI-compatible auth token (`lm-studio` locally) |
 | `STAGEHAND_MODE`          | `DISABLED` \| `LOCAL` \| `BROWSERBASE`             |
 | `GEMINI_API_KEY`          | Gemini API key                                     |
+| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED` | Enable post-run Gemini deep research |
+| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_PLANNER_MODEL` | Planner model (default `gemini-pro-latest`) |
+| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_WARN_ON_RUN` | Warn before expensive Gemini runs |
+| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_SPEND_CAP_REMINDER_USD` | Suggested AI Studio cap reminder |
+| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_OPEN_FULL_REPORT` | Auto-open browser report after enriched runs |
+
+### Experimental Gemini Deep Research
+
+- Opt in from `Settings > Experimental` in the TUI.
+- ArtBot always finishes normal browser research first.
+- If enabled, ArtBot runs `gemini-pro-latest` to build a deep-research brief, then sends the run summary plus that brief into Deep Research Max.
+- Output stays additive: it is written to `deep-research.json`, shown in CLI run summaries, and rendered in the browser report as `Experimental AI Research`.
+- This feature is cloud-based and expensive. Set a spend cap in Google AI Studio before heavy use.
+
+Inspect the result later with:
+
+```bash
+artbot runs deep-research --run-id <id>
+artbot runs deep-research --run-id <id> --web
+```
 
 > [!WARNING]
 > No hard-model escalation path is enabled in v1.

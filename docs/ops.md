@@ -28,6 +28,11 @@ Copy `.env.example` to `.env` and set:
 - `LLM_API_KEY` (optional; OpenAI-compatible auth token if required; local LM Studio can keep `lm-studio`)
 - `STAGEHAND_MODE` (`DISABLED` | `LOCAL` | `BROWSERBASE`; optional, onboarding defaults to `LOCAL`)
 - `GEMINI_API_KEY` (optional; schema-bound fallback extraction when provider is `gemini` or `auto`)
+- `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED` (optional; enables the post-run Gemini deep-research sidecar)
+- `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_PLANNER_MODEL` (optional; defaults to `gemini-pro-latest`)
+- `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_WARN_ON_RUN` (optional; default `true`)
+- `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_SPEND_CAP_REMINDER_USD` (optional; default `20`)
+- `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_OPEN_FULL_REPORT` (optional; default `true`)
 - `DISCOVERY_MAX_CANDIDATES_PER_SOURCE`
 - `DISCOVERY_MAX_VARIANTS`
 - `DISCOVERY_DOMAIN_THROTTLE_PER_SOURCE`
@@ -44,6 +49,14 @@ Stagehand mode notes:
 - `STAGEHAND_MODE=LOCAL` uses the configured `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` against a local Playwright browser.
 - `STAGEHAND_MODE=BROWSERBASE` uses Browserbase credentials instead of the local browser path.
 - `MODEL_CHEAP_DEFAULT` is still read as a compatibility fallback, but setup now keeps it synced from `LLM_MODEL` during the transition.
+
+Experimental Gemini deep-research notes:
+
+- The feature is off by default and is configured from `Settings > Experimental` in the TUI.
+- Normal Playwright/browser research remains authoritative and runs first.
+- If enabled, ArtBot creates a planner brief with `gemini-pro-latest`, then sends that brief plus the normal run payload to Deep Research Max through Google's Interactions API.
+- The output is advisory only. It does not mutate accepted evidence or trigger new ingestion in v1.
+- Successful runs write `deep-research.json` beside `results.json` and expose the same payload through `runs show`, `runs watch`, the browser report, and `runs deep-research`.
 
 Path resolution guardrails:
 
@@ -99,6 +112,8 @@ Capture/update browser session states (manual login):
 - `pnpm --filter artbot dev -- runs list --status completed --limit 20`
 - `pnpm --filter artbot dev -- runs show --run-id <id>`
 - `pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2`
+- `pnpm --filter artbot dev -- runs deep-research --run-id <id>`
+- `pnpm --filter artbot dev -- runs deep-research --run-id <id> --web`
 - `pnpm --filter artbot dev -- runs pin --run-id <id>`
 - `pnpm --filter artbot dev -- runs unpin --run-id <id>`
 - `pnpm --filter artbot dev -- storage`

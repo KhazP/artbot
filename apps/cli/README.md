@@ -51,6 +51,8 @@ The default local preset is LM Studio at `http://127.0.0.1:1234/v1`, and `artbot
 The onboarding flow can also target NVIDIA or a custom OpenAI-compatible endpoint, and it persists `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `STAGEHAND_MODE`.
 Plan generation for research commands can take roughly 45-60 seconds on a cold start. Keep the command running until progress completes.
 
+Experimental Gemini deep research is available under `Settings > Experimental` in the TUI. When enabled, ArtBot completes its normal browser run first, then generates a Gemini planner brief and a Deep Research Max sidecar report. This is cloud-based and expensive; set a Google AI Studio spend cap before heavy use.
+
 ArtBot stores its local state here:
 
 ```text
@@ -82,14 +84,19 @@ artbot
 artbot tui
 artbot runs list
 artbot --json runs list --limit 20
+artbot --output-format stream-json runs watch --run-id <id>
 artbot research artist --artist "Burhan Dogancay" --wait
 artbot runs show --run-id <id>
 artbot --json runs show --run-id <id>
 artbot runs watch --run-id <id> --interval 2
+artbot runs deep-research --run-id <id>
+artbot runs deep-research --run-id <id> --web
 artbot runs pin --run-id <id>
 artbot runs unpin --run-id <id>
 artbot storage
 artbot cleanup --dry-run
+artbot sessions list
+artbot trust status
 ```
 
 Bare `artbot` opens the interactive UI in an interactive terminal. Use `artbot tui` as an explicit alias.
@@ -156,6 +163,7 @@ artbot --json runs pin --run-id <id>
 artbot --json runs unpin --run-id <id>
 artbot --json storage
 artbot --json cleanup --dry-run
+artbot --output-format stream-json runs watch --run-id <id>
 ```
 
 If an automation wrapper must hard-disable the interactive UI, pass `--no-tui` or set:
@@ -165,6 +173,40 @@ export ARTBOT_NO_TUI=1
 ```
 
 When `--no-tui` (or `ARTBOT_NO_TUI=1`) is active, `artbot setup` will not open interactive prompts and instead prints non-interactive guidance.
+
+Use `--output-format stream-json` when another tool wants newline-delimited lifecycle events instead of one final JSON payload.
+
+Interactive setup, auth capture, TUI launch, and local backend start/stop require an explicitly trusted workspace:
+
+```bash
+artbot trust status
+artbot trust allow
+artbot trust deny
+```
+
+Saved local sessions let operators resume the Ink shell or a `runs watch` flow:
+
+```bash
+artbot sessions list
+artbot sessions resume
+artbot sessions prune --keep 10
+```
+
+## Repo Skill Install
+
+The repo ships a reusable ArtBot skill at `skills/artbot-cli`.
+
+- Project-local install: point your agent tooling at this repo path directly.
+- Copy install: copy `skills/artbot-cli` into the target skill directory.
+- Symlink install: symlink `skills/artbot-cli` into the target skill directory when you want updates from this clone to stay live.
+
+Codex example:
+
+```bash
+ln -s /path/to/CCGAgent/skills/artbot-cli ~/.codex/skills/artbot-cli
+```
+
+Supported agent metadata in this repo currently targets Codex/OpenAI through `skills/artbot-cli/agents/openai.yaml`. Clone users should install the skill explicitly; the npm package does not write into agent home directories.
 
 ## Remote API override
 

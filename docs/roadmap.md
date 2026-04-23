@@ -414,6 +414,10 @@ Disk usage must become manageable by default.
 - [x] Added per-run preservation with `artbot runs pin --run-id <id>` and `artbot runs unpin --run-id <id>`.
 - [x] Pinned runs now promote their retained artifacts so cleanup and automatic GC preserve them by default.
 - [x] Surfaced pinned retention state in run list/detail output and the local TUI run history/detail views.
+- [x] Added explicit machine-output modes with `--output-format text|json|stream-json` while keeping `--json` as a compatibility alias.
+- [x] Added trusted-workspace controls with `artbot trust status|allow|deny` for interactive, browser-affecting, and local-service actions.
+- [x] Added saved local session checkpoints with `artbot sessions list|resume|prune` plus TUI state restore for pane, focus, recent history, and last-run context.
+- [x] Added repo-guidance detection in `doctor` plus a selective OSS CLI intake matrix for future ArtBot CLI uplift work.
 
 ### Required cleanup behavior
 
