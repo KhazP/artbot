@@ -1,3 +1,7 @@
+import type { StagehandMode } from "@artbot/shared-types";
+
+export type SetupLlmProvider = "local_lm_studio" | "nvidia" | "openai_compatible_custom";
+
 export interface AuthProfile {
   id: string;
   mode: "authorized" | "licensed";
@@ -94,7 +98,9 @@ export interface SetupAssessment {
   localBackendAvailable: boolean;
   localBackendMode: LocalBackendMode;
   localBackendPath: string | null;
+  llmProvider: SetupLlmProvider;
   llmBaseUrl: string;
+  stagehandMode: StagehandMode;
   apiBaseUrl: string;
   webDiscoveryEnabled: boolean;
   webDiscoveryProvider: string;
@@ -108,10 +114,16 @@ export interface SetupAssessment {
   relevantProfiles: AuthRelevantProfile[];
   sessionStates: AuthProfileSessionState[];
   issues: SetupIssue[];
+  blockingIssues: SetupIssue[];
+  optionalIssues: SetupIssue[];
+  recommendedNextAction: string;
 }
 
 export interface SetupWizardValues {
   llmBaseUrl: string;
+  llmApiKey: string;
+  llmModel: string;
+  stagehandMode: StagehandMode;
   apiBaseUrl: string;
   enableOptionalProbes: boolean;
   enableLicensedIntegrations: boolean;

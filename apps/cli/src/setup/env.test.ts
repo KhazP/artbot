@@ -31,6 +31,9 @@ describe("setup env persistence", () => {
       envPath,
       buildSetupEnvUpdates({
         llmBaseUrl: "http://127.0.0.1:1234/v1",
+        llmApiKey: "",
+        llmModel: "google/gemma-4-26b-a4b",
+        stagehandMode: "LOCAL",
         apiBaseUrl: "http://localhost:4000",
         enableOptionalProbes: true,
         enableLicensedIntegrations: true,
@@ -60,6 +63,9 @@ describe("setup env persistence", () => {
     expect(written).toContain("AUTH_PROFILES_JSON='[");
     expect(parsedEnv.LLM_BASE_URL).toBe("http://127.0.0.1:1234/v1");
     expect(parsedEnv.LLM_API_KEY).toBe("lm-studio");
+    expect(parsedEnv.LLM_MODEL).toBe("google/gemma-4-26b-a4b");
+    expect(parsedEnv.MODEL_CHEAP_DEFAULT).toBe("google/gemma-4-26b-a4b");
+    expect(parsedEnv.STAGEHAND_MODE).toBe("LOCAL");
     expect(parsedEnv.DEFAULT_REPORT_SURFACE).toBe("ask");
     expect(parsedEnv.WEB_DISCOVERY_PROVIDER).toBe("searxng");
     expect(parsedEnv.WEB_DISCOVERY_SECONDARY_PROVIDER).toBe("none");

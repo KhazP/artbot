@@ -10,13 +10,14 @@ This repository follows a lightweight docs taxonomy inspired by Diataxis:
 ## Current Mapping
 
 - `docs/architecture.md`: Explanation
+- `docs/roadmap.md`: Explanation
+- `docs/decision-log.md`: Explanation
 - `docs/dependency-decisions.md`: Explanation
 - `docs/ops.md`: How-to
 - `docs/evals.md`: How-to
 - `docs/source-matrix.md`: Reference
 - `docs/next-adapters.md`: Reference
 - `docs/public-release.md`: How-to
-- `DECISION_LOG.md`: Explanation
 
 ## Development Docs
 

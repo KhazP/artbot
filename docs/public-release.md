@@ -190,7 +190,7 @@ If you later enable the wiki, use this page map:
 | Wiki page                    | Content                                            |
 | ---------------------------- | -------------------------------------------------- |
 | Home                         | What ArtBot is, supported surfaces, where to start |
-| Installation                 | Node, pnpm, LM Studio, Docker paths                |
+| Installation                 | Node, pnpm, OpenAI-compatible model endpoints, Docker paths |
 | Configuration                | `.env`, auth profiles, provider settings           |
 | Source Adapters              | Supported sources, access modes, limitations       |
 | Evidence and Outputs         | `var/runs/`, reports, screenshots, traces          |

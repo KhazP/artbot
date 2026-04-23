@@ -1,3 +1,4 @@
+import { resolveOpenAiCompatibleApiKey, resolveOpenAiCompatibleModel } from "@artbot/shared-types";
 import { normalizeLlmBaseUrl } from "./setup/health.js";
 
 export interface LlmConfig {
@@ -29,8 +30,8 @@ export function resolveLlmConfig(): LlmConfig | null {
 
   return {
     baseUrl,
-    apiKey: process.env.LLM_API_KEY?.trim() || "lm-studio",
-    model: process.env.MODEL_CHEAP_DEFAULT?.trim() || "google/gemma-4-26b-a4b",
+    apiKey: resolveOpenAiCompatibleApiKey(process.env),
+    model: resolveOpenAiCompatibleModel(process.env, "google/gemma-4-26b-a4b"),
   };
 }
 

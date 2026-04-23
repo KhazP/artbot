@@ -85,6 +85,10 @@ const adjudicateReviewItemSchema = z.object({
   decision: z.enum(["merge", "keep_separate"])
 });
 
+const normalizationEventsQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(500).optional()
+});
+
 const storageUsageBreakdownSchema = z.object({
   runs: z.number().int().nonnegative(),
   bytes: z.number().int().nonnegative()
@@ -396,6 +400,10 @@ app.get("/runs/:id", async (request, reply) => {
     : computedSummary;
 
   const inventoryPayloadLocalAiDecisions = persistedInventoryPayload?.local_ai_decisions ?? [];
+  const liveReviewQueue =
+    typeof details.run.query.artist === "string"
+      ? storage.listReviewItemsByArtist(artistKeyFromName(details.run.query.artist))
+      : [];
 
   const response = {
     run: details.run,
@@ -407,6 +415,8 @@ app.get("/runs/:id", async (request, reply) => {
     artifact_manifest: artifactManifest ?? undefined,
     persisted_source_health: persistedSourceHealth.length > 0 ? persistedSourceHealth : summary.persisted_source_health,
     local_ai_decisions: localAiDecisions.length > 0 ? localAiDecisions : inventoryPayloadLocalAiDecisions,
+    normalization_events: storage.listNormalizationEvents(id, 100),
+    fx_cache_stats: storage.getFxCacheStats(),
     valuation,
     duplicates,
     per_painting_stats: perPaintingStats,
@@ -414,13 +424,37 @@ app.get("/runs/:id", async (request, reply) => {
     inventory: persistedInventoryPayload?.inventory,
     clusters: persistedInventoryPayload?.clusters,
     cluster_memberships: persistedInventoryPayload?.cluster_memberships,
-    review_queue: persistedInventoryPayload?.review_queue,
+    review_queue: liveReviewQueue.length > 0 ? liveReviewQueue : persistedInventoryPayload?.review_queue,
     source_hosts: persistedInventoryPayload?.source_hosts,
     checkpoints: persistedInventoryPayload?.checkpoints,
     artifacts: persistedInventoryPayload?.artifacts
   };
 
   return runDetailsResponseSchema.parse(response);
+});
+
+app.get("/runs/:id/normalization-events", async (request, reply) => {
+  const id = (request.params as { id: string }).id;
+  const parsed = normalizationEventsQuerySchema.safeParse(request.query);
+  if (!parsed.success) {
+    return reply.status(400).send({ error: parsed.error.flatten() });
+  }
+
+  const run = storage.getRun(id);
+  if (!run) {
+    return reply.status(404).send({ error: "Run not found" });
+  }
+
+  return {
+    run_id: id,
+    events: storage.listNormalizationEvents(id, parsed.data.limit ?? 100)
+  };
+});
+
+app.get("/fx/cache", async () => {
+  return {
+    stats: storage.getFxCacheStats()
+  };
 });
 
 app.post("/runs/:id/pin", async (request, reply) => {

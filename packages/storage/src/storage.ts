@@ -11,9 +11,12 @@ import type {
   ClusterMembership,
   CrawlCheckpoint,
   FrontierItem,
+  FxCacheStats,
+  FxRateDaily,
   FrontierStatus,
   InventoryRecord,
   HostHealthRecord,
+  NormalizationEvent,
   PriceRecord,
   PriceSemanticLane,
   ResearchQuery,
@@ -53,6 +56,17 @@ interface RunUsageRow {
 
 interface StorageMetadataRow {
   value_json: string;
+}
+
+interface FxRateDailyRow {
+  id: string;
+  base_currency: "EUR";
+  quote_currency: "USD" | "TRY" | "GBP" | "EUR";
+  date: string;
+  rate: number;
+  source: "ecb_api" | "tcmb_fallback" | "static_fallback";
+  fetched_at: string;
+  quality_flag: "historical_exact" | "historical_fallback" | "current_cache";
 }
 
 type HostHealthDimension = {
@@ -365,6 +379,30 @@ export class ArtbotStorage {
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS fx_rates_daily (
+        id TEXT PRIMARY KEY,
+        base_currency TEXT NOT NULL,
+        quote_currency TEXT NOT NULL,
+        date TEXT NOT NULL,
+        rate REAL NOT NULL,
+        source TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        quality_flag TEXT NOT NULL,
+        UNIQUE (base_currency, quote_currency, date)
+      );
+
+      CREATE TABLE IF NOT EXISTS normalization_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        record_ref TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        work_title TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id)
       );
 
       CREATE TABLE IF NOT EXISTS storage_metadata (
@@ -692,6 +730,146 @@ export class ArtbotStorage {
         .prepare(`INSERT INTO source_attempts (id, run_id, payload_json, created_at) VALUES (?, ?, ?, ?)`)
         .run(uuidv4(), runId, JSON.stringify(attempt), new Date().toISOString())
     );
+  }
+
+  public upsertFxRateDaily(input: Omit<FxRateDaily, "id" | "fetched_at"> & { id?: string; fetched_at?: string }): FxRateDaily {
+    const existing = this.db
+      .prepare(
+        `SELECT id, base_currency, quote_currency, date, rate, source, fetched_at, quality_flag
+         FROM fx_rates_daily
+         WHERE base_currency = ? AND quote_currency = ? AND date = ?`
+      )
+      .get(input.base_currency, input.quote_currency, input.date) as FxRateDailyRow | undefined;
+    const next: FxRateDaily = {
+      ...input,
+      id: existing?.id ?? input.id ?? uuidv4(),
+      fetched_at: input.fetched_at ?? nowIso()
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO fx_rates_daily (id, base_currency, quote_currency, date, rate, source, fetched_at, quality_flag)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(base_currency, quote_currency, date)
+         DO UPDATE SET
+           rate = excluded.rate,
+           source = excluded.source,
+           fetched_at = excluded.fetched_at,
+           quality_flag = excluded.quality_flag`
+      )
+      .run(
+        next.id,
+        next.base_currency,
+        next.quote_currency,
+        next.date,
+        next.rate,
+        next.source,
+        next.fetched_at,
+        next.quality_flag
+      );
+
+    return next;
+  }
+
+  public getFxRatesForDate(date: string, baseCurrency: FxRateDaily["base_currency"] = "EUR"): FxRateDaily[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, base_currency, quote_currency, date, rate, source, fetched_at, quality_flag
+         FROM fx_rates_daily
+         WHERE date = ? AND base_currency = ?
+         ORDER BY quote_currency ASC`
+      )
+      .all(date, baseCurrency) as unknown as FxRateDailyRow[];
+
+    return rows.map((row) => ({ ...row }));
+  }
+
+  public getFxCacheStats(): FxCacheStats {
+    const rows = this.db
+      .prepare(`SELECT base_currency, quote_currency, date, source FROM fx_rates_daily`)
+      .all() as Array<Pick<FxRateDailyRow, "base_currency" | "quote_currency" | "date" | "source">>;
+
+    const sources: Record<string, number> = {};
+    const quoteCurrencies: Record<string, number> = {};
+    const uniqueDates = new Set<string>();
+    let latestDate: string | null = null;
+
+    for (const row of rows) {
+      sources[row.source] = (sources[row.source] ?? 0) + 1;
+      quoteCurrencies[row.quote_currency] = (quoteCurrencies[row.quote_currency] ?? 0) + 1;
+      uniqueDates.add(row.date);
+      if (!latestDate || row.date > latestDate) {
+        latestDate = row.date;
+      }
+    }
+
+    return {
+      total_rows: rows.length,
+      unique_dates: uniqueDates.size,
+      latest_date: latestDate,
+      sources,
+      quote_currencies: quoteCurrencies
+    };
+  }
+
+  public saveNormalizationEvent(
+    input: Omit<NormalizationEvent, "id" | "created_at"> & { id?: string; created_at?: string }
+  ): NormalizationEvent {
+    const event: NormalizationEvent = {
+      ...input,
+      id: input.id ?? uuidv4(),
+      created_at: input.created_at ?? nowIso()
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO normalization_events (id, run_id, record_ref, source_name, source_url, work_title, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        event.id,
+        event.run_id,
+        event.record_ref,
+        event.source_name,
+        event.source_url,
+        event.work_title ?? null,
+        JSON.stringify(event.payload_json),
+        event.created_at
+      );
+
+    return event;
+  }
+
+  public listNormalizationEvents(runId: string, limit = 100): NormalizationEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, run_id, record_ref, source_name, source_url, work_title, payload_json, created_at
+         FROM normalization_events
+         WHERE run_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(runId, Math.max(1, Math.min(limit, 500))) as Array<{
+        id: string;
+        run_id: string;
+        record_ref: string;
+        source_name: string;
+        source_url: string;
+        work_title: string | null;
+        payload_json: string;
+        created_at: string;
+      }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      run_id: row.run_id,
+      record_ref: row.record_ref,
+      source_name: row.source_name,
+      source_url: row.source_url,
+      work_title: row.work_title,
+      payload_json: JSON.parse(row.payload_json) as Record<string, unknown>,
+      created_at: row.created_at
+    }));
   }
 
   public upsertSourceHost(

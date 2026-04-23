@@ -254,7 +254,7 @@ const runPayloadSchema = z.object({
       workTitle: z.string(),
       nativePrice: z.number().nullable().optional(),
       normalizedPriceTry: z.number().nullable().optional(),
-      currency: z.string().optional(),
+      currency: z.string().nullable().optional(),
       valuationLane: z.string().optional(),
       score: z.number().nullable().optional()
     })).optional()

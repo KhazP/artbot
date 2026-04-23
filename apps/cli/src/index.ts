@@ -49,7 +49,10 @@ import {
   type LocalBackendStatus,
   type SetupAssessment
 } from "./setup/index.js";
+import { normalizeAppLocale, translate, type AppLocale } from "./i18n.js";
+import type { StartInteractiveOptions } from "./interactive.js";
 import { runSetupWizard } from "./setup/workflow.js";
+import { loadTuiPreferences } from "./tui/preferences.js";
 
 declare const __ARTBOT_VERSION__: string;
 
@@ -70,6 +73,13 @@ function resolveCliVersion(): string {
 const CLI_VERSION = resolveCliVersion();
 
 const SQLITE_WARNING_FILTER_FLAG = "__ARTBOT_SQLITE_WARNING_FILTER_INSTALLED__";
+
+function resolveOutputLocale(env: NodeJS.ProcessEnv = process.env): AppLocale {
+  if (env.ARTBOT_LANG?.trim()) {
+    return normalizeAppLocale(env.ARTBOT_LANG);
+  }
+  return normalizeAppLocale(loadTuiPreferences(env).language);
+}
 
 function shouldSuppressSqliteExperimentalWarning(warning: unknown, args: unknown[]): boolean {
   const warningName =
@@ -342,7 +352,9 @@ interface CliDeps {
   spinnerFactory?: (text: string) => SpinnerLike;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
-  startInteractive?: () => Promise<number>;
+  startInteractive?: (options?: StartInteractiveOptions) => Promise<number>;
+  setupWizard?: typeof runSetupWizard;
+  isInteractiveTerminal?: () => boolean;
 }
 
 class ApiRequestError extends Error {
@@ -1153,7 +1165,7 @@ function resolveLocalStoragePaths(): LocalStorageResolution {
   };
 }
 
-function renderSetupAssessment(assessment: SetupAssessment): string {
+function renderSetupAssessment(assessment: SetupAssessment, locale = resolveOutputLocale()): string {
   const table = new Table({
     head: ["Check", "Status", "Detail"]
   });
@@ -1181,37 +1193,45 @@ function renderSetupAssessment(assessment: SetupAssessment): string {
 
   table.push(
     [
-      "LM Studio",
-      assessment.llmHealth.ok ? picocolors.green("healthy") : picocolors.red("offline"),
-      assessment.llmHealth.modelId ?? assessment.llmHealth.reason ?? assessment.llmBaseUrl
+      translate(locale, "setup.summary.llm"),
+      assessment.llmHealth.ok
+        ? picocolors.green(translate(locale, "setup.summary.healthy"))
+        : picocolors.red(translate(locale, "setup.summary.offline")),
+      [assessment.llmHealth.modelId, assessment.llmHealth.reason, assessment.llmBaseUrl].filter(Boolean).join(" · ")
     ],
     [
-      "ArtBot API",
-      assessment.apiHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
+      translate(locale, "setup.summary.api"),
+      assessment.apiHealth.ok
+        ? picocolors.green(translate(locale, "setup.summary.healthy"))
+        : picocolors.yellow(translate(locale, "setup.summary.offline")),
       assessment.apiHealth.reason ?? assessment.apiBaseUrl
     ],
-    ["Local Backend", localBackendStatus, localBackendDetail],
-    ["Config", picocolors.green("env"), assessment.envPath],
-    ["Discovery Profile", discoveryStatus, discoveryDetail],
+    [translate(locale, "setup.summary.localBackend"), localBackendStatus, localBackendDetail],
+    [translate(locale, "setup.summary.config"), picocolors.green("env"), assessment.envPath],
+    [translate(locale, "setup.summary.discovery"), discoveryStatus, discoveryDetail],
     [
-      "SearXNG",
-      assessment.searxngHealth.ok ? picocolors.green("healthy") : picocolors.yellow("offline"),
+      translate(locale, "setup.summary.searxng"),
+      assessment.searxngHealth.ok
+        ? picocolors.green(translate(locale, "setup.summary.healthy"))
+        : picocolors.yellow(translate(locale, "setup.summary.offline")),
       assessment.searxngHealth.reason ?? assessment.searxngBaseUrl
     ],
     [
-      "Firecrawl",
-      assessment.firecrawlEnabled ? picocolors.yellow("enabled") : picocolors.green("disabled"),
+      translate(locale, "setup.summary.firecrawl"),
+      assessment.firecrawlEnabled
+        ? picocolors.yellow(translate(locale, "setup.summary.enabled"))
+        : picocolors.green(translate(locale, "setup.summary.disabled")),
       assessment.firecrawlEnabled ? "Optional paid extractor is active." : "Optional paid extractor is disabled."
     ],
     [
-      "Auth Profiles",
+      translate(locale, "setup.summary.authProfiles"),
       assessment.authProfilesError ? picocolors.red("invalid") : picocolors.green(String(assessment.profiles.length)),
       assessment.authProfilesError?.message ?? `${assessment.profiles.length} configured`
     ],
     [
-      "Sessions",
+      translate(locale, "setup.summary.sessions"),
       assessment.sessionStates.length === 0
-        ? picocolors.yellow("none")
+        ? picocolors.yellow(translate(locale, "setup.summary.none"))
         : picocolors.green(String(assessment.sessionStates.length)),
       assessment.sessionStates
         .map(
@@ -1260,16 +1280,17 @@ function renderBackendStatus(status: LocalBackendStatus): string {
   return table.toString();
 }
 
-function renderSetupIssues(assessment: SetupAssessment): string {
+function renderSetupIssues(assessment: SetupAssessment, locale = resolveOutputLocale()): string {
   if (assessment.issues.length === 0) {
-    return picocolors.green("No setup issues detected.");
+    return picocolors.green(translate(locale, "setup.issues.none"));
   }
 
-  return assessment.issues
+  return [...assessment.blockingIssues, ...assessment.optionalIssues]
     .map((issue) => {
       const prefix = issue.severity === "error" ? picocolors.red("error") : picocolors.yellow("warning");
       return `${prefix} ${issue.message}${issue.detail ? ` (${issue.detail})` : ""}`;
     })
+    .concat([picocolors.cyan(`next: ${assessment.recommendedNextAction}`)])
     .join("\n");
 }
 
@@ -1285,9 +1306,15 @@ function formatRunRetention(run: Pick<RunEntity, "pinned" | "pinnedAt">): string
   return `pinned since ${new Date(run.pinnedAt).toLocaleString("en-US")}`;
 }
 
-function renderAuthProfilesTable(assessment: SetupAssessment): string {
+function renderAuthProfilesTable(assessment: SetupAssessment, locale = resolveOutputLocale()): string {
   const table = new Table({
-    head: ["Profile", "Mode", "Matched Sources", "Storage State", "Risk"]
+    head: [
+      translate(locale, "setup.auth.table.profile"),
+      translate(locale, "setup.auth.table.mode"),
+      translate(locale, "setup.auth.table.sources"),
+      translate(locale, "setup.auth.table.state"),
+      translate(locale, "setup.auth.table.risk")
+    ]
   });
 
   const relevantById = new Map(assessment.relevantProfiles.map((entry) => [entry.profile.id, entry.matchedSources]));
@@ -2065,8 +2092,7 @@ async function handleRunsPinMutation(
 async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   if (ctx.noTui || globals.noTui) {
-    const message =
-      "Setup is interactive and disabled by --no-tui or ARTBOT_NO_TUI. Use \"artbot backend start\" to bootstrap locally, then run \"artbot doctor\".";
+    const message = translate(resolveOutputLocale(), "cli.setup.disabled");
     if (globals.json) {
       printJson(globals, ctx, {
         ok: false,
@@ -2080,23 +2106,26 @@ async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
     return;
   }
 
-  const result = await runSetupWizard();
+  const result = await ctx.deps.setupWizard();
   printJson(globals, ctx, result);
-  if (!globals.json) {
-    logInfo(globals, ctx, renderSetupAssessment(result.assessment));
-    logInfo(globals, ctx, "");
-    logInfo(globals, ctx, renderSetupIssues(result.assessment));
-    if (result.backendStart) {
-      logInfo(globals, ctx, "");
-      logInfo(
-        globals,
-        ctx,
-        result.backendStart.reusedExisting ? "Local backend was already running." : "Started local backend."
-      );
-      logInfo(globals, ctx, `API log: ${result.backendStart.apiLogPath}`);
-      logInfo(globals, ctx, `Worker log: ${result.backendStart.workerLogPath}`);
-    }
+  if (globals.json) {
+    return;
   }
+
+  const setupMessage = result.backendStart?.reusedExisting
+    ? "Setup saved. Local backend was already running."
+    : result.backendStart
+      ? "Setup saved and local backend started."
+      : "Setup saved.";
+  ctx.exitCode = await ctx.deps.startInteractive({
+    initialAssessment: result.assessment,
+    skipSetupWizard: true,
+    startup: {
+      sidePane: "setup",
+      focusTarget: "side",
+      message: `${setupMessage} Review readiness on the setup pane, then start research.`
+    }
+  });
 }
 
 async function handleDoctor(ctx: CliContext, command: Command): Promise<void> {
@@ -2115,7 +2144,7 @@ async function handleDoctor(ctx: CliContext, command: Command): Promise<void> {
 async function handleTui(ctx: CliContext, command: Command): Promise<void> {
   if (ctx.noTui) {
     throw new InputValidationError(
-      "TUI launch is disabled by --no-tui or ARTBOT_NO_TUI. Remove it to open the interactive UI."
+      translate(resolveOutputLocale(), "cli.tui.disabled")
     );
   }
 
@@ -2389,14 +2418,14 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
 
   program
     .command("setup")
-    .description("Guided local onboarding for LM Studio, backend services, and auth profiles")
+    .description(translate(resolveOutputLocale(), "cli.setup.description"))
     .action(async (_options: Record<string, never>, command: Command) => {
       await handleSetup(ctx, command);
     });
 
   program
     .command("doctor")
-    .description("Inspect local setup and health status")
+    .description(translate(resolveOutputLocale(), "cli.doctor.description"))
     .action(async (_options: Record<string, never>, command: Command) => {
       await handleDoctor(ctx, command);
     });
@@ -2579,13 +2608,29 @@ function defaultDeps(partial: CliDeps = {}): Required<CliDeps> {
     spinnerFactory: partial.spinnerFactory ?? ((text: string) => ora(text)),
     stdout: partial.stdout ?? ((text: string) => process.stdout.write(text)),
     stderr: partial.stderr ?? ((text: string) => process.stderr.write(text)),
+    setupWizard: partial.setupWizard ?? runSetupWizard,
+    isInteractiveTerminal:
+      partial.isInteractiveTerminal ??
+      (() => Boolean(process.stdin.isTTY && process.stdout.isTTY)),
     startInteractive:
       partial.startInteractive ??
-      (async () => {
+      (async (options?: StartInteractiveOptions) => {
         const { startInteractive } = await import("./interactive.js");
-        return startInteractive();
+        return startInteractive(options);
       })
   };
+}
+
+function shouldAutoLaunchInteractive(normalizedUserArgs: string[], ctx: CliContext): boolean {
+  if (ctx.noTui || ctx.jsonRequested) {
+    return false;
+  }
+
+  if (!ctx.deps.isInteractiveTerminal()) {
+    return false;
+  }
+
+  return normalizedUserArgs.every((arg) => arg.startsWith("-"));
 }
 
 function mapErrorToExitCode(error: unknown): number {
@@ -2705,6 +2750,10 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
     const { operands, unknown } = program.parseOptions(normalizedUserArgs);
     const onlyGlobalOptions = operands.length === 0 && unknown.length === 0;
     if (onlyGlobalOptions) {
+      if (shouldAutoLaunchInteractive(normalizedUserArgs, ctx)) {
+        ctx.exitCode = await ctx.deps.startInteractive();
+        return ctx.exitCode;
+      }
       program.outputHelp();
       return EXIT_CODES.OK;
     }

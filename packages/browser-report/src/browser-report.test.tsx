@@ -178,6 +178,72 @@ describe("browser report normalization", () => {
     expect(normalized.gaps[0]).toContain("Low priced coverage");
   });
 
+  it("accepts nullable comparable currency values from stored valuation payloads", () => {
+    const normalized = normalizeResearchRunReport({
+      run: {
+        id: "run-123-null-currency",
+        runType: "artist",
+        status: "completed",
+        query: {
+          artist: "Bedri Baykam",
+          analysisMode: "balanced"
+        }
+      },
+      summary: {
+        accepted_records: 1,
+        rejected_candidates: 0,
+        discovered_candidates: 0,
+        accepted_from_discovery: 0,
+        total_attempts: 1,
+        total_records: 1,
+        valuation_eligible_records: 1,
+        priced_source_coverage_ratio: 1,
+        priced_crawled_source_coverage_ratio: 1,
+        source_status_breakdown: {
+          public_access: 1
+        },
+        acceptance_reason_breakdown: {
+          estimate_range_ready: 1
+        },
+        valuation_generated: false,
+        valuation_reason: "Evidence-only comparable retained."
+      },
+      valuation: {
+        generated: false,
+        reason: "Evidence-only comparable retained.",
+        topComparables: [
+          {
+            sourceName: "Sothebys",
+            workTitle: "Untitled",
+            nativePrice: 540000,
+            normalizedPriceTry: null,
+            currency: null,
+            valuationLane: "estimate",
+            score: 0.62
+          }
+        ]
+      },
+      records: [
+        {
+          work_title: "Untitled",
+          source_name: "Sothebys",
+          source_url: "https://example.com/work",
+          price_type: "estimate",
+          estimate_low: 500000,
+          estimate_high: 580000,
+          currency: "TRY",
+          normalized_price_usd: 3000,
+          accepted_for_valuation: false,
+          acceptance_reason: "estimate_range_ready",
+          source_access_status: "public_access"
+        }
+      ]
+    });
+
+    expect(normalized.valuation.topComparables[0]?.valueLabel).toContain("540,000");
+    expect(normalized.valuation.topComparables[0]?.valueLabel).toContain("TRY");
+  });
+
   it("normalizes the artist market inventory payload", () => {
     const normalized = normalizeResearchRunReport({
       run: {

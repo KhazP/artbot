@@ -111,7 +111,10 @@ export class GenericSourceAdapter implements SourceAdapter {
     }
 
     const fetchedAt = new Date().toISOString();
-    const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext);
+    const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext, {
+      sourceFamily: this.capabilities.source_family,
+      sourceAccessStatus: context.accessContext.sourceAccessStatus
+    });
     const rawSnapshotPath = ensureRawPath(context.evidenceDir, `${this.id}-${Date.now()}-cheap.html`);
     writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown, context.accessContext);
 

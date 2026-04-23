@@ -28,6 +28,16 @@ describe("parseGenericLotFields numeric normalization", () => {
     expect(parsed.currency).toBe("TRY");
   });
 
+  it("preserves YTL and TRL currency tokens for downstream normalization", () => {
+    const ytlParsed = parseGenericLotFields("Realized: YTL 5,500");
+    const trlParsed = parseGenericLotFields("Realized: 5.500.000.000 TRL");
+
+    expect(ytlParsed.currency).toBe("YTL");
+    expect(ytlParsed.priceAmount).toBe(5500);
+    expect(trlParsed.currency).toBe("TRL");
+    expect(trlParsed.priceAmount).toBe(5500000000);
+  });
+
   it("parses Artam-style fixture with realized + estimate semantics", () => {
     const fixturePath = path.resolve(process.cwd(), "../../data/fixtures/adapters/artam/listing.html");
     const parsed = parseGenericLotFields(fs.readFileSync(fixturePath, "utf-8"));

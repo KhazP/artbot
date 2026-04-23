@@ -220,7 +220,7 @@ describe("artbot cli v2", () => {
     expect(stderr).toBe("");
   });
 
-  it("prints root help on bare invocation", async () => {
+  it("launches the interactive UI on bare invocation in a TTY", async () => {
     const io = createMockIo();
     const startInteractive = vi.fn(async () => 99);
 
@@ -229,7 +229,28 @@ describe("artbot cli v2", () => {
       stdout: io.appendStdout,
       stderr: io.appendStderr,
       spinnerFactory: createSpinnerStub(),
-      startInteractive
+      startInteractive,
+      isInteractiveTerminal: () => true
+    });
+
+    const { stdout, stderr } = io.read();
+    expect(code).toBe(99);
+    expect(startInteractive).toHaveBeenCalledTimes(1);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("");
+  });
+
+  it("prints root help on bare invocation outside an interactive terminal", async () => {
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 99);
+
+    const code = await runCli(["node", "artbot"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive,
+      isInteractiveTerminal: () => false
     });
 
     const { stdout, stderr } = io.read();
@@ -307,6 +328,42 @@ describe("artbot cli v2", () => {
     expect(code).toBe(0);
     expect(stdout).toContain("Setup is interactive and disabled by --no-tui or ARTBOT_NO_TUI");
     expect(stderr).toBe("");
+  });
+
+  it("hands off to the TUI after interactive setup completes", async () => {
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 17);
+    const setupWizard = vi.fn(async () => ({
+      assessment: {
+        issues: [],
+        blockingIssues: [],
+        optionalIssues: []
+      },
+      backendStart: {
+        reusedExisting: false
+      }
+    }));
+
+    const code = await runCli(["node", "artbot", "setup"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive,
+      setupWizard: setupWizard as any
+    });
+
+    expect(code).toBe(17);
+    expect(setupWizard).toHaveBeenCalledTimes(1);
+    expect(startInteractive).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skipSetupWizard: true,
+        startup: expect.objectContaining({
+          sidePane: "setup",
+          focusTarget: "side"
+        })
+      })
+    );
   });
 
   it("prints the package version from package.json", async () => {

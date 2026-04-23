@@ -22,17 +22,52 @@ export interface PipelineDetails {
   duplicates?: ReportRecord[];
   valuation?: ReportValuation;
   per_painting_stats?: PerPaintingStat[];
+  inventory?: Array<{
+    record_key: string;
+    payload: {
+      work_title?: string | null;
+      source_name?: string;
+    };
+  }>;
+  normalization_events?: Array<{
+    id: string;
+    record_ref: string;
+    source_name: string;
+    source_url: string;
+    work_title?: string | null;
+    payload_json: Record<string, unknown>;
+    created_at: string;
+  }>;
+  fx_cache_stats?: {
+    total_rows: number;
+    unique_dates: number;
+    latest_date: string | null;
+    sources: Record<string, number>;
+    quote_currencies: Record<string, number>;
+  };
+  review_queue?: Array<{
+    id: string;
+    status?: string;
+    left_record_key?: string;
+    right_record_key?: string;
+    recommended_action?: string;
+    reasons?: string[];
+    confidence?: number | null;
+  }>;
   attempts?: Array<{
+    source_name?: string;
     source_url: string;
     source_access_status: string;
+    acceptance_reason?: string;
+    failure_class?: string | null;
     blocker_reason?: string | null;
     extracted_fields?: Record<string, unknown>;
   }>;
 }
 
 export type PrimaryView = "idle" | "running" | "completed" | "failed";
-export type SidePane = "none" | "setup" | "auth" | "run-details";
-export type Overlay = "none" | "help" | "recent-runs" | "theme-picker" | "report-surface";
+export type SidePane = "none" | "setup" | "auth" | "run-details" | "normalization" | "sources" | "review" | "fx" | "errors";
+export type Overlay = "none" | "help" | "recent-runs" | "settings" | "report-surface";
 export type FocusTarget = "composer" | "main" | "side" | "overlay";
 
 export const RECENT_RUNS_VISIBLE_LIMIT = 10;
@@ -57,12 +92,12 @@ export interface TuiSurfaceState {
   focusTarget: FocusTarget;
   recentRunsQuery: string;
   selectedRecentRunIndex: number;
-  selectedThemeIndex: number;
+  selectedSettingsIndex: number;
   selectedReportSurfaceIndex: number;
 }
 
 export interface ComposerState {
-  mode: "command" | "run-search" | "theme" | "report-surface";
+  mode: "command" | "run-search" | "settings" | "report-surface";
   placeholder: string;
   helperText: string;
   promptSymbol: string;
@@ -75,7 +110,7 @@ export const DEFAULT_SURFACE_STATE: TuiSurfaceState = {
   focusTarget: "composer",
   recentRunsQuery: "",
   selectedRecentRunIndex: 0,
-  selectedThemeIndex: 0,
+  selectedSettingsIndex: 0,
   selectedReportSurfaceIndex: 0
 };
 
@@ -132,7 +167,7 @@ export function resolveDisplayedSidePane(input: {
 export function openOverlay(
   state: TuiSurfaceState,
   overlay: Overlay,
-  selectedThemeIndex = state.selectedThemeIndex,
+  selectedSettingsIndex = state.selectedSettingsIndex,
   selectedReportSurfaceIndex = state.selectedReportSurfaceIndex
 ): TuiSurfaceState {
   return {
@@ -141,7 +176,7 @@ export function openOverlay(
     focusTarget: overlay === "none" ? "composer" : "overlay",
     recentRunsQuery: overlay === "recent-runs" ? state.recentRunsQuery : "",
     selectedRecentRunIndex: 0,
-    selectedThemeIndex,
+    selectedSettingsIndex,
     selectedReportSurfaceIndex
   };
 }
@@ -219,12 +254,12 @@ export function buildComposerState(input: {
     };
   }
 
-  if (input.overlay === "theme-picker" && input.focusTarget === "overlay") {
+  if (input.overlay === "settings" && input.focusTarget === "overlay") {
     return {
-      mode: "theme",
-      placeholder: "Use ↑/↓ to preview themes, Enter to save, Esc to cancel",
-      helperText: "Theme preview is temporary until you confirm.",
-      promptSymbol: "theme"
+      mode: "settings",
+      placeholder: "Use ↑/↓ to choose a setting, Enter to apply, Esc to close",
+      helperText: "Theme and language changes save immediately.",
+      promptSymbol: "settings"
     };
   }
 

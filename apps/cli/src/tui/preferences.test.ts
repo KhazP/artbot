@@ -39,6 +39,7 @@ describe("tui preferences", () => {
     process.env.ARTBOT_HOME = homeDir;
 
     const filePath = saveTuiPreferences({
+      language: "tr",
       theme: "matrix",
       density: "compact",
       showSecondaryPane: false,
@@ -48,6 +49,7 @@ describe("tui preferences", () => {
     expect(filePath).toBe(resolveTuiPreferencesPath());
     expect(fs.existsSync(filePath)).toBe(true);
     expect(loadTuiPreferences()).toEqual({
+      language: "tr",
       theme: "matrix",
       density: "compact",
       showSecondaryPane: false,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PriceRecord } from "@artbot/shared-types";
 import { dedupeRecords } from "./dedupe.js";
 import { normalizeRecordCurrencies } from "./currency.js";
@@ -69,6 +69,89 @@ describe("normalization", () => {
     expect(normalized.normalized_price_usd).toBeGreaterThan(2000);
     expect(normalized.normalized_price_usd_nominal).toBeGreaterThan(2000);
     expect(normalized.inflation_base_year).toBe(2026);
+    expect(normalized.original_currency_canonical).toBe("TRY_NEW");
+    expect(normalized.historical_price_try).toBeCloseTo(normalized.normalized_price_try ?? 0, 6);
+    expect(normalized.current_price_usd).not.toBeNull();
+  });
+
+  it("redenominates old Turkish lira inputs before conversion", async () => {
+    const provider = {
+      getRates: vi.fn().mockImplementation(async (forDate?: string) => ({
+        base: "EUR",
+        date: forDate ?? "2026-04-23",
+        rates: {
+          EUR: 1,
+          USD: 2,
+          TRY: 20,
+          GBP: 0.8
+        },
+        source: "static_fallback" as const
+      })),
+      getInflationTable: vi.fn().mockReturnValue({
+        source: "us_cpi_static" as const,
+        baseYear: 2026,
+        cpiByYear: {
+          2004: 188.9,
+          2026: 331.0
+        }
+      })
+    } as unknown as FxRateProvider;
+
+    const normalized = await normalizeRecordCurrencies(
+      baseRecord({
+        sale_or_listing_date: "2004-05-10",
+        price_amount: 5_500_000_000,
+        currency: "TRL"
+      }),
+      provider
+    );
+
+    expect(normalized.original_currency_canonical).toBe("TRL_OLD");
+    expect(normalized.redenomination_applied).toBe(true);
+    expect(normalized.redenomination_factor).toBeCloseTo(0.000001, 8);
+    expect(normalized.historical_price_try).toBeCloseTo(5500, 6);
+    expect(normalized.historical_price_usd).toBeCloseTo(550, 6);
+    expect(normalized.normalization_requires_manual_review).toBe(false);
+  });
+
+  it("flags plain TL in the transition window for manual review", async () => {
+    const provider = {
+      getRates: vi.fn().mockResolvedValue({
+        base: "EUR",
+        date: "2006-03-20",
+        rates: {
+          EUR: 1,
+          USD: 1.25,
+          TRY: 2.5,
+          GBP: 0.8
+        },
+        source: "static_fallback" as const
+      }),
+      getInflationTable: vi.fn().mockReturnValue({
+        source: "us_cpi_static" as const,
+        baseYear: 2026,
+        cpiByYear: {
+          2006: 201.6,
+          2026: 331.0
+        }
+      })
+    } as unknown as FxRateProvider;
+
+    const normalized = await normalizeRecordCurrencies(
+      baseRecord({
+        sale_or_listing_date: "2006-03-20",
+        price_amount: 5500,
+        currency: "TL"
+      }),
+      provider
+    );
+
+    expect(normalized.original_currency_canonical).toBe("TRY_NEW");
+    expect(normalized.redenomination_applied).toBe(false);
+    expect(normalized.normalization_requires_manual_review).toBe(true);
+    expect(normalized.normalization_warnings).toContain(
+      "Plain TL during the 2005-2008 transition window is ambiguous; review manually if material."
+    );
   });
 
   it("dedupes strongly matching records", () => {

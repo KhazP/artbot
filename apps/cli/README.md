@@ -18,13 +18,16 @@ npx artbot@latest --help
 ## Requirements
 
 - Node.js 22+
-- A local model endpoint (LM Studio recommended)
+- An OpenAI-compatible model endpoint
 
 ## Fastest setup
 
 ArtBot is designed to run with a local backend on your machine. No hosted ArtBot service is required.
 
-1. Start LM Studio and enable its local OpenAI-compatible server.
+1. Choose an OpenAI-compatible provider:
+   - LM Studio on `http://127.0.0.1:1234/v1`
+   - NVIDIA at `https://integrate.api.nvidia.com/v1`
+   - any other OpenAI-compatible endpoint
 2. Start local services directly:
 
 ```bash
@@ -44,8 +47,8 @@ artbot setup
 ```
 
 By default, `artbot setup` configures and can start a local API and worker on `http://localhost:4000`.
-The default LM Studio target is `http://127.0.0.1:1234/v1`, and `artbot setup` will normalize `http://127.0.0.1:1234` to that automatically.
-The generated local config also pins structured extraction to the OpenAI-compatible local endpoint so LM Studio is used even if you have other model provider keys in your shell.
+The default local preset is LM Studio at `http://127.0.0.1:1234/v1`, and `artbot setup` will normalize `http://127.0.0.1:1234` automatically.
+The onboarding flow can also target NVIDIA or a custom OpenAI-compatible endpoint, and it persists `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `STAGEHAND_MODE`.
 Plan generation for research commands can take roughly 45-60 seconds on a cold start. Keep the command running until progress completes.
 
 ArtBot stores its local state here:
@@ -89,7 +92,7 @@ artbot storage
 artbot cleanup --dry-run
 ```
 
-Bare `artbot` prints help. Open the interactive UI explicitly with `artbot tui`.
+Bare `artbot` opens the interactive UI in an interactive terminal. Use `artbot tui` as an explicit alias.
 
 ## Interactive UI (Local-First)
 
@@ -99,8 +102,8 @@ The TUI status strip is tuned for local-first usage:
 - `PRIVACY LOCKED` badge,
 - sandbox indicator (`ISOLATED: ...`),
 - active model metadata with detected quantization (when available),
-- high-speed `THINKING` pulse during active inference,
-- animated run-stage spinner in the main run panel while research is active.
+- stable activity status during active inference,
+- static run-stage progress markers while research is active.
 
 This release does not include local hardware telemetry in the UI.
 

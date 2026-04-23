@@ -11,7 +11,7 @@ Use this skill when you need to operate ArtBot effectively from the command line
 
 - In this repo, prefer `pnpm --filter artbot dev -- ...`.
 - For installed usage, replace that prefix with `artbot ...`.
-- Bare `artbot` prints help. Launch the interactive UI only with `artbot tui`.
+- Bare `artbot` opens the interactive UI in an interactive TTY. Use explicit subcommands plus `--json` for automation.
 - For agent work, prefer explicit commands and `--json`.
 - Keep `--no-tui` or `ARTBOT_NO_TUI=1` available when automation must refuse interactive UI launch.
 

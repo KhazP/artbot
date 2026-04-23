@@ -2,7 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { AuthManager } from "@artbot/auth-manager";
 import { logger } from "@artbot/observability";
-import type { AccessContext, ArtifactHandling } from "@artbot/shared-types";
+import {
+  normalizeStagehandMode,
+  resolveOpenAiCompatibleApiKey,
+  resolveOpenAiCompatibleModel,
+  type AccessContext,
+  type ArtifactHandling,
+  type StagehandMode
+} from "@artbot/shared-types";
 import { chromium, type BrowserContext, type Page } from "playwright";
 
 export interface BrowserCaptureInput {
@@ -51,6 +58,82 @@ export interface RenderedPageProgressSnapshot {
   imageCount: number;
   itemCount: number;
   textLength: number;
+}
+
+interface StagehandOpenAiClientOptions {
+  apiKey?: string;
+  baseURL?: string;
+}
+
+export interface StagehandRuntimeConfig {
+  env: "LOCAL" | "BROWSERBASE";
+  modelName: string;
+  verbose: 0;
+  apiKey?: string;
+  projectId?: string;
+  modelClientOptions?: StagehandOpenAiClientOptions;
+}
+
+export interface StagehandRuntimeResolution {
+  enabled: boolean;
+  mode: StagehandMode;
+  reason?: string;
+  config?: StagehandRuntimeConfig;
+}
+
+export function resolveStagehandRuntimeConfig(env: NodeJS.ProcessEnv = process.env): StagehandRuntimeResolution {
+  const mode = normalizeStagehandMode(env.STAGEHAND_MODE);
+  if (mode === "DISABLED") {
+    return { enabled: false, mode };
+  }
+
+  const modelName = resolveOpenAiCompatibleModel(env, "gemini-3.1-flash-lite");
+  if (mode === "LOCAL") {
+    const baseUrl = env.LLM_BASE_URL?.trim();
+    if (!baseUrl) {
+      return {
+        enabled: false,
+        mode,
+        reason: "LLM_BASE_URL is required for STAGEHAND_MODE=LOCAL."
+      };
+    }
+
+    return {
+      enabled: true,
+      mode,
+      config: {
+        env: "LOCAL",
+        modelName,
+        verbose: 0,
+        modelClientOptions: {
+          apiKey: resolveOpenAiCompatibleApiKey(env),
+          baseURL: baseUrl.replace(/\/$/, "")
+        }
+      }
+    };
+  }
+
+  const apiKey = env.BROWSERBASE_API_KEY?.trim();
+  const projectId = env.BROWSERBASE_PROJECT_ID?.trim();
+  if (!apiKey || !projectId) {
+    return {
+      enabled: false,
+      mode,
+      reason: "BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required for STAGEHAND_MODE=BROWSERBASE."
+    };
+  }
+
+  return {
+    enabled: true,
+    mode,
+    config: {
+      env: "BROWSERBASE",
+      apiKey,
+      projectId,
+      modelName,
+      verbose: 0
+    }
+  };
 }
 
 export function shouldPersistHeavyBrowserArtifacts(
@@ -686,7 +769,7 @@ export class BrowserClient {
   }
 
   private shouldUseStagehand(): boolean {
-    return Boolean(process.env.BROWSERBASE_API_KEY && process.env.BROWSERBASE_PROJECT_ID);
+    return normalizeStagehandMode(process.env.STAGEHAND_MODE) !== "DISABLED";
   }
 
   private async captureWithStagehand(input: BrowserCaptureInput): Promise<BrowserCaptureResult | null> {
@@ -701,8 +784,23 @@ export class BrowserClient {
     const rawSnapshotPath = path.join(rawDir, `${input.sourceName}-${stamp}-stagehand.html`);
 
     try {
+      const stagehandResolution = resolveStagehandRuntimeConfig(process.env);
+      if (!stagehandResolution.enabled || !stagehandResolution.config) {
+        if (stagehandResolution.mode !== "DISABLED") {
+          logger.warn("Stagehand is enabled but not fully configured, falling back to Playwright", {
+            traceId: input.traceId,
+            runId: input.runId,
+            source: input.sourceName,
+            stage: "browser_stagehand_fallback",
+            mode: stagehandResolution.mode,
+            reason: stagehandResolution.reason
+          });
+        }
+        return null;
+      }
+
       const stagehandLib = (await import("@browserbasehq/stagehand")) as unknown as {
-        Stagehand?: new (config: Record<string, unknown>) => {
+        Stagehand?: new (config: StagehandRuntimeConfig) => {
           init?: () => Promise<void>;
           close?: () => Promise<void>;
           page?: {
@@ -718,13 +816,7 @@ export class BrowserClient {
         return null;
       }
 
-      const stagehand = new stagehandLib.Stagehand({
-        env: "BROWSERBASE",
-        apiKey: process.env.BROWSERBASE_API_KEY,
-        projectId: process.env.BROWSERBASE_PROJECT_ID,
-        modelName: process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite",
-        verbose: false
-      });
+      const stagehand = new stagehandLib.Stagehand(stagehandResolution.config);
 
       if (stagehand.init) {
         await stagehand.init();
@@ -767,7 +859,7 @@ export class BrowserClient {
         harPath: null,
         requiresAuthDetected,
         blockedDetected,
-        modelUsed: process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite"
+        modelUsed: stagehandResolution.config.modelName
       };
     } catch (error) {
       logger.warn("Stagehand path failed, falling back to Playwright", {

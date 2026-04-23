@@ -1,6 +1,6 @@
-# ArtBot Improvement Plan
+# ArtBot Roadmap
 
-Updated: 2026-04-16
+Updated: 2026-04-23
 
 ## 1. Product Objective
 
@@ -100,6 +100,17 @@ ArtBot should:
 ## 6. Currency and Historical Pricing Plan
 
 Currency handling must become a first-class feature, not a post-processing detail.
+
+### Progress update
+
+- [x] Added self-host-aware Firecrawl transport config (`FIRECRAWL_BASE_URL`, timeout, retries) while keeping it optional and disabled by default.
+- [x] Added explicit normalization metadata fields for source currency/date interpretation, historical/current FX outputs, confidence, warnings, and manual-review flags.
+- [x] Added TL/YTL/TRL-aware price normalization scaffolding with redenomination guardrails and event-date confidence tracking.
+- [x] Added a read-only normalization inspector panel in the existing Ink TUI so operators can inspect normalization outcomes without switching tools.
+- [x] Added SQLite-backed FX cache persistence plus normalization event storage for replayable historical/current conversion traces.
+- [x] Added inflation-adjusted USD and EUR outputs as secondary fields while preserving nominal historical/current FX outputs as the core pricing view.
+- [x] Added schema-bound LangChain structured extraction orchestration behind the existing deterministic/direct fallback path.
+- [x] Expanded the Ink operator console with diagnostics-first `/sources`, `/review`, `/fx`, and `/errors` panes plus review adjudication commands.
 
 ### User-facing behavior
 
@@ -496,6 +507,14 @@ Exit criteria:
 Goal:
 
 - materially improve lawful source coverage.
+
+Progress update:
+
+- [x] Firecrawl is now self-host aware, public-access gated, and source-family allowlisted instead of being treated as a universal ingest path.
+- [x] Structured extraction is now shared behind a LangChain-backed schema runner with direct-provider fallback.
+- [x] Canonical OpenAI-compatible LLM config now persists through setup (`LLM_MODEL`, `LLM_API_KEY`) and Stagehand can run in `LOCAL` or `BROWSERBASE` mode without Browserbase-only assumptions.
+- [x] FX persistence and normalization-event capture now survive process boundaries, enabling replay/debug instead of run-local-only inspection.
+- [x] The operator shell now exposes diagnostics for source failures, review queues, normalization traces, and FX cache state without leaving Ink.
 
 Deliverables:
 

@@ -32,3 +32,8 @@ playwright/.auth
 docs/internal/
 AUDIT.md
 IMPLEMENTATION_PLAN.md
+
+# Keep assistant-specific wrappers and ad hoc assessment files out of the public repo
+/CLAUDE.md
+/GEMINI.md
+/ChatGPT-Report*.md

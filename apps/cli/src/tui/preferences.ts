@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { resolveArtbotHome } from "../setup/env.js";
+import { APP_LOCALES, normalizeAppLocale, type AppLocale } from "../i18n.js";
 import { TUI_THEME_NAMES, type TuiThemeName } from "./theme.js";
 
 export const TUI_DENSITIES = ["comfortable", "compact"] as const;
@@ -11,6 +12,7 @@ export const TUI_DIFF_LAYOUTS = ["auto", "stacked", "side-by-side"] as const;
 export type TuiDiffLayout = (typeof TUI_DIFF_LAYOUTS)[number];
 
 export interface TuiPreferences {
+  language: AppLocale;
   theme: TuiThemeName;
   density: TuiDensity;
   showSecondaryPane: boolean;
@@ -18,6 +20,7 @@ export interface TuiPreferences {
 }
 
 export const DEFAULT_TUI_PREFERENCES: TuiPreferences = {
+  language: "en",
   theme: "artbot",
   density: "comfortable",
   showSecondaryPane: true,
@@ -25,6 +28,7 @@ export const DEFAULT_TUI_PREFERENCES: TuiPreferences = {
 };
 
 const partialPreferencesSchema = z.object({
+  language: z.enum(APP_LOCALES).optional(),
   theme: z.enum(TUI_THEME_NAMES).optional(),
   density: z.enum(TUI_DENSITIES).optional(),
   showSecondaryPane: z.boolean().optional(),
@@ -43,7 +47,8 @@ export function normalizeTuiPreferences(input: unknown): TuiPreferences {
 
   return {
     ...DEFAULT_TUI_PREFERENCES,
-    ...parsed.data
+    ...parsed.data,
+    language: normalizeAppLocale(parsed.data.language)
   };
 }
 

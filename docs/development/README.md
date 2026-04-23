@@ -8,13 +8,18 @@ Use this section as the starting point for contributors and maintainers.
 - npm package readme: `apps/cli/README.md`
 - Operations runbook: `docs/ops.md`
 - Architecture overview: `docs/architecture.md`
+- Roadmap: `docs/roadmap.md`
+- Decision log: `docs/decision-log.md`
 - Evaluation protocol: `docs/evals.md`
 
 ## Command-First Automation
 
 - Prefer command mode with JSON output for scripts and agents.
+- Bare `artbot` / `pnpm --filter artbot dev --` opens the interactive UI in an interactive TTY.
 - Repo-local pattern: `pnpm --filter artbot dev -- --json <command>`.
 - To hard-disable interactive UI launch in wrappers, use `--no-tui` or `ARTBOT_NO_TUI=1`.
+- Repo-local automation guidance lives in `AGENTS.md`.
+- Reusable Codex skill instructions live in `skills/artbot-cli/SKILL.md`.
 
 ## Repository Conventions
 

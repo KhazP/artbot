@@ -1063,6 +1063,32 @@ export class ArtistMarketInventoryOrchestrator {
 
         if (result.record) {
           let normalized = applyConfidenceModel(await normalizeRecordCurrencies(result.record, this.fxRates));
+          if (normalized.original_currency_canonical || normalized.normalization_confidence_score != null) {
+            this.storage.saveNormalizationEvent({
+              run_id: run.id,
+              record_ref: normalized.source_url,
+              source_name: normalized.source_name,
+              source_url: normalized.source_url,
+              work_title: normalized.work_title,
+              payload_json: {
+                original_currency_raw: normalized.original_currency_raw ?? null,
+                original_currency_canonical: normalized.original_currency_canonical ?? null,
+                original_event_date: normalized.original_event_date ?? null,
+                date_confidence: normalized.date_confidence ?? "unknown",
+                historical_price_try: normalized.historical_price_try ?? null,
+                historical_price_usd: normalized.historical_price_usd ?? null,
+                historical_price_eur: normalized.historical_price_eur ?? null,
+                current_price_try: normalized.current_price_try ?? null,
+                current_price_usd: normalized.current_price_usd ?? null,
+                current_price_eur: normalized.current_price_eur ?? null,
+                current_price_as_of_date: normalized.current_price_as_of_date ?? null,
+                normalization_confidence_score: normalized.normalization_confidence_score ?? null,
+                normalization_confidence_reasons: normalized.normalization_confidence_reasons ?? [],
+                normalization_warnings: normalized.normalization_warnings ?? [],
+                normalization_requires_manual_review: normalized.normalization_requires_manual_review ?? false
+              }
+            });
+          }
           if (!normalized.image_url && renderedArtifacts?.discoveredImageUrls[0]) {
             normalized = {
               ...normalized,
@@ -2376,7 +2402,10 @@ export async function processArtistMarketInventoryRun(
     new SourceRegistry(deps.adapters),
     deps.authManager,
     deps.browserClient,
-    new FxRateProvider()
+    new FxRateProvider(fetch, Number(process.env.USD_INFLATION_BASE_YEAR ?? 2026), {
+      getRatesForDate: (date, baseCurrency) => deps.storage.getFxRatesForDate(date, baseCurrency),
+      upsertFxRateDaily: (input) => deps.storage.upsertFxRateDaily(input)
+    })
   );
   await orchestrator.processRun(run);
 }

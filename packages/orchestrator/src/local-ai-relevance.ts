@@ -1,3 +1,4 @@
+import { resolveOpenAiCompatibleApiKey, resolveOpenAiCompatibleModel } from "@artbot/shared-types";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type {
@@ -81,8 +82,8 @@ export function buildLocalAiRelevanceConfigFromEnv(): LocalAiRelevanceConfig {
     enabled: asBoolean(process.env.LOCAL_AI_RELEVANCE_ENABLED, true) && Boolean(baseUrl),
     provider: "openai_compatible",
     baseUrl,
-    apiKey: process.env.LLM_API_KEY?.trim() ?? null,
-    model: process.env.MODEL_CHEAP_DEFAULT ?? "google/gemma-4-26b-a4b",
+    apiKey: resolveOpenAiCompatibleApiKey(process.env),
+    model: resolveOpenAiCompatibleModel(process.env, "google/gemma-4-26b-a4b"),
     mode,
     minConfidenceAuto,
     maxLatencyMs: asInteger(process.env.LOCAL_AI_MAX_LATENCY_MS, 3_500),

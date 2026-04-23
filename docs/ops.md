@@ -17,11 +17,16 @@ Copy `.env.example` to `.env` and set:
 - `DATABASE_PATH` (default: `./var/data/artbot.db`)
 - `RUNS_ROOT` (default: `./var/runs`)
 - `FIRECRAWL_API_KEY` (optional)
-- `FIRECRAWL_ENABLED` (optional; default `false`, enables paid Firecrawl path only when explicitly set)
-- `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` (optional)
+- `FIRECRAWL_ENABLED` (optional; default `false`, enables the public-page Firecrawl cheap-fetch path only when explicitly set)
+- `FIRECRAWL_BASE_URL` (optional; set this when using a self-hosted Firecrawl backend)
+- `FIRECRAWL_TIMEOUT_MS`, `FIRECRAWL_MAX_RETRIES` (optional; cheap-fetch safety limits for Firecrawl transport)
+- `FIRECRAWL_SOURCE_FAMILIES` (optional comma-separated allowlist; restrict Firecrawl to specific source families such as `artam,public-db`)
+- `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` (optional; required only when `STAGEHAND_MODE=BROWSERBASE`)
 - `STRUCTURED_LLM_PROVIDER` (`auto` | `gemini` | `openai_compatible`; optional)
-- `LLM_BASE_URL` (optional; OpenAI-compatible endpoint such as LM Studio)
-- `LLM_API_KEY` (optional; OpenAI-compatible auth token if required)
+- `LLM_MODEL` (optional; canonical OpenAI-compatible model ID used by the CLI and Stagehand LOCAL)
+- `LLM_BASE_URL` (optional; OpenAI-compatible endpoint such as LM Studio or `https://integrate.api.nvidia.com/v1`)
+- `LLM_API_KEY` (optional; OpenAI-compatible auth token if required; local LM Studio can keep `lm-studio`)
+- `STAGEHAND_MODE` (`DISABLED` | `LOCAL` | `BROWSERBASE`; optional, onboarding defaults to `LOCAL`)
 - `GEMINI_API_KEY` (optional; schema-bound fallback extraction when provider is `gemini` or `auto`)
 - `DISCOVERY_MAX_CANDIDATES_PER_SOURCE`
 - `DISCOVERY_MAX_VARIANTS`
@@ -33,6 +38,12 @@ Copy `.env.example` to `.env` and set:
 - `WEB_DISCOVERY_MAX_DOMAINS_PER_RUN`, `WEB_DISCOVERY_MAX_URLS_PER_DOMAIN`, `WEB_DISCOVERY_MAX_TOTAL_CANDIDATES`
 - `FX_PROVIDER`, `FX_TRY_FALLBACK_PROVIDER`, `USD_INFLATION_PROVIDER`, `USD_INFLATION_BASE_YEAR`
 - `EVIDENCE_TRACE_MODE` (`selective` recommended)
+
+Stagehand mode notes:
+
+- `STAGEHAND_MODE=LOCAL` uses the configured `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` against a local Playwright browser.
+- `STAGEHAND_MODE=BROWSERBASE` uses Browserbase credentials instead of the local browser path.
+- `MODEL_CHEAP_DEFAULT` is still read as a compatibility fallback, but setup now keeps it synced from `LLM_MODEL` during the transition.
 
 Path resolution guardrails:
 
@@ -80,8 +91,8 @@ Capture/update browser session states (manual login):
 
 ## CLI Usage
 
-- Bare `pnpm --filter artbot dev --` prints help.
-- Open the interactive UI explicitly with `pnpm --filter artbot dev -- tui`.
+- Bare `pnpm --filter artbot dev --` opens the interactive UI in an interactive terminal.
+- Use `pnpm --filter artbot dev -- tui` as an explicit alias.
 - Prefer `--json` for automation and agent runs.
 - `pnpm --filter artbot dev -- research artist --artist "Burhan Dogancay" --wait`
 - `pnpm --filter artbot dev -- research work --artist "Erol Akyavas" --title "Kusatma" --medium "oil on canvas" --height-cm 100 --width-cm 80`
@@ -150,5 +161,22 @@ Session-aware flags:
 ## Cost Controls
 
 - Cheap extraction first (direct local HTTP parser by default; Firecrawl only when `FIRECRAWL_ENABLED=true`).
+- Firecrawl stays in the cheap, stateless public-access lane; authenticated/sessioned flows still belong to Playwright/browser verification.
 - Browser launched only for verification or auth/session-required contexts.
+- Structured LLM extraction stays schema-bound only; LangChain is used for typed extraction orchestration, not agentic crawling.
 - No hard-model escalation path in v1.
+
+## Diagnostics
+
+The Ink shell now exposes diagnostics-first side panes for operators:
+
+- `/sources` for source-level attempts, priced outcomes, auth-required hits, and blocks.
+- `/normalize` for raw price token, TL/YTL/TRL interpretation, historical/current FX, and inflation-adjusted USD/EUR.
+- `/review` plus `/review merge <id>` or `/review keep <id>` for duplicate-review adjudication on inventory runs.
+- `/fx` for SQLite FX cache row counts, source mix, and latest cached date.
+- `/errors` for recent transport, blocker, and parse failures.
+
+Normalization traces and FX cache stats are also available over the API:
+
+- `GET /runs/:id/normalization-events`
+- `GET /fx/cache`

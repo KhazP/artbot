@@ -28,6 +28,7 @@ import {
   sourceHealthRecordSchema,
   sourcePlanItemSchema
 } from "./operations.js";
+import { fxCacheStatsSchema, normalizationEventSchema } from "./normalization.js";
 import { researchQuerySchema } from "./query.js";
 import { priceRecordSchema } from "./record.js";
 
@@ -198,6 +199,8 @@ export const runDetailsResponseSchema = z.object({
   persisted_source_metrics: z.array(sourceHealthRecordSchema).optional(),
   recent_canaries: z.array(canaryResultSchema).optional(),
   local_ai_decisions: z.array(localAiDecisionTraceSchema).optional(),
+  normalization_events: z.array(normalizationEventSchema).optional(),
+  fx_cache_stats: fxCacheStatsSchema.optional(),
   valuation: z.unknown().optional(),
   duplicates: z.array(priceRecordSchema).optional(),
   per_painting_stats: z.array(z.unknown()).optional(),

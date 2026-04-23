@@ -3,6 +3,8 @@
 ## Core
 - [Docs Structure](STRUCTURE.md)
 - [Architecture](architecture.md)
+- [Roadmap](roadmap.md)
+- [Decision Log](decision-log.md)
 - [Operations](ops.md)
 - [Source Matrix](source-matrix.md)
 - [Adapter Authoring](adapter-authoring.md)

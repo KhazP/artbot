@@ -60,7 +60,7 @@ describe("tui state", () => {
           ...DEFAULT_SURFACE_STATE,
           recentRunsQuery: "beykam"
         },
-        "theme-picker"
+        "settings"
       )
     );
 
@@ -71,6 +71,7 @@ describe("tui state", () => {
 
   it("toggles the secondary pane preference", () => {
     const next = toggleSecondaryPane({
+      language: "en",
       theme: "artbot",
       density: "comfortable",
       showSecondaryPane: true,
@@ -103,6 +104,7 @@ describe("tui state", () => {
         requestedSidePane: "setup",
         sidePaneDismissed: false,
         preferences: {
+          language: "en",
           theme: "artbot",
           density: "comfortable",
           showSecondaryPane: false,
@@ -118,6 +120,7 @@ describe("tui state", () => {
         requestedSidePane: "none",
         sidePaneDismissed: false,
         preferences: {
+          language: "en",
           theme: "artbot",
           density: "comfortable",
           showSecondaryPane: false,
@@ -135,6 +138,7 @@ describe("tui state", () => {
         requestedSidePane: "none",
         sidePaneDismissed: true,
         preferences: {
+          language: "en",
           theme: "artbot",
           density: "comfortable",
           showSecondaryPane: true,

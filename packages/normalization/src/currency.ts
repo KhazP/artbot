@@ -1,66 +1,6 @@
 import type { PriceRecord } from "@artbot/shared-types";
 import type { FxRateProvider } from "./rates-cache.js";
-
-interface PriceForConversion {
-  amount: number;
-  currency: string;
-}
-
-function toEur(amount: number, currency: string, rates: Record<string, number>): number | null {
-  if (currency === "EUR") return amount;
-  const rate = rates[currency];
-  if (!rate || !Number.isFinite(rate) || rate <= 0) return null;
-  return amount / rate;
-}
-
-function fromEur(amountEur: number, currency: string, rates: Record<string, number>): number | null {
-  if (currency === "EUR") return amountEur;
-  const rate = rates[currency];
-  if (!rate || !Number.isFinite(rate) || rate <= 0) return null;
-  return amountEur * rate;
-}
-
-function resolveConversionDate(record: PriceRecord): string | undefined {
-  if (record.sale_or_listing_date && /^\d{4}-\d{2}-\d{2}$/.test(record.sale_or_listing_date)) {
-    return record.sale_or_listing_date;
-  }
-  if (record.sale_or_listing_date) {
-    const parsed = new Date(record.sale_or_listing_date);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.toISOString().slice(0, 10);
-    }
-  }
-  if (record.year && /^\d{4}$/.test(record.year)) {
-    return `${record.year}-06-30`;
-  }
-  return undefined;
-}
-
-function sourcePrice(record: PriceRecord): PriceForConversion | null {
-  if (record.currency && typeof record.price_amount === "number" && Number.isFinite(record.price_amount)) {
-    return {
-      amount: record.price_amount,
-      currency: record.currency
-    };
-  }
-
-  if (
-    record.currency &&
-    ((typeof record.estimate_low === "number" && Number.isFinite(record.estimate_low)) ||
-      (typeof record.estimate_high === "number" && Number.isFinite(record.estimate_high)))
-  ) {
-    const low = record.estimate_low ?? record.estimate_high ?? null;
-    const high = record.estimate_high ?? record.estimate_low ?? null;
-    if (typeof low === "number" && Number.isFinite(low) && typeof high === "number" && Number.isFinite(high)) {
-      return {
-        amount: (low + high) / 2,
-        currency: record.currency
-      };
-    }
-  }
-
-  return null;
-}
+import { normalizePriceEnvelope } from "./price-normalizer/index.js";
 
 function yearFromDate(dateValue?: string): number | null {
   if (!dateValue) return null;
@@ -85,37 +25,64 @@ function inflationAdjustedUsd(
   return nominalUsd * (baseCpi / fromCpi);
 }
 
+function inflationAdjustedEur(
+  adjustedUsd: number | null,
+  baseYearUsdPerEur: number | null
+): number | null {
+  if (adjustedUsd === null || baseYearUsdPerEur === null || !Number.isFinite(baseYearUsdPerEur) || baseYearUsdPerEur <= 0) {
+    return null;
+  }
+
+  return adjustedUsd / baseYearUsdPerEur;
+}
+
 export async function normalizeRecordCurrencies(record: PriceRecord, provider: FxRateProvider): Promise<PriceRecord> {
-  const price = sourcePrice(record);
-  if (!price) {
+  const envelope = await normalizePriceEnvelope(record, provider);
+  if (!envelope) {
     return record;
   }
 
-  const conversionDate = resolveConversionDate(record);
-  const rateTable = await provider.getRates(conversionDate);
-  const amountEur = toEur(price.amount, price.currency, rateTable.rates);
-  if (amountEur === null) {
-    return record;
-  }
-
-  const normalizedTry = fromEur(amountEur, "TRY", rateTable.rates);
-  const normalizedUsd = fromEur(amountEur, "USD", rateTable.rates);
   const inflation = provider.getInflationTable();
-  const fromYear = yearFromDate(rateTable.date || conversionDate);
+  const fromYear = yearFromDate(envelope.original_event_date ?? undefined);
+  const baseYearRates = await provider.getRates(`${inflation.baseYear}-06-30`);
   const usd2026 =
-    typeof normalizedUsd === "number" && Number.isFinite(normalizedUsd)
-      ? inflationAdjustedUsd(normalizedUsd, fromYear, inflation.cpiByYear, inflation.baseYear)
+    typeof envelope.historical_price_usd === "number" && Number.isFinite(envelope.historical_price_usd)
+      ? inflationAdjustedUsd(envelope.historical_price_usd, fromYear, inflation.cpiByYear, inflation.baseYear)
       : null;
+  const eur2026 = inflationAdjustedEur(usd2026, baseYearRates.rates.USD ?? null);
 
   return {
     ...record,
-    normalized_price_try: normalizedTry,
-    normalized_price_usd: normalizedUsd,
-    normalized_price_usd_nominal: normalizedUsd,
+    normalized_price_try: envelope.historical_price_try,
+    normalized_price_usd: envelope.historical_price_usd,
+    normalized_price_eur: envelope.historical_price_eur,
+    normalized_price_usd_nominal: envelope.historical_price_usd,
+    normalized_price_eur_nominal: envelope.historical_price_eur,
     normalized_price_usd_2026: usd2026,
-    fx_source: rateTable.source,
-    fx_date_used: rateTable.date,
-    inflation_source: inflation.source,
-    inflation_base_year: inflation.baseYear
+    normalized_price_eur_2026: eur2026,
+    fx_source: envelope.historical_fx_source,
+    fx_date_used: envelope.original_event_date,
+    inflation_source: `${inflation.source}+base_year_fx`,
+    inflation_base_year: inflation.baseYear,
+    original_amount_raw: envelope.original_amount_raw,
+    original_currency_raw: envelope.original_currency_raw,
+    original_currency_canonical: envelope.original_currency_canonical,
+    original_event_date: envelope.original_event_date,
+    date_confidence: envelope.date_confidence,
+    currency_interpretation_confidence: envelope.currency_interpretation_confidence,
+    redenomination_applied: envelope.redenomination_applied,
+    redenomination_factor: envelope.redenomination_factor,
+    historical_price_try: envelope.historical_price_try,
+    historical_price_usd: envelope.historical_price_usd,
+    historical_price_eur: envelope.historical_price_eur,
+    current_price_try: envelope.current_price_try,
+    current_price_usd: envelope.current_price_usd,
+    current_price_eur: envelope.current_price_eur,
+    current_price_as_of_date: envelope.current_price_as_of_date,
+    normalization_notes: envelope.normalization_notes,
+    normalization_warnings: envelope.normalization_warnings,
+    normalization_confidence_score: envelope.normalization_confidence_score,
+    normalization_confidence_reasons: envelope.normalization_confidence_reasons,
+    normalization_requires_manual_review: envelope.normalization_requires_manual_review
   };
 }

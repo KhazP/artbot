@@ -49,7 +49,7 @@ export async function checkLlmHealth(
         statusCode: response.status,
         reason:
           response.status === 404
-            ? `HTTP 404. If you use LM Studio, make sure the URL ends with /v1 and the local server is running.`
+            ? `HTTP 404. Make sure the base URL points at an OpenAI-compatible endpoint and includes /v1 when required.`
             : `HTTP ${response.status}`
       };
     }
@@ -61,14 +61,14 @@ export async function checkLlmHealth(
       modelId: payload.data?.[0]?.id
     };
   } catch (error) {
-    return {
-      ok: false,
-      baseUrl: normalizedBaseUrl,
-      reason:
-        error instanceof Error
-          ? `${error.message}. Expected an OpenAI-compatible endpoint such as LM Studio at ${normalizedBaseUrl}.`
+      return {
+        ok: false,
+        baseUrl: normalizedBaseUrl,
+        reason:
+          error instanceof Error
+          ? `${error.message}. Expected an OpenAI-compatible endpoint at ${normalizedBaseUrl}.`
           : String(error)
-    };
+      };
   }
 }
 

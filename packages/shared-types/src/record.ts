@@ -18,6 +18,7 @@ import {
   sourceLegalPostureSchema,
   sourceSurfaceSchema
 } from "./operations.js";
+import { normalizationOptionalFieldsSchema } from "./normalization.js";
 
 export const priceRecordSchema = z.object({
   artist_name: z.string(),
@@ -70,8 +71,11 @@ export const priceRecordSchema = z.object({
   currency: z.string().nullable(),
   normalized_price_try: z.number().nullable(),
   normalized_price_usd: z.number().nullable(),
+  normalized_price_eur: z.number().nullable().optional(),
   normalized_price_usd_nominal: z.number().nullable().optional(),
+  normalized_price_eur_nominal: z.number().nullable().optional(),
   normalized_price_usd_2026: z.number().nullable().optional(),
+  normalized_price_eur_2026: z.number().nullable().optional(),
   fx_source: z.string().nullable().optional(),
   fx_date_used: z.string().nullable().optional(),
   inflation_source: z.string().nullable().optional(),
@@ -113,7 +117,7 @@ export const priceRecordSchema = z.object({
   acceptance_explanation: z.string().nullable().optional(),
   next_step_hint: z.string().nullable().optional(),
   notes: z.array(z.string())
-});
+}).extend(normalizationOptionalFieldsSchema.shape);
 
 export type PriceRecord = z.infer<typeof priceRecordSchema>;
 

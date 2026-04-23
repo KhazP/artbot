@@ -2,6 +2,7 @@ import React, { startTransition, useCallback, useDeferredValue, useEffect, useMe
 import { Box, Text, render, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { RunEntity } from "@artbot/shared-types";
+import { type AppLocale } from "./i18n.js";
 import { assessLocalSetup } from "./setup/workflow.js";
 import type { SetupAssessment } from "./setup/index.js";
 import {
@@ -20,8 +21,6 @@ import {
   closeOverlay,
   filterRecentRuns,
   getCompletedReportSurfaceByIndex,
-  getThemeIndex,
-  getThemeNameByIndex,
   getTuiTheme,
   openOverlay,
   resolveDisplayedRun,
@@ -32,6 +31,7 @@ import {
   toggleSecondaryPane,
   type Overlay,
   type PipelineDetails,
+  type SidePane,
   type TuiPreferences,
   type TuiSurfaceState
 } from "./tui/index.js";
@@ -49,14 +49,29 @@ export interface InteractiveStartContext {
   };
 }
 
+export interface InteractiveStartupState {
+  message?: string;
+  sidePane?: SidePane;
+  focusTarget?: TuiSurfaceState["focusTarget"];
+}
+
 interface InteractiveAppProps {
   context: InteractiveStartContext;
   initialAssessment: SetupAssessment | null;
   initialPreferences: TuiPreferences;
+  startup?: InteractiveStartupState;
   onExit: (code: number) => void;
 }
 
 type RunInteractiveTuiProps = Omit<InteractiveAppProps, "onExit">;
+type KeyboardInput = {
+  ctrl?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  return?: boolean;
+  escape?: boolean;
+  tab?: boolean;
+};
 
 function summarizeCompletedRun(details: PipelineDetails | null): { accepted: number; coverage: number } | null {
   const summary = details?.summary;
@@ -108,6 +123,44 @@ function useTerminalDimensions() {
   return dimensions;
 }
 
+function getSettingsIndex(preferences: TuiPreferences): number {
+  if (preferences.language === "tr") return 1;
+  if (preferences.theme === "system") return 3;
+  if (preferences.theme === "matrix") return 4;
+  if (preferences.density === "compact") return 6;
+  return 2;
+}
+
+function previewThemeFromSettingsIndex(index: number, fallback: TuiPreferences["theme"]): TuiPreferences["theme"] {
+  if (index === 3) return "system";
+  if (index === 4) return "matrix";
+  if (index === 2) return "artbot";
+  return fallback;
+}
+
+function applySettingsSelection(preferences: TuiPreferences, index: number): TuiPreferences {
+  switch (index) {
+    case 0:
+      return { ...preferences, language: "en" };
+    case 1:
+      return { ...preferences, language: "tr" };
+    case 2:
+      return { ...preferences, theme: "artbot" };
+    case 3:
+      return { ...preferences, theme: "system" };
+    case 4:
+      return { ...preferences, theme: "matrix" };
+    case 5:
+      return { ...preferences, density: "comfortable" };
+    case 6:
+      return { ...preferences, density: "compact" };
+    case 7:
+      return { ...preferences, showSecondaryPane: !preferences.showSecondaryPane };
+    default:
+      return preferences;
+  }
+}
+
 export function runInteractiveTui(props: RunInteractiveTuiProps): Promise<number> {
   return new Promise((resolve) => {
     let settled = false;
@@ -125,7 +178,7 @@ export function runInteractiveTui(props: RunInteractiveTuiProps): Promise<number
   });
 }
 
-function InteractiveApp({ context, initialAssessment, initialPreferences, onExit }: InteractiveAppProps) {
+function InteractiveApp({ context, initialAssessment, initialPreferences, startup, onExit }: InteractiveAppProps) {
   const { exit } = useApp();
   const dimensions = useTerminalDimensions();
 
@@ -138,20 +191,20 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [busy, setBusy] = useState(false);
   const [activeArtist, setActiveArtist] = useState("");
-  const [message, setMessage] = useState("Slash command ready.");
+  const [message, setMessage] = useState(startup?.message ?? "Slash command ready.");
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [browserReportPath, setBrowserReportPath] = useState<string | null>(null);
-  const [thinkingTick, setThinkingTick] = useState(0);
+  const [fxCacheStats, setFxCacheStats] = useState<PipelineDetails["fx_cache_stats"] | undefined>(undefined);
   const [composerSubmitNonce, setComposerSubmitNonce] = useState(0);
   const [preferences, setPreferences] = useState<TuiPreferences>(initialPreferences);
   const [uiState, setUiState] = useState<TuiSurfaceState>(() => ({
-    sidePane: initialAssessment?.issues.length ? ("setup" as const) : ("none" as const),
+    sidePane: startup?.sidePane ?? (initialAssessment?.issues.length ? ("setup" as const) : ("none" as const)),
     sidePaneDismissed: false,
     overlay: "none" as Overlay,
-    focusTarget: "composer" as const,
+    focusTarget: startup?.focusTarget ?? (startup?.sidePane ? "side" : "composer"),
     recentRunsQuery: "",
     selectedRecentRunIndex: 0,
-    selectedThemeIndex: getThemeIndex(initialPreferences.theme),
+    selectedSettingsIndex: getSettingsIndex(initialPreferences),
     selectedReportSurfaceIndex: 0
   }));
   const cancelPollingRef = useRef(false);
@@ -182,7 +235,8 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     [assessment?.issues.length, preferences, primaryView, uiState.sidePane, uiState.sidePaneDismissed]
   );
   const effectiveThemeName =
-    uiState.overlay === "theme-picker" ? getThemeNameByIndex(uiState.selectedThemeIndex) : preferences.theme;
+    uiState.overlay === "settings" ? previewThemeFromSettingsIndex(uiState.selectedSettingsIndex, preferences.theme) : preferences.theme;
+  const locale: AppLocale = preferences.language;
   const theme = useMemo(() => getTuiTheme(effectiveThemeName), [effectiveThemeName]);
   const composerState = useMemo(
     () =>
@@ -225,6 +279,18 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     [context.apiBaseUrl, context.apiKey]
   );
 
+  const fetchFxCacheStats = useCallback(async () => {
+    const response = await fetch(`${context.apiBaseUrl}/fx/cache`, {
+      headers: context.apiKey ? { "x-api-key": context.apiKey } : undefined
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to load FX cache stats (${response.status})`);
+    }
+    const payload = (await response.json()) as { stats: NonNullable<PipelineDetails["fx_cache_stats"]> };
+    setFxCacheStats(payload.stats);
+    return payload.stats;
+  }, [context.apiBaseUrl, context.apiKey]);
+
   const persistPreferences = useCallback((nextPreferences: TuiPreferences) => {
     setPreferences(nextPreferences);
     try {
@@ -242,21 +308,26 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       return false;
     }
 
-    const result = await generateAndOpenBrowserReportFromPayload(nextDetails, {
-      runId,
-      resultsPath: nextDetails?.run?.resultsPath
-    });
-    setBrowserReportPath(result.htmlPath);
-    setMessage(
-      buildCompletedReportMessage({
-        accepted: snapshot.accepted,
-        coverage: snapshot.coverage,
-        surface: "web",
-        browserPath: result.htmlPath,
-        error: result.opened ? undefined : result.error
-      })
-    );
-    return result.opened;
+    try {
+      const result = await generateAndOpenBrowserReportFromPayload(nextDetails, {
+        runId,
+        resultsPath: nextDetails?.run?.resultsPath
+      });
+      setBrowserReportPath(result.htmlPath);
+      setMessage(
+        buildCompletedReportMessage({
+          accepted: snapshot.accepted,
+          coverage: snapshot.coverage,
+          surface: "web",
+          browserPath: result.htmlPath,
+          error: result.opened ? undefined : result.error
+        })
+      );
+      return result.opened;
+    } catch (error) {
+      setMessage(`Browser report failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }, []);
 
   const presentCompletedRun = useCallback(
@@ -270,7 +341,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         return;
       }
 
-      setUiState((current) => closeOverlay(current));
+      setUiState((current: TuiSurfaceState) => closeOverlay(current));
 
       if (surface === "web") {
         await openBrowserReportForRun(nextDetails);
@@ -297,7 +368,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
   const openRecentRunsOverlay = useCallback(() => {
     startTransition(() => {
-      setUiState((current) => openOverlay(current, "recent-runs", getThemeIndex(preferences.theme)));
+      setUiState((current: TuiSurfaceState) => openOverlay(current, "recent-runs", getSettingsIndex(preferences)));
     });
 
     void (async () => {
@@ -308,25 +379,25 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         setMessage(error instanceof Error ? error.message : String(error));
       }
     })();
-  }, [fetchRecentRuns, preferences.theme]);
+  }, [fetchRecentRuns, preferences]);
 
-  const openThemeOverlay = useCallback(() => {
+  const openSettingsOverlay = useCallback(() => {
     startTransition(() => {
-      setUiState((current) => openOverlay(current, "theme-picker", getThemeIndex(preferences.theme)));
+      setUiState((current: TuiSurfaceState) => openOverlay(current, "settings", getSettingsIndex(preferences)));
     });
-    setMessage("Theme preview open.");
-  }, [preferences.theme]);
+    setMessage("Settings open.");
+  }, [preferences]);
 
   const openReportSurfaceOverlay = useCallback(() => {
     startTransition(() => {
-      setUiState((current) => openOverlay(current, "report-surface", current.selectedThemeIndex, 0));
+      setUiState((current: TuiSurfaceState) => openOverlay(current, "report-surface", current.selectedSettingsIndex, 0));
     });
     setMessage("Choose how to view the completed report.");
   }, []);
 
   const openSetupSidePane = useCallback(() => {
     startTransition(() => {
-      setUiState((current) => ({
+      setUiState((current: TuiSurfaceState) => ({
         ...closeOverlay(current),
         sidePane: "setup",
         sidePaneDismissed: false,
@@ -346,7 +417,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
   const openAuthSidePane = useCallback(() => {
     startTransition(() => {
-      setUiState((current) => ({
+      setUiState((current: TuiSurfaceState) => ({
         ...closeOverlay(current),
         sidePane: "auth",
         sidePaneDismissed: false,
@@ -364,24 +435,79 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     })();
   }, [refreshAssessment]);
 
-  const commitThemeSelection = useCallback(() => {
-    const nextTheme = getThemeNameByIndex(uiState.selectedThemeIndex);
-    const nextPreferences = {
-      ...preferences,
-      theme: nextTheme
-    } satisfies TuiPreferences;
+  const openNormalizationSidePane = useCallback(() => {
+    startTransition(() => {
+      setUiState((current: TuiSurfaceState) => ({
+        ...closeOverlay(current),
+        sidePane: "normalization",
+        sidePaneDismissed: false,
+        focusTarget: "side"
+      }));
+    });
+    setMessage("Normalization diagnostics loaded.");
+  }, []);
 
+  const openRunSidePane = useCallback((sidePane: Exclude<SidePane, "none" | "setup" | "auth">, messageText: string) => {
+    startTransition(() => {
+      setUiState((current: TuiSurfaceState) => ({
+        ...closeOverlay(current),
+        sidePane,
+        sidePaneDismissed: false,
+        focusTarget: "side"
+      }));
+    });
+    setMessage(messageText);
+  }, []);
+
+  const refreshDisplayedRun = useCallback(async () => {
+    const runId = displayedRun?.run?.id;
+    if (!runId) {
+      return null;
+    }
+    const details = await fetchRunDetails(runId);
+    if (busy) {
+      setSessionRunDetails(details);
+    } else {
+      setBrowsedRunDetails(details);
+    }
+    return details;
+  }, [busy, displayedRun?.run?.id, fetchRunDetails]);
+
+  const adjudicateReviewItem = useCallback(async (reviewId: string, decision: "merge" | "keep_separate") => {
+    const runId = displayedRun?.run?.id;
+    if (!runId) {
+      throw new Error("Load or start a run before adjudicating review items.");
+    }
+
+    const response = await fetch(`${context.apiBaseUrl}/runs/${runId}/review-queue/${reviewId}/adjudicate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(context.apiKey ? { "x-api-key": context.apiKey } : {})
+      },
+      body: JSON.stringify({ decision })
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to adjudicate review item (${response.status})`);
+    }
+
+    await refreshDisplayedRun();
+    openRunSidePane("review", `Review item ${reviewId} updated: ${decision}.`);
+  }, [context.apiBaseUrl, context.apiKey, displayedRun?.run?.id, openRunSidePane, refreshDisplayedRun]);
+
+  const commitSettingsSelection = useCallback(() => {
+    const nextPreferences = applySettingsSelection(preferences, uiState.selectedSettingsIndex);
     persistPreferences(nextPreferences);
-    setUiState((current) => closeOverlay(current));
-    setMessage(`Theme saved: ${nextTheme}`);
-  }, [persistPreferences, preferences, uiState.selectedThemeIndex]);
+    setUiState((current: TuiSurfaceState) => closeOverlay(current));
+    setMessage("Settings saved.");
+  }, [persistPreferences, preferences, uiState.selectedSettingsIndex]);
 
   const selectHistoricalRun = useCallback(
     async (runId: string) => {
       const details = await fetchRunDetails(runId);
       setBrowsedRunDetails(details);
       setActiveArtist(details.run?.query?.artist ?? activeArtist);
-      setUiState((current) => ({
+      setUiState((current: TuiSurfaceState) => ({
         ...closeOverlay(current),
         sidePane: "run-details",
         sidePaneDismissed: false,
@@ -405,27 +531,12 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
   useEffect(() => {
     if (uiState.selectedRecentRunIndex >= visibleRecentRuns.length) {
-      setUiState((current) => ({
+      setUiState((current: TuiSurfaceState) => ({
         ...current,
         selectedRecentRunIndex: Math.max(0, visibleRecentRuns.length - 1)
       }));
     }
   }, [uiState.selectedRecentRunIndex, visibleRecentRuns.length]);
-
-  useEffect(() => {
-    if (primaryView !== "running") {
-      setThinkingTick(0);
-      return;
-    }
-
-    const interval = setInterval(() => {
-      setThinkingTick((current) => current + 1);
-    }, 80);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [primaryView]);
 
   const startResearch = useCallback(
     async (kind: "artist" | "work" | "artist_market_inventory", artist: string, title?: string) => {
@@ -439,7 +550,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       setRunStartedAt(Date.now());
       setBrowserReportPath(null);
       setBrowsedRunDetails(null);
-      setUiState((current) => ({
+      setUiState((current: TuiSurfaceState) => ({
         ...closeOverlay(current),
         sidePane: "run-details",
         sidePaneDismissed: false,
@@ -450,7 +561,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       try {
         const nextAssessment = await refreshAssessment();
         if (!nextAssessment.apiHealth.ok) {
-          setUiState((current) => ({
+          setUiState((current: TuiSurfaceState) => ({
             ...current,
             sidePane: "setup",
             sidePaneDismissed: false,
@@ -565,7 +676,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
   const handleComposerChange = useCallback(
     (value: string) => {
       if (uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay") {
-        setUiState((current) => ({
+        setUiState((current: TuiSurfaceState) => ({
           ...current,
           recentRunsQuery: value,
           selectedRecentRunIndex: 0
@@ -573,7 +684,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         return;
       }
 
-      if (uiState.overlay === "theme-picker" && uiState.focusTarget === "overlay") {
+      if (uiState.overlay === "settings" && uiState.focusTarget === "overlay") {
         return;
       }
 
@@ -599,8 +710,8 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         return;
       }
 
-      if (uiState.overlay === "theme-picker" && uiState.focusTarget === "overlay") {
-        commitThemeSelection();
+      if (uiState.overlay === "settings" && uiState.focusTarget === "overlay") {
+        commitSettingsSelection();
         return;
       }
 
@@ -612,10 +723,10 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       const trimmed = value.trim();
       if (!trimmed) return;
 
-      setHistory((current) => [trimmed, ...current.filter((entry) => entry !== trimmed)].slice(0, 12));
+      setHistory((current: string[]) => [trimmed, ...current.filter((entry: string) => entry !== trimmed)].slice(0, 12));
       setHistoryIndex(-1);
       setInput("");
-      setComposerSubmitNonce((current) => current + 1);
+      setComposerSubmitNonce((current: number) => current + 1);
 
       try {
         if (!trimmed.startsWith("/")) {
@@ -631,7 +742,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         }
 
         if (trimmed === "/help") {
-          setUiState((current) => openOverlay(current, "help", getThemeIndex(preferences.theme)));
+          setUiState((current: TuiSurfaceState) => openOverlay(current, "help", getSettingsIndex(preferences)));
           setMessage("Command reference loaded.");
           return;
         }
@@ -641,8 +752,13 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
           return;
         }
 
+        if (trimmed === "/settings") {
+          openSettingsOverlay();
+          return;
+        }
+
         if (trimmed === "/theme") {
-          openThemeOverlay();
+          openSettingsOverlay();
           return;
         }
 
@@ -667,6 +783,42 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
         if (trimmed === "/auth") {
           openAuthSidePane();
+          return;
+        }
+
+        if (trimmed === "/normalize") {
+          openNormalizationSidePane();
+          return;
+        }
+
+        if (trimmed === "/sources") {
+          openRunSidePane("sources", "Source diagnostics loaded.");
+          return;
+        }
+
+        if (trimmed === "/review") {
+          openRunSidePane("review", "Review queue loaded.");
+          return;
+        }
+
+        if (trimmed.startsWith("/review merge ")) {
+          await adjudicateReviewItem(trimmed.slice("/review merge ".length).trim(), "merge");
+          return;
+        }
+
+        if (trimmed.startsWith("/review keep ")) {
+          await adjudicateReviewItem(trimmed.slice("/review keep ".length).trim(), "keep_separate");
+          return;
+        }
+
+        if (trimmed === "/fx") {
+          await fetchFxCacheStats();
+          openRunSidePane("fx", "FX cache diagnostics loaded.");
+          return;
+        }
+
+        if (trimmed === "/errors") {
+          openRunSidePane("errors", "Recent error diagnostics loaded.");
           return;
         }
 
@@ -707,13 +859,17 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       }
     },
     [
-      commitThemeSelection,
+      commitSettingsSelection,
+      adjudicateReviewItem,
       exit,
+      fetchFxCacheStats,
       onExit,
       openAuthSidePane,
+      openRunSidePane,
+      openNormalizationSidePane,
       openRecentRunsOverlay,
       openSetupSidePane,
-      openThemeOverlay,
+      openSettingsOverlay,
       presentCompletedRun,
       persistPreferences,
       preferences,
@@ -727,7 +883,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     ]
   );
 
-  useInput((value, key) => {
+  useInput((value: string, key: KeyboardInput) => {
     if (key.ctrl && value === "c") {
       cancelPollingRef.current = true;
       exit();
@@ -736,7 +892,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     }
 
     if (key.ctrl && value === "k") {
-      setUiState((current) => openOverlay(current, "help", getThemeIndex(preferences.theme)));
+      setUiState((current: TuiSurfaceState) => openOverlay(current, "help", getSettingsIndex(preferences)));
       return;
     }
 
@@ -751,14 +907,14 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     }
 
     if (key.ctrl && value === "t") {
-      openThemeOverlay();
+      openSettingsOverlay();
       return;
     }
 
     if (key.ctrl && value === "u") {
       const nextPreferences = toggleSecondaryPane(preferences);
       persistPreferences(nextPreferences);
-      setUiState((current) => ({
+      setUiState((current: TuiSurfaceState) => ({
         ...current,
         sidePane: nextPreferences.showSecondaryPane ? current.sidePane : "none",
         sidePaneDismissed: nextPreferences.showSecondaryPane ? false : current.sidePaneDismissed,
@@ -770,12 +926,12 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
     if (key.escape) {
       if (uiState.overlay !== "none") {
-        setUiState((current) => closeOverlay(current));
+        setUiState((current: TuiSurfaceState) => closeOverlay(current));
         return;
       }
 
       if (displayedSidePane !== "none") {
-        setUiState((current) => ({
+        setUiState((current: TuiSurfaceState) => ({
           ...current,
           sidePane: "none",
           sidePaneDismissed: true,
@@ -786,7 +942,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
     }
 
     if (key.tab) {
-      setUiState((current) => {
+      setUiState((current: TuiSurfaceState) => {
         if (current.overlay !== "none") {
           return {
             ...current,
@@ -813,7 +969,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
     if (uiState.overlay === "recent-runs" && uiState.focusTarget === "overlay") {
       if (key.upArrow || key.downArrow) {
-        setUiState((current) => ({
+        setUiState((current: TuiSurfaceState) => ({
           ...current,
           selectedRecentRunIndex: stepSelection(
             current.selectedRecentRunIndex,
@@ -827,7 +983,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
 
     if (uiState.overlay === "report-surface" && uiState.focusTarget === "overlay") {
       if (key.upArrow || key.downArrow) {
-        setUiState((current) => ({
+        setUiState((current: TuiSurfaceState) => ({
           ...current,
           selectedReportSurfaceIndex: stepSelection(
             current.selectedReportSurfaceIndex,
@@ -839,17 +995,17 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
       }
     }
 
-    if (uiState.overlay === "theme-picker" && uiState.focusTarget === "overlay") {
+    if (uiState.overlay === "settings" && uiState.focusTarget === "overlay") {
       if (key.upArrow || key.downArrow) {
-        setUiState((current) => ({
+        setUiState((current: TuiSurfaceState) => ({
           ...current,
-          selectedThemeIndex: stepSelection(current.selectedThemeIndex, key.upArrow ? -1 : 1, 3)
+          selectedSettingsIndex: stepSelection(current.selectedSettingsIndex, key.upArrow ? -1 : 1, 8)
         }));
         return;
       }
 
       if (key.return) {
-        commitThemeSelection();
+        commitSettingsSelection();
         return;
       }
     }
@@ -894,6 +1050,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         assessment={assessment}
         displayedRun={displayedRun}
         activeArtist={displayedRun?.run?.query?.artist ?? activeArtist}
+        locale={locale}
         primaryView={primaryView}
         sidePane={displayedSidePane}
         overlay={uiState.overlay}
@@ -902,11 +1059,12 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
         selectedReportSurfaceIndex={uiState.selectedReportSurfaceIndex}
         recentRunsQuery={uiState.recentRunsQuery}
         selectedRecentRunIndex={uiState.selectedRecentRunIndex}
-        selectedThemeIndex={uiState.selectedThemeIndex}
+        selectedSettingsIndex={uiState.selectedSettingsIndex}
         recentRuns={visibleRecentRuns}
         runStartedAt={runStartedAt}
-        thinkingTick={thinkingTick}
+        thinkingTick={0}
         browserReportPath={browserReportPath}
+        fxCacheStats={fxCacheStats}
         terminalWidth={dimensions.columns}
       />
 
@@ -933,7 +1091,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, onExit
           <Text color={theme.colors.muted}>{composerState.helperText}</Text>
         </Box>
 
-        <TuiKeyHintRail theme={theme} overlay={uiState.overlay} />
+        <TuiKeyHintRail theme={theme} overlay={uiState.overlay} locale={locale} />
       </Box>
     </Box>
   );

@@ -1,5 +1,5 @@
 import { pathExists } from "./lib/file-system.js";
-import { runInteractiveTui } from "./interactive-app.js";
+import { runInteractiveTui, type InteractiveStartupState } from "./interactive-app.js";
 import { normalizeReportSurface } from "./report/browser-report.js";
 import { assessLocalSetup, runSetupWizard } from "./setup/index.js";
 import { loadTuiPreferences } from "./tui/index.js";
@@ -46,6 +46,12 @@ interface BlockerSummary {
   category: string;
   count: number;
   hosts: string[];
+}
+
+export interface StartInteractiveOptions {
+  initialAssessment?: Awaited<ReturnType<typeof assessLocalSetup>>;
+  skipSetupWizard?: boolean;
+  startup?: InteractiveStartupState;
 }
 
 type PipelineAttempt = NonNullable<PipelineDetails["attempts"]>[number];
@@ -162,13 +168,29 @@ function shouldRunSetupWizard(assessment: Awaited<ReturnType<typeof assessLocalS
   return !pathExists(assessment.envPath) || Boolean(assessment.authProfilesError);
 }
 
-export async function startInteractive(): Promise<number> {
-  let initialAssessment = await assessLocalSetup();
+function buildSetupHandoffMessage(setup: Awaited<ReturnType<typeof runSetupWizard>>): string {
+  if (setup.backendStart?.reusedExisting) {
+    return "Setup saved. Local backend was already running. Review readiness on the setup pane, then start research.";
+  }
+  if (setup.backendStart) {
+    return "Setup saved and local backend started. Review readiness on the setup pane, then start research.";
+  }
+  return "Setup saved. Review readiness on the setup pane, then start research.";
+}
 
-  if (shouldRunSetupWizard(initialAssessment)) {
+export async function startInteractive(options: StartInteractiveOptions = {}): Promise<number> {
+  let initialAssessment = options.initialAssessment ?? await assessLocalSetup();
+  let startup = options.startup;
+
+  if (!options.skipSetupWizard && shouldRunSetupWizard(initialAssessment)) {
     try {
       const setup = await runSetupWizard();
       initialAssessment = setup.assessment;
+      startup = {
+        sidePane: "setup",
+        focusTarget: "side",
+        message: buildSetupHandoffMessage(setup)
+      };
     } catch {
       return 0;
     }
@@ -192,6 +214,7 @@ export async function startInteractive(): Promise<number> {
       }
     },
     initialAssessment,
-    initialPreferences
+    initialPreferences,
+    startup
   });
 }

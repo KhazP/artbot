@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeStagehandMode, resolveOpenAiCompatibleApiKey, resolveOpenAiCompatibleModel } from "@artbot/shared-types";
 import { config as loadDotenv } from "dotenv";
 import { normalizeLlmBaseUrl } from "./health.js";
 import type { AuthProfile, LocalRuntimePaths, SetupWizardValues } from "./types.js";
@@ -285,9 +286,24 @@ export function buildDefaultAuthProfiles(options: {
 }
 
 export function buildSetupEnvUpdates(values: SetupWizardValues): Record<string, string> {
+  const llmModel = resolveOpenAiCompatibleModel(
+    {
+      LLM_MODEL: values.llmModel,
+      MODEL_CHEAP_DEFAULT: values.llmModel
+    } as NodeJS.ProcessEnv,
+    "google/gemma-4-26b-a4b"
+  );
+
   return {
     LLM_BASE_URL: normalizeLlmBaseUrl(values.llmBaseUrl),
-    LLM_API_KEY: "lm-studio",
+    LLM_API_KEY: resolveOpenAiCompatibleApiKey(
+      {
+        LLM_API_KEY: values.llmApiKey
+      } as NodeJS.ProcessEnv
+    ),
+    LLM_MODEL: llmModel,
+    STAGEHAND_MODE: normalizeStagehandMode(values.stagehandMode),
+    MODEL_CHEAP_DEFAULT: llmModel,
     STRUCTURED_LLM_PROVIDER: "openai_compatible",
     API_BASE_URL: values.apiBaseUrl,
     ENABLE_OPTIONAL_PROBE_ADAPTERS: String(values.enableOptionalProbes),

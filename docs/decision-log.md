@@ -1,4 +1,4 @@
-# DECISION_LOG
+# Decision Log
 
 ## 2026-04-09
 

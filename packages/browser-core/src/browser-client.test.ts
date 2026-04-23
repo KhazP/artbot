@@ -6,6 +6,7 @@ import {
   containsBlockedIndicators,
   didRenderedPaginationAdvance,
   extractInlineScriptDiscoveredUrls,
+  resolveStagehandRuntimeConfig,
   shouldPersistHeavyBrowserArtifacts
 } from "./browser-client.js";
 
@@ -179,5 +180,62 @@ describe("shouldPersistHeavyBrowserArtifacts", () => {
 
   it("returns true only for standard artifact handling with heavy evidence enabled", () => {
     expect(shouldPersistHeavyBrowserArtifacts(true, "standard")).toBe(true);
+  });
+});
+
+describe("resolveStagehandRuntimeConfig", () => {
+  it("keeps stagehand disabled by default", () => {
+    expect(resolveStagehandRuntimeConfig({})).toEqual({
+      enabled: false,
+      mode: "DISABLED"
+    });
+  });
+
+  it("supports local stagehand without Browserbase credentials", () => {
+    expect(
+      resolveStagehandRuntimeConfig({
+        STAGEHAND_MODE: "LOCAL",
+        LLM_BASE_URL: "https://integrate.api.nvidia.com/v1",
+        LLM_API_KEY: "nvidia-key",
+        LLM_MODEL: "minimaxai/minimax-m2.7"
+      })
+    ).toEqual({
+      enabled: true,
+      mode: "LOCAL",
+      config: {
+        env: "LOCAL",
+        modelName: "minimaxai/minimax-m2.7",
+        verbose: 0,
+        modelClientOptions: {
+          apiKey: "nvidia-key",
+          baseURL: "https://integrate.api.nvidia.com/v1"
+        }
+      }
+    });
+  });
+
+  it("requires Browserbase credentials in browserbase mode", () => {
+    expect(
+      resolveStagehandRuntimeConfig({
+        STAGEHAND_MODE: "BROWSERBASE"
+      })
+    ).toEqual({
+      enabled: false,
+      mode: "BROWSERBASE",
+      reason: "BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required for STAGEHAND_MODE=BROWSERBASE."
+    });
+  });
+
+  it("falls back cleanly when local mode is missing its LLM endpoint", () => {
+    expect(
+      resolveStagehandRuntimeConfig({
+        STAGEHAND_MODE: "LOCAL",
+        LLM_MODEL: "minimaxai/minimax-m2.7"
+      })
+    ).toEqual({
+      enabled: false,
+      mode: "LOCAL",
+      reason: "LLM_BASE_URL is required for STAGEHAND_MODE=LOCAL."
+    });
   });
 });

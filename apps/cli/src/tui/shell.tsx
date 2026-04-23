@@ -1,17 +1,24 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { RunEntity } from "@artbot/shared-types";
+import { translate, type AppLocale } from "../i18n.js";
 import type { SetupAssessment } from "../setup/index.js";
 import type { TuiPreferences } from "./preferences.js";
 import { RUNNING_SPINNER_FRAMES } from "./run-progress-view.js";
 import { COMPLETED_REPORT_SURFACE_OPTIONS, type FocusTarget, type Overlay, type PipelineDetails, type PrimaryView, type SidePane } from "./state.js";
 import { getTuiThemeOptions, type TuiTheme } from "./theme.js";
+import { buildErrorLogModel } from "./view-models/error-log.js";
+import { buildFxCacheModel } from "./view-models/fx-cache.js";
+import { buildNormalizationInspectorModel } from "./view-models/normalization-inspector.js";
+import { buildReviewQueueModel } from "./view-models/review-queue.js";
+import { buildSourceMonitorModel } from "./view-models/source-monitor.js";
 
 interface ArtbotInteractiveShellProps {
   theme: TuiTheme;
   assessment: SetupAssessment | null;
   displayedRun: PipelineDetails | null;
   activeArtist: string;
+  locale: AppLocale;
   primaryView: PrimaryView;
   sidePane: SidePane;
   overlay: Overlay;
@@ -20,11 +27,12 @@ interface ArtbotInteractiveShellProps {
   recentRuns: RunEntity[];
   recentRunsQuery: string;
   selectedRecentRunIndex: number;
-  selectedThemeIndex: number;
+  selectedSettingsIndex: number;
   selectedReportSurfaceIndex: number;
   runStartedAt: number | null;
   thinkingTick: number;
   browserReportPath: string | null;
+  fxCacheStats?: PipelineDetails["fx_cache_stats"];
   terminalWidth: number;
 }
 
@@ -43,6 +51,7 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
         primaryView={props.primaryView}
         overlay={props.overlay}
         focusTarget={props.focusTarget}
+        locale={props.locale}
         preferences={props.preferences}
         thinkingTick={props.thinkingTick}
       />
@@ -53,6 +62,7 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
             assessment={props.assessment}
             displayedRun={props.displayedRun}
             activeArtist={props.activeArtist}
+            locale={props.locale}
             primaryView={props.primaryView}
             runStartedAt={props.runStartedAt}
             thinkingTick={props.thinkingTick}
@@ -66,7 +76,9 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
               assessment={props.assessment}
               displayedRun={props.displayedRun}
               sidePane={props.sidePane}
+              locale={props.locale}
               browserReportPath={props.browserReportPath}
+              fxCacheStats={props.fxCacheStats}
               focusTarget={props.focusTarget}
             />
           </Box>
@@ -77,10 +89,12 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
           <OverlayPanel
             theme={props.theme}
             overlay={props.overlay}
+            locale={props.locale}
             recentRuns={props.recentRuns}
             recentRunsQuery={props.recentRunsQuery}
             selectedRecentRunIndex={props.selectedRecentRunIndex}
-            selectedThemeIndex={props.selectedThemeIndex}
+            selectedSettingsIndex={props.selectedSettingsIndex}
+            preferences={props.preferences}
             selectedReportSurfaceIndex={props.selectedReportSurfaceIndex}
           />
         </Box>
@@ -92,9 +106,10 @@ export function ArtbotInteractiveShell(props: ArtbotInteractiveShellProps) {
 interface TuiKeyHintRailProps {
   theme: TuiTheme;
   overlay: Overlay;
+  locale: AppLocale;
 }
 
-export function TuiKeyHintRail({ theme, overlay }: TuiKeyHintRailProps) {
+export function TuiKeyHintRail({ theme, overlay, locale }: TuiKeyHintRailProps) {
   const items =
     overlay === "recent-runs"
       ? [
@@ -102,7 +117,7 @@ export function TuiKeyHintRail({ theme, overlay }: TuiKeyHintRailProps) {
           { key: "Enter", label: "open" },
           { key: "Esc", label: "close" }
         ]
-      : overlay === "theme-picker"
+      : overlay === "settings"
         ? [
             { key: "↑/↓", label: "preview" },
             { key: "Enter", label: "save" },
@@ -114,15 +129,15 @@ export function TuiKeyHintRail({ theme, overlay }: TuiKeyHintRailProps) {
               { key: "Enter", label: "confirm" },
               { key: "Esc", label: "close" }
             ]
-        : overlay === "help"
-          ? [{ key: "Esc", label: "close" }]
-          : [
-              { key: "Ctrl+K", label: "help" },
-              { key: "Ctrl+R", label: "runs" },
-              { key: "Ctrl+S", label: "setup" },
-              { key: "Ctrl+T", label: "theme" },
-              { key: "Ctrl+U", label: "pane" }
-            ];
+          : overlay === "help"
+            ? [{ key: "Esc", label: "close" }]
+            : [
+                { key: "Ctrl+K", label: "help" },
+                { key: "Ctrl+R", label: "runs" },
+                { key: "Ctrl+S", label: "setup" },
+                { key: "Ctrl+T", label: translate(locale, "tui.overlay.settings.title").toLowerCase() },
+                { key: "Ctrl+U", label: "pane" }
+              ];
 
   return (
     <Box flexDirection="row" marginTop={1} justifyContent="space-between">
@@ -147,6 +162,7 @@ function TopStatusStrip(props: {
   primaryView: PrimaryView;
   overlay: Overlay;
   focusTarget: FocusTarget;
+  locale: AppLocale;
   preferences: TuiPreferences;
   thinkingTick: number;
 }) {
@@ -162,39 +178,40 @@ function TopStatusStrip(props: {
   const totalSessions = props.assessment?.sessionStates.length ?? 0;
   const sandboxLabel = resolveSandboxMode();
   const thinkingActive = props.primaryView === "running";
-  const thinkingPulse = thinkingActive ? buildKnightRiderPulse(props.thinkingTick, 14) : "idle";
+  const providerLabel = resolveLlmProviderLabel(props.assessment?.llmProvider, props.locale);
+  const stagehandLabel = props.assessment?.stagehandMode ?? "DISABLED";
 
   return (
     <Panel
       theme={props.theme}
       title="ArtBot"
-      subtitle={`Local-first inference shell · privacy-first mode · ${props.preferences.theme} theme · ${props.preferences.diffLayout} layout`}
+      subtitle={`OpenAI-compatible operator cockpit · ${props.preferences.theme} theme · ${props.preferences.diffLayout} layout`}
     >
       <Box flexDirection="column">
         <Box justifyContent="space-between" flexWrap="wrap">
           <Box>
             <InlineChip theme={props.theme} tone="accent" label={`MODE ${modeLabel.toUpperCase()}`} />
             <InlineChip theme={props.theme} tone="muted" label={`FOCUS ${props.focusTarget.toUpperCase()}`} />
-            <InlineChip theme={props.theme} tone="local" label="CLOUD OFFLINE (LOCAL-ONLY)" />
-            <InlineChip theme={props.theme} tone="local" label="PRIVACY LOCKED" />
+            <InlineChip theme={props.theme} tone="local" label={providerLabel.toUpperCase()} />
+            <InlineChip theme={props.theme} tone="muted" label={`STAGEHAND ${stagehandLabel}`} />
             <InlineChip theme={props.theme} tone="sandbox" label={sandboxLabel} />
           </Box>
           <Box>
             <StatusChip
               theme={props.theme}
-              label="LM"
+              label={translate(props.locale, "tui.status.llm")}
               state={props.assessment?.llmHealth.ok ? "healthy" : "offline"}
               detail={modelId ?? props.assessment?.llmHealth.reason ?? "checking"}
             />
             <StatusChip
               theme={props.theme}
-              label="API"
+              label={translate(props.locale, "tui.status.api")}
               state={props.assessment?.apiHealth.ok ? "healthy" : "offline"}
               detail={props.assessment?.apiHealth.reason ?? props.assessment?.apiBaseUrl ?? "checking"}
             />
             <StatusChip
               theme={props.theme}
-              label="Auth"
+              label={translate(props.locale, "tui.status.auth")}
               state={props.assessment ? (activeSessions > 0 ? "healthy" : "degraded") : "unknown"}
               detail={props.assessment ? `${activeSessions}/${totalSessions}` : "checking"}
             />
@@ -205,7 +222,7 @@ function TopStatusStrip(props: {
             <InlineChip
               theme={props.theme}
               tone={thinkingActive ? "thinking" : "muted"}
-              label={thinkingActive ? `THINKING ${thinkingPulse}` : "THINKING IDLE"}
+              label={thinkingActive ? "ACTIVITY RUNNING" : "ACTIVITY IDLE"}
             />
           </Box>
           <Box>
@@ -227,38 +244,47 @@ function PrimaryPane(props: {
   assessment: SetupAssessment | null;
   displayedRun: PipelineDetails | null;
   activeArtist: string;
+  locale: AppLocale;
   primaryView: PrimaryView;
   runStartedAt: number | null;
   thinkingTick: number;
   focusTarget: FocusTarget;
 }) {
   if (props.primaryView === "idle") {
+    const issueCount = resolveIssueList(props.assessment).length;
     return (
       <Panel
         theme={props.theme}
-        title="Ready"
-        subtitle="Prompt-first local shell with privacy badges, overlays, and low-latency command flow."
+        title={translate(props.locale, "tui.shell.readyTitle")}
+        subtitle={translate(props.locale, "tui.shell.readySubtitle")}
         accentColor={props.focusTarget === "main" ? props.theme.colors.selection : undefined}
       >
         <Text color={props.theme.colors.text} bold>
-          Start with a plain artist name or use a command.
+          {translate(props.locale, "tui.shell.startPrompt")}
         </Text>
         <Box marginTop={1} flexDirection="column">
+          <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.quickActions")}</Text>
           <Text color={props.theme.colors.accent}>/research &lt;artist&gt;</Text>
           <Text color={props.theme.colors.accent}>/work &lt;artist&gt; --title &lt;title&gt;</Text>
           <Text color={props.theme.colors.accent}>/runs</Text>
+          <Text color={props.theme.colors.accent}>/sources</Text>
+          <Text color={props.theme.colors.accent}>/normalize</Text>
+          <Text color={props.theme.colors.accent}>/review</Text>
+          <Text color={props.theme.colors.accent}>/fx</Text>
+          <Text color={props.theme.colors.accent}>/errors</Text>
           <Text color={props.theme.colors.accent}>/setup</Text>
-          <Text color={props.theme.colors.accent}>/theme</Text>
+          <Text color={props.theme.colors.accent}>/settings</Text>
         </Box>
+        {props.assessment?.recommendedNextAction ? (
+          <Box marginTop={1} flexDirection="column">
+            <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.setupNext")}</Text>
+            <Text color={props.theme.colors.text}>{props.assessment.recommendedNextAction}</Text>
+          </Box>
+        ) : null}
         <Box marginTop={1}>
           <Metric tone="success" theme={props.theme} label="API" value={props.assessment?.apiHealth.ok ? "ready" : "offline"} />
           <Metric tone="accent" theme={props.theme} label="Profiles" value={String(props.assessment?.profiles.length ?? 0)} />
-          <Metric
-            tone={props.assessment?.issues.length ? "warning" : "success"}
-            theme={props.theme}
-            label="Setup"
-            value={props.assessment?.issues.length ? `${props.assessment.issues.length} issues` : "healthy"}
-          />
+          <Metric tone={issueCount ? "warning" : "success"} theme={props.theme} label="Setup" value={issueCount ? `${issueCount} issues` : "healthy"} />
         </Box>
       </Panel>
     );
@@ -296,7 +322,7 @@ function PrimaryPane(props: {
         />
       </Box>
       <Box marginTop={1} flexDirection="column">
-        {buildStageRows(run, props.theme, props.thinkingTick).map((stage) => (
+        {buildStageRows(run, props.theme).map((stage) => (
           <Text key={stage.label} color={stage.color}>
             {stage.symbol} {stage.label}
             <Text color={props.theme.colors.muted}> {stage.detail}</Text>
@@ -306,9 +332,14 @@ function PrimaryPane(props: {
       {records.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
           <Text color={props.theme.colors.muted}>Accepted Records</Text>
-          {records.slice(0, 6).map((record, index) => (
-            <RecordRow key={`${record.source_name}-${record.work_title ?? index}`} record={record} theme={props.theme} />
-          ))}
+          {records.slice(0, 6).map((record, index) => {
+            const price = priceLabel(record);
+            return (
+              <Text key={`${record.source_name}-${record.work_title ?? index}`} color={props.theme.colors.text}>
+                {truncate(price, 14).padEnd(14)} {truncate(record.source_name, 18).padEnd(18)} {truncate(record.work_title ?? "Untitled", 44)}
+              </Text>
+            );
+          })}
         </Box>
       ) : (
         <Box marginTop={1} flexDirection="column">
@@ -316,10 +347,10 @@ function PrimaryPane(props: {
           {attempts.slice(0, 6).map((attempt) => {
             const tone = accessTone(props.theme, attempt.source_access_status);
             return (
-            <Text key={attempt.source_url} color={tone.color}>
-              {tone.symbol} {truncate(attempt.source_url, 88)}
-              <Text color={props.theme.colors.muted}> · {attempt.source_access_status}</Text>
-            </Text>
+              <Text key={attempt.source_url} color={tone.color}>
+                {tone.symbol} {truncate(attempt.source_url, 88)}
+                <Text color={props.theme.colors.muted}> · {attempt.source_access_status}</Text>
+              </Text>
             );
           })}
         </Box>
@@ -333,31 +364,39 @@ function SidePanePanel(props: {
   assessment: SetupAssessment | null;
   displayedRun: PipelineDetails | null;
   sidePane: SidePane;
+  locale: AppLocale;
   browserReportPath: string | null;
+  fxCacheStats?: PipelineDetails["fx_cache_stats"];
   focusTarget: FocusTarget;
 }) {
   if (props.sidePane === "setup") {
+    const issues = resolveIssueList(props.assessment);
+    const blockingIssues = props.assessment?.blockingIssues ?? [];
+    const optionalIssues = props.assessment?.optionalIssues ?? [];
     return (
       <Panel
         theme={props.theme}
-        title="Setup"
-        subtitle="Health issues and next actions"
+        title={translate(props.locale, "tui.shell.setupTitle")}
+        subtitle={translate(props.locale, "tui.shell.setupSubtitle")}
         accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
       >
-        {props.assessment?.issues.length ? (
-          props.assessment.issues.map((issue) => (
+        {issues.length ? (
+          issues.map((issue) => (
             <Text key={`${issue.code}-${issue.message}`} color={issue.severity === "error" ? props.theme.colors.danger : props.theme.colors.warning}>
               {issue.severity === "error" ? "✗" : "!"} {issue.message}
               {issue.detail ? <Text color={props.theme.colors.muted}> · {truncate(issue.detail, 64)}</Text> : null}
             </Text>
           ))
         ) : (
-          <Text color={props.theme.colors.success}>✓ No setup issues detected.</Text>
+          <Text color={props.theme.colors.success}>✓ {translate(props.locale, "setup.issues.none")}</Text>
         )}
         <Box marginTop={1} flexDirection="column">
-          <Text color={props.theme.colors.muted}>Next</Text>
-          <Text color={props.theme.colors.text}>Run <Text color={props.theme.colors.accent}>/setup</Text> to refresh diagnostics.</Text>
-          <Text color={props.theme.colors.text}>Run <Text color={props.theme.colors.accent}>artbot setup</Text> for the guided wizard.</Text>
+          <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.setupNext")}</Text>
+          {props.assessment?.recommendedNextAction ? <Text color={props.theme.colors.text}>{props.assessment.recommendedNextAction}</Text> : null}
+          {blockingIssues.length ? <Text color={props.theme.colors.danger}>Blocking: {blockingIssues.length}</Text> : null}
+          {optionalIssues.length ? <Text color={props.theme.colors.warning}>Optional: {optionalIssues.length}</Text> : null}
+          <Text color={props.theme.colors.text}>{translate(props.locale, "tui.shell.setupRefresh")}</Text>
+          <Text color={props.theme.colors.text}>{translate(props.locale, "tui.shell.setupGuided")}</Text>
         </Box>
       </Panel>
     );
@@ -387,6 +426,134 @@ function SidePanePanel(props: {
             </Box>
           );
         })}
+      </Panel>
+    );
+  }
+
+  if (props.sidePane === "normalization") {
+    const model = buildNormalizationInspectorModel(props.displayedRun);
+    return (
+      <Panel
+        theme={props.theme}
+        title="Normalization"
+        subtitle="Raw token, currency era interpretation, and historical/current FX outputs"
+        accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
+      >
+        {model.entries.length === 0 ? (
+          <Text color={props.theme.colors.muted}>No normalized records are available for inspection yet.</Text>
+        ) : (
+          <Box flexDirection="column">
+            <Text color={props.theme.colors.muted}>Showing {model.entries.length} of {model.totalRecords} accepted records</Text>
+            {model.entries.map((entry) => (
+              <Box key={`${entry.sourceName}-${entry.title}`} flexDirection="column" marginTop={1}>
+                <Text color={props.theme.colors.text}>{truncate(entry.title, 36)} <Text color={props.theme.colors.muted}>· {truncate(entry.sourceName, 18)}</Text></Text>
+                <Text color={props.theme.colors.text}>{truncate(entry.originalLine, 68)}</Text>
+                <Text color={props.theme.colors.text}>{truncate(entry.interpretedLine, 68)}</Text>
+                <Text color={props.theme.colors.text}>{truncate(entry.historicalLine, 68)}</Text>
+                <Text color={props.theme.colors.text}>{truncate(entry.inflationLine, 68)}</Text>
+                <Text color={props.theme.colors.text}>{truncate(entry.currentLine, 68)}</Text>
+                <Text color={props.theme.colors.muted}>{truncate(entry.confidenceLine, 68)}</Text>
+                {entry.warnings.slice(0, 2).map((warning) => (
+                  <Text key={warning} color={props.theme.colors.warning}>! {truncate(warning, 66)}</Text>
+                ))}
+              </Box>
+            ))}
+          </Box>
+        )}
+      </Panel>
+    );
+  }
+
+  if (props.sidePane === "sources") {
+    const entries = buildSourceMonitorModel(props.displayedRun);
+    return (
+      <Panel
+        theme={props.theme}
+        title="Sources"
+        subtitle="Attempts, priced outcomes, and auth/block status by source"
+        accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
+      >
+        {entries.length === 0 ? (
+          <Text color={props.theme.colors.muted}>No source activity is available for the current run.</Text>
+        ) : (
+          entries.map((entry) => (
+            <Text key={entry.sourceName} color={props.theme.colors.text}>
+              {truncate(entry.sourceName, 18).padEnd(18)} a={String(entry.attempts).padStart(2)} p={String(entry.priced).padStart(2)} b={String(entry.blocked).padStart(2)} auth={String(entry.authRequired).padStart(2)}
+            </Text>
+          ))
+        )}
+      </Panel>
+    );
+  }
+
+  if (props.sidePane === "review") {
+    const items = buildReviewQueueModel(props.displayedRun);
+    return (
+      <Panel
+        theme={props.theme}
+        title="Review Queue"
+        subtitle="Use /review merge <id> or /review keep <id> on the active run"
+        accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
+      >
+        {items.length === 0 ? (
+          <Text color={props.theme.colors.muted}>No review items are queued for the current run.</Text>
+        ) : (
+          items.map((item) => (
+            <Box key={item.id} flexDirection="column" marginBottom={1}>
+              <Text color={props.theme.colors.text}>{truncate(item.label, 42)}</Text>
+              <Text color={props.theme.colors.muted}>{item.id}</Text>
+              <Text color={props.theme.colors.text}>{truncate(item.detail, 56)}</Text>
+            </Box>
+          ))
+        )}
+      </Panel>
+    );
+  }
+
+  if (props.sidePane === "fx") {
+    const model = buildFxCacheModel(props.displayedRun, props.fxCacheStats);
+    return (
+      <Panel
+        theme={props.theme}
+        title="FX Cache"
+        subtitle="SQLite-backed historical/current rate cache state"
+        accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
+      >
+        <Text color={props.theme.colors.text}>Rows: {model.totalRows}</Text>
+        <Text color={props.theme.colors.text}>Dates: {model.uniqueDates}</Text>
+        <Text color={props.theme.colors.text}>Latest: {model.latestDate ?? "n/a"}</Text>
+        <Box marginTop={1} flexDirection="column">
+          {model.sourceLines.length === 0 ? (
+            <Text color={props.theme.colors.muted}>No FX cache rows are available yet.</Text>
+          ) : (
+            model.sourceLines.map((line) => (
+              <Text key={line} color={props.theme.colors.text}>{line}</Text>
+            ))
+          )}
+        </Box>
+      </Panel>
+    );
+  }
+
+  if (props.sidePane === "errors") {
+    const entries = buildErrorLogModel(props.displayedRun);
+    return (
+      <Panel
+        theme={props.theme}
+        title="Errors"
+        subtitle="Recent transport, blocker, and parse failures"
+        accentColor={props.focusTarget === "side" ? props.theme.colors.selection : undefined}
+      >
+        {entries.length === 0 ? (
+          <Text color={props.theme.colors.muted}>No recent failures are available for the current run.</Text>
+        ) : (
+          entries.map((entry) => (
+            <Box key={entry.sourceUrl} flexDirection="column" marginBottom={1}>
+              <Text color={props.theme.colors.text}>{truncate(entry.sourceUrl, 52)}</Text>
+              <Text color={props.theme.colors.warning}>{truncate(entry.detail, 56)}</Text>
+            </Box>
+          ))
+        )}
       </Panel>
     );
   }
@@ -421,41 +588,72 @@ function SidePanePanel(props: {
 function OverlayPanel(props: {
   theme: TuiTheme;
   overlay: Overlay;
+  locale: AppLocale;
   recentRuns: RunEntity[];
   recentRunsQuery: string;
   selectedRecentRunIndex: number;
-  selectedThemeIndex: number;
+  selectedSettingsIndex: number;
+  preferences: TuiPreferences;
   selectedReportSurfaceIndex: number;
 }) {
   if (props.overlay === "help") {
     return (
-      <Panel theme={props.theme} title="Help" subtitle="Commands and keyboard shortcuts" accentColor={props.theme.colors.overlayBorder}>
-        <Text color={props.theme.colors.muted}>Commands</Text>
+      <Panel
+        theme={props.theme}
+        title={translate(props.locale, "tui.shell.helpTitle")}
+        subtitle={translate(props.locale, "tui.shell.helpSubtitle")}
+        accentColor={props.theme.colors.overlayBorder}
+      >
+        <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.helpCommands")}</Text>
         <Text color={props.theme.colors.accent}>/research &lt;artist&gt;</Text>
         <Text color={props.theme.colors.accent}>/work &lt;artist&gt; --title &lt;title&gt;</Text>
         <Text color={props.theme.colors.accent}>/runs</Text>
+        <Text color={props.theme.colors.accent}>/sources</Text>
+        <Text color={props.theme.colors.accent}>/normalize</Text>
+        <Text color={props.theme.colors.accent}>/review</Text>
+        <Text color={props.theme.colors.accent}>/fx</Text>
+        <Text color={props.theme.colors.accent}>/errors</Text>
         <Text color={props.theme.colors.accent}>/setup</Text>
         <Text color={props.theme.colors.accent}>/auth</Text>
-        <Text color={props.theme.colors.accent}>/theme</Text>
+        <Text color={props.theme.colors.accent}>/settings</Text>
         <Text color={props.theme.colors.accent}>/report cli | /report web</Text>
         <Box marginTop={1} flexDirection="column">
-          <Text color={props.theme.colors.muted}>Shortcuts</Text>
-          <Text color={props.theme.colors.text}>Ctrl+K help · Ctrl+R runs · Ctrl+S setup · Ctrl+T theme · Ctrl+U pane</Text>
+          <Text color={props.theme.colors.muted}>{translate(props.locale, "tui.shell.helpShortcuts")}</Text>
+          <Text color={props.theme.colors.text}>Ctrl+K help · Ctrl+R runs · Ctrl+S setup · Ctrl+T settings · Ctrl+U pane</Text>
         </Box>
       </Panel>
     );
   }
 
-  if (props.overlay === "theme-picker") {
+  if (props.overlay === "settings") {
     const options = getTuiThemeOptions();
+    const settingRows = [
+      `${translate(props.locale, "tui.settings.language")}: ${translate(props.locale, "tui.language.english")}`,
+      `${translate(props.locale, "tui.settings.language")}: ${translate(props.locale, "tui.language.turkish")}`,
+      `${translate(props.locale, "tui.settings.theme")}: ${options[0]?.label ?? "ArtBot"}`,
+      `${translate(props.locale, "tui.settings.theme")}: ${options[1]?.label ?? "System"}`,
+      `${translate(props.locale, "tui.settings.theme")}: ${options[2]?.label ?? "Matrix"}`,
+      `${translate(props.locale, "tui.settings.density")}: comfortable`,
+      `${translate(props.locale, "tui.settings.density")}: compact`,
+      `${translate(props.locale, "tui.settings.secondaryPane")}: ${
+        props.preferences.showSecondaryPane
+          ? translate(props.locale, "tui.settings.value.enabled")
+          : translate(props.locale, "tui.settings.value.disabled")
+      }`
+    ];
+
     return (
-      <Panel theme={props.theme} title="Theme Picker" subtitle="Preview with arrows, save with Enter" accentColor={props.theme.colors.overlayBorder}>
-        {options.map((option, index) => {
-          const selected = index === props.selectedThemeIndex;
+      <Panel
+        theme={props.theme}
+        title={translate(props.locale, "tui.overlay.settings.title")}
+        subtitle={translate(props.locale, "tui.overlay.settings.subtitle")}
+        accentColor={props.theme.colors.overlayBorder}
+      >
+        {settingRows.map((row, index) => {
+          const selected = index === props.selectedSettingsIndex;
           return (
-            <Text key={option.name} color={selected ? props.theme.colors.selection : props.theme.colors.text}>
-              {selected ? "›" : " "} {option.label}
-              <Text color={props.theme.colors.muted}> ({option.name})</Text>
+            <Text key={row} color={selected ? props.theme.colors.selection : props.theme.colors.text}>
+              {selected ? ">" : " "} {row}
             </Text>
           );
         })}
@@ -476,7 +674,7 @@ function OverlayPanel(props: {
           return (
             <Box key={option.value} flexDirection="column" marginBottom={1}>
               <Text color={selected ? props.theme.colors.selection : props.theme.colors.text}>
-                {selected ? "›" : " "} {option.label}
+                {selected ? ">" : " "} {option.label}
               </Text>
               <Text color={props.theme.colors.muted}>{option.hint}</Text>
             </Box>
@@ -502,7 +700,7 @@ function OverlayPanel(props: {
           return (
             <Box key={run.id} flexDirection="column" marginBottom={1}>
               <Text color={selected ? props.theme.colors.selection : props.theme.colors.text}>
-                {selected ? "›" : " "} {run.query.artist} · {run.status}
+                {selected ? ">" : " "} {run.query.artist} · {run.status}
                 <Text color={props.theme.colors.muted}> · {run.runType}{run.pinned ? " · pinned" : ""}</Text>
               </Text>
               <Text color={props.theme.colors.muted}>{run.id} · {formatTimestamp(run.updatedAt)}</Text>
@@ -628,6 +826,25 @@ function resolveSandboxMode(): string {
   return "ISOLATED: LOCAL-RUNTIME";
 }
 
+function resolveIssueList(assessment: SetupAssessment | null): SetupAssessment["issues"] {
+  if (!assessment) return [];
+  if (assessment.issues.length) return assessment.issues;
+  return [...assessment.blockingIssues, ...assessment.optionalIssues];
+}
+
+function resolveLlmProviderLabel(provider: SetupAssessment["llmProvider"] | undefined, locale: AppLocale): string {
+  switch (provider) {
+    case "local_lm_studio":
+      return translate(locale, "setup.provider.localLmStudio");
+    case "nvidia":
+      return translate(locale, "setup.provider.nvidia");
+    case "openai_compatible_custom":
+      return translate(locale, "setup.provider.custom");
+    default:
+      return translate(locale, "setup.provider.openaiCompatible");
+  }
+}
+
 export function extractQuantization(modelId: string | undefined): string {
   if (!modelId) return "unknown";
 
@@ -667,56 +884,31 @@ export function getRunningSpinnerFrame(tick: number): string {
   return RUNNING_SPINNER_FRAMES[offset % RUNNING_SPINNER_FRAMES.length] ?? RUNNING_SPINNER_FRAMES[0]!;
 }
 
-function RecordRow(props: {
-  theme: TuiTheme;
-  record: {
-    normalized_price_usd_nominal?: number | null;
-    normalized_price_usd?: number | null;
-    price_amount?: number | null;
-    currency?: string;
-    estimate_low?: number | null;
-    estimate_high?: number | null;
-    price_type?: string;
-    price_hidden?: boolean;
-    work_title?: string | null;
-    source_name: string;
-  };
-}) {
-  const price = priceLabel(props.record);
-  return (
-    <Text color={props.theme.colors.text}>
-      {truncate(price, 14).padEnd(14)} {truncate(props.record.source_name, 18).padEnd(18)} {truncate(props.record.work_title ?? "Untitled", 44)}
-    </Text>
-  );
-}
-
 export function buildStageRows(
   details: PipelineDetails | null,
-  theme: TuiTheme,
-  tick: number
+  theme: TuiTheme
 ): Array<{ symbol: string; label: string; detail: string; color: string }> {
   const summary = details?.summary;
   const status = details?.run?.status;
-  const spinner = getRunningSpinnerFrame(tick);
   const queueRunning = status === "pending";
   const scanRunning = status === "running" && !summary;
   const analyzeRunning = status === "running" && Boolean(summary);
 
   return [
     {
-      symbol: queueRunning ? spinner : status ? "✓" : "○",
+      symbol: queueRunning ? "…" : status ? "✓" : "○",
       label: "Queue",
       detail: queueRunning ? "waiting" : status ? "passed" : "pending",
       color: queueRunning ? theme.colors.thinking : status ? theme.colors.success : theme.colors.muted
     },
     {
-      symbol: summary ? "✓" : scanRunning ? spinner : "○",
+      symbol: summary ? "✓" : scanRunning ? "…" : "○",
       label: "Scan",
       detail: summary ? `${summary.total_attempts ?? 0} attempts` : scanRunning ? "running" : "queued",
       color: summary ? theme.colors.success : scanRunning ? theme.colors.thinking : theme.colors.muted
     },
     {
-      symbol: status === "failed" ? "✗" : summary ? (analyzeRunning ? spinner : "✓") : "○",
+      symbol: status === "failed" ? "✗" : summary ? (analyzeRunning ? "…" : "✓") : "○",
       label: "Analyze",
       detail: summary ? `${summary.accepted_records ?? 0} accepted` : status === "failed" ? "failed" : "pending",
       color:
@@ -778,7 +970,7 @@ function priceLabel(record: {
   if (typeof record.normalized_price_usd === "number") return fmtCurrency(record.normalized_price_usd, "USD");
   if (typeof record.price_amount === "number") return fmtCurrency(record.price_amount, record.currency ?? "TRY");
   if (typeof record.estimate_low === "number" && typeof record.estimate_high === "number") {
-    return `${fmtCurrency(record.estimate_low, record.currency ?? "TRY")}–${fmtCurrency(record.estimate_high, record.currency ?? "TRY")}`;
+    return `${fmtCurrency(record.estimate_low, record.currency ?? "TRY")}-${fmtCurrency(record.estimate_high, record.currency ?? "TRY")}`;
   }
   if (record.price_type === "inquiry_only" || record.price_hidden) return "Inquiry only";
   return "n/a";

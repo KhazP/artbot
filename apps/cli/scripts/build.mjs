@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -48,3 +48,42 @@ await build({
   splitting: true,
   target: "node18"
 });
+
+const distDir = path.join(packageDir, "dist");
+const bannedBuildStrings = [
+  "LM Studio base URL",
+  "LM Studio URL is required.",
+  "Verify LM Studio, API, worker, and auth",
+  "Guided local onboarding for LM Studio"
+];
+
+async function collectFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectFiles(fullPath)));
+      continue;
+    }
+    if (entry.isFile() && (fullPath.endsWith(".js") || fullPath.endsWith(".map"))) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+const distFiles = await collectFiles(distDir);
+const violations = [];
+for (const file of distFiles) {
+  const content = await readFile(file, "utf-8");
+  for (const bannedText of bannedBuildStrings) {
+    if (content.includes(bannedText)) {
+      violations.push(`${path.relative(packageDir, file)} => ${bannedText}`);
+    }
+  }
+}
+
+if (violations.length > 0) {
+  throw new Error(`Built CLI still contains stale onboarding copy:\n${violations.join("\n")}`);
+}

@@ -1,7 +1,9 @@
+export type FxQuoteCurrency = "EUR" | "USD" | "TRY" | "GBP";
+
 export interface FxRateTable {
   base: "EUR";
   date: string;
-  rates: Record<string, number>;
+  rates: Record<FxQuoteCurrency, number>;
   source: "ecb_api" | "tcmb_fallback" | "static_fallback";
 }
 
@@ -9,6 +11,34 @@ export interface InflationTable {
   source: "us_cpi_static";
   baseYear: number;
   cpiByYear: Record<number, number>;
+}
+
+export interface FxRateStore {
+  getRatesForDate(date: string, baseCurrency?: FxRateTable["base"]): Promise<Array<{
+    base_currency: FxRateTable["base"];
+    quote_currency: FxQuoteCurrency;
+    date: string;
+    rate: number;
+    source: FxRateTable["source"];
+    fetched_at: string;
+    quality_flag: string;
+  }>> | Array<{
+    base_currency: FxRateTable["base"];
+    quote_currency: FxQuoteCurrency;
+    date: string;
+    rate: number;
+    source: FxRateTable["source"];
+    fetched_at: string;
+    quality_flag: string;
+  }>;
+  upsertFxRateDaily(input: {
+    base_currency: FxRateTable["base"];
+    quote_currency: FxQuoteCurrency;
+    date: string;
+    rate: number;
+    source: FxRateTable["source"];
+    quality_flag: "historical_exact" | "historical_fallback" | "current_cache";
+  }): Promise<unknown> | unknown;
 }
 
 const fallbackRates: FxRateTable = {
@@ -102,7 +132,8 @@ export class FxRateProvider {
 
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
-    private readonly inflationBaseYear = Number(process.env.USD_INFLATION_BASE_YEAR ?? 2026)
+    private readonly inflationBaseYear = Number(process.env.USD_INFLATION_BASE_YEAR ?? 2026),
+    private readonly store?: FxRateStore
   ) {
     this.cache.set(fallbackRates.date, fallbackRates);
     this.inflation = {
@@ -126,8 +157,21 @@ export class FxRateProvider {
       return this.cache.get(normalizedDate) as FxRateTable;
     }
 
+    const persisted = await this.loadPersistedRates(normalizedDate);
+    if (persisted) {
+      this.cache.set(normalizedDate, persisted);
+      return persisted;
+    }
+
     const fetched = await this.fetchEcbRatesWithFallback(normalizedDate);
     this.cache.set(normalizedDate, fetched);
+    const qualityFlag =
+      normalizedDate === toIsoDate(new Date())
+        ? "current_cache"
+        : fetched.source === "ecb_api"
+          ? "historical_exact"
+          : "historical_fallback";
+    await this.persistRates(fetched, qualityFlag);
     return fetched;
   }
 
@@ -190,6 +234,60 @@ export class FxRateProvider {
       },
       source: "tcmb_fallback"
     };
+  }
+
+  private async loadPersistedRates(date: string): Promise<FxRateTable | null> {
+    if (!this.store) {
+      return null;
+    }
+
+    const rows = await this.store.getRatesForDate(date, "EUR");
+    if (!rows || rows.length === 0) {
+      return null;
+    }
+
+    const rates: Record<string, number> = { EUR: 1 };
+    for (const row of rows) {
+      rates[row.quote_currency] = row.rate;
+    }
+
+    return {
+      base: "EUR",
+      date,
+      rates: {
+        EUR: rates.EUR ?? 1,
+        USD: rates.USD ?? fallbackRates.rates.USD,
+        TRY: rates.TRY ?? fallbackRates.rates.TRY,
+        GBP: rates.GBP ?? fallbackRates.rates.GBP
+      },
+      source: rows[0]?.source ?? "static_fallback"
+    };
+  }
+
+  private async persistRates(
+    table: FxRateTable,
+    qualityFlag: "historical_exact" | "historical_fallback" | "current_cache"
+  ): Promise<void> {
+    if (!this.store) {
+      return;
+    }
+
+    const quotes: Array<keyof FxRateTable["rates"]> = ["EUR", "USD", "TRY", "GBP"];
+    for (const quote of quotes) {
+      const rate = table.rates[quote];
+      if (!Number.isFinite(rate) || rate <= 0) {
+        continue;
+      }
+
+      await this.store.upsertFxRateDaily({
+        base_currency: "EUR",
+        quote_currency: quote,
+        date: table.date,
+        rate,
+        source: table.source,
+        quality_flag: qualityFlag
+      });
+    }
   }
 
   private async fetchEcbUsdTry(date: string): Promise<{ usdPerEur: number; tryPerEur: number; date: string } | null> {

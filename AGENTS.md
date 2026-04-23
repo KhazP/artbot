@@ -4,7 +4,7 @@ Use ArtBot as a command-first CLI.
 
 - In this repo, prefer `pnpm --filter artbot dev -- ...`.
 - For globally installed usage, replace that prefix with `artbot ...`.
-- Bare `artbot` prints help. Open the interactive surface only with `artbot tui`.
+- Bare `artbot` opens the interactive UI in an interactive TTY. Use explicit subcommands plus `--json` for automation.
 - For automation or agent runs, prefer explicit commands and `--json`.
 - If a wrapper must hard-disable the interactive UI, pass `--no-tui` or set `ARTBOT_NO_TUI=1`.
 

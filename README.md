@@ -96,8 +96,8 @@ pnpm --filter artbot dev -- runs show --run-id <id>
 # 6. Watch a run in real time
 pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2
 
-# 7. Open the interactive UI explicitly
-pnpm --filter artbot dev -- tui
+# 7. Open the interactive UI
+pnpm --filter artbot dev --
 ```
 
 ---
@@ -128,11 +128,11 @@ artbot setup
 > The npm package includes a local ArtBot API and worker runtime — **no hosting required**.
 > Config, auth state, logs, and local data live under `~/.artbot`.
 >
-> [LM Studio](https://lmstudio.ai/) works out of the box with the default local server URL `http://127.0.0.1:1234/v1`.
+> `artbot setup` and the TUI support local LM Studio, NVIDIA, and other OpenAI-compatible endpoints.
 >
 > `artbot backend start` bootstraps local runtime files automatically. `artbot setup` is optional and mainly for guided interactive onboarding.
 
-Bare `artbot` is help-first. Use `artbot tui` only when you explicitly want the interactive UI.
+Bare `artbot` opens the interactive UI in an interactive terminal. Use explicit subcommands or `--json` for command-first and automation flows.
 
 <details>
 <summary><strong>Alternative manual startup</strong></summary>
@@ -224,11 +224,7 @@ pnpm --filter artbot dev -- --json cleanup --dry-run
 
 Plan generation can take roughly 45-60 seconds on a cold start. Keep the command running until the spinner completes.
 
-Repo instruction files are committed at the root:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `GEMINI.md`
+Repo-specific automation guidance lives in `AGENTS.md`.
 
 The reusable Codex skill lives at `skills/artbot-cli`.
 
@@ -290,7 +286,10 @@ var/runs/<run_id>/
 | `MODEL_CHEAP_DEFAULT`     | Default model ID                                   |
 | `MODEL_CHEAP_FALLBACK`    | Fallback model ID                                  |
 | `STRUCTURED_LLM_PROVIDER` | `auto` \| `gemini` \| `openai_compatible`          |
-| `LLM_BASE_URL`            | Local OpenAI-compatible endpoint (e.g., LM Studio) |
+| `LLM_MODEL`               | Canonical OpenAI-compatible model ID               |
+| `LLM_BASE_URL`            | OpenAI-compatible endpoint (e.g., LM Studio, NVIDIA) |
+| `LLM_API_KEY`             | OpenAI-compatible auth token (`lm-studio` locally) |
+| `STAGEHAND_MODE`          | `DISABLED` \| `LOCAL` \| `BROWSERBASE`             |
 | `GEMINI_API_KEY`          | Gemini API key                                     |
 
 > [!WARNING]

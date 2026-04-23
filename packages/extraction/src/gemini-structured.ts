@@ -1,72 +1,7 @@
-import { z } from "zod";
-import type { PriceType } from "@artbot/shared-types";
-
-const structuredExtractionSchema = z.object({
-  priceType: z.enum([
-    "asking_price",
-    "estimate",
-    "hammer_price",
-    "realized_price",
-    "realized_with_buyers_premium",
-    "inquiry_only",
-    "unknown"
-  ]),
-  estimateLow: z.number().nullable(),
-  estimateHigh: z.number().nullable(),
-  priceAmount: z.number().nullable(),
-  currency: z.string().nullable(),
-  lotNumber: z.string().nullable(),
-  saleDate: z.string().nullable(),
-  priceHidden: z.boolean(),
-  buyersPremiumIncluded: z.boolean().nullable(),
-  rationale: z.string()
-});
-
-export type StructuredGeminiExtraction = z.infer<typeof structuredExtractionSchema>;
-type StructuredLlmProvider = "gemini" | "openai_compatible";
-
-interface GeminiExtractionInput {
-  content: string;
-  model?: string;
-}
-
-const priceTypes: PriceType[] = [
-  "asking_price",
-  "estimate",
-  "hammer_price",
-  "realized_price",
-  "realized_with_buyers_premium",
-  "inquiry_only",
-  "unknown"
-];
-
-const jsonSchema = {
-  type: "object",
-  properties: {
-    priceType: { type: "string", enum: priceTypes },
-    estimateLow: { type: ["number", "null"] },
-    estimateHigh: { type: ["number", "null"] },
-    priceAmount: { type: ["number", "null"] },
-    currency: { type: ["string", "null"] },
-    lotNumber: { type: ["string", "null"] },
-    saleDate: { type: ["string", "null"] },
-    priceHidden: { type: "boolean" },
-    buyersPremiumIncluded: { type: ["boolean", "null"] },
-    rationale: { type: "string" }
-  },
-  required: [
-    "priceType",
-    "estimateLow",
-    "estimateHigh",
-    "priceAmount",
-    "currency",
-    "lotNumber",
-    "saleDate",
-    "priceHidden",
-    "buyersPremiumIncluded",
-    "rationale"
-  ]
-};
+import { resolveOpenAiCompatibleApiKey, resolveOpenAiCompatibleModel } from "@artbot/shared-types";
+import { extractWithLangChainStructuredOutput } from "./llm/structured-extractor.js";
+import { structuredExtractionJsonSchema, structuredExtractionSchema } from "./llm/schemas.js";
+import type { StructuredExtraction as StructuredGeminiExtraction, StructuredExtractionInput as GeminiExtractionInput, StructuredLlmProvider } from "./llm/types.js";
 
 function buildPrompt(content: string): string {
   return [
@@ -76,8 +11,6 @@ function buildPrompt(content: string): string {
     "- Do not invent missing values.",
     "- Keep estimate separate from realized/asking.",
     "- If price is hidden or inquiry-only, set priceHidden=true and priceType=inquiry_only.",
-    "",
-    `Allowed priceType values: ${priceTypes.join(", ")}`,
     "",
     "Page content:",
     content.slice(0, 16000)
@@ -190,7 +123,7 @@ async function callGemini(input: GeminiExtractionInput): Promise<StructuredGemin
         generationConfig: {
           temperature: 0,
           responseMimeType: "application/json",
-          responseSchema: jsonSchema
+          responseSchema: structuredExtractionJsonSchema
         }
       },
       timeoutMs
@@ -225,8 +158,8 @@ async function callOpenAiCompatible(input: GeminiExtractionInput): Promise<Struc
   }
 
   const endpoint = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const model = input.model ?? process.env.MODEL_CHEAP_DEFAULT ?? "google/gemma-4-26b-a4b";
-  const apiKey = process.env.LLM_API_KEY?.trim();
+  const model = input.model ?? resolveOpenAiCompatibleModel(process.env, "google/gemma-4-26b-a4b");
+  const apiKey = resolveOpenAiCompatibleApiKey(process.env);
   const prompt = buildPrompt(input.content);
   const timeoutMs = structuredLlmTimeoutMs();
   const headers: Record<string, string> = {
@@ -261,7 +194,7 @@ async function callOpenAiCompatible(input: GeminiExtractionInput): Promise<Struc
           type: "json_schema",
           json_schema: {
             name: "art_price_extraction",
-            schema: jsonSchema,
+            schema: structuredExtractionJsonSchema,
             strict: true
           }
         }
@@ -306,6 +239,11 @@ async function callOpenAiCompatible(input: GeminiExtractionInput): Promise<Struc
 export async function extractWithGeminiSchema(
   input: GeminiExtractionInput
 ): Promise<StructuredGeminiExtraction | null> {
+  const langChainResult = await extractWithLangChainStructuredOutput(input);
+  if (langChainResult) {
+    return langChainResult;
+  }
+
   const provider = resolveProvider();
   if (!provider) {
     return null;

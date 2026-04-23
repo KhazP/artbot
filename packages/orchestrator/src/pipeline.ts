@@ -996,7 +996,10 @@ export class ResearchOrchestrator {
     this.registry = new SourceRegistry();
     this.authManager = new AuthManager();
     this.browserClient = new BrowserClient(this.authManager);
-    this.fxRates = new FxRateProvider();
+    this.fxRates = new FxRateProvider(fetch, Number(process.env.USD_INFLATION_BASE_YEAR ?? 2026), {
+      getRatesForDate: (date, baseCurrency) => this.storage.getFxRatesForDate(date, baseCurrency),
+      upsertFxRateDaily: (input) => this.storage.upsertFxRateDaily(input)
+    });
     this.minValuationComps = options.minValuationComps ?? 5;
     this.modelCheapDefault = options.modelCheapDefault ?? process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite";
     this.modelCheapFallback = options.modelCheapFallback ?? process.env.MODEL_CHEAP_FALLBACK ?? "gemini-2.5-flash-lite";
@@ -1017,7 +1020,7 @@ export class ResearchOrchestrator {
         authManager: this.authManager,
         browserClient: this.browserClient,
         adapters: this.registry.list(),
-        normalizeRecord: (record) => this.normalizeRecord(record)
+        normalizeRecord: (record) => this.normalizeRecord(record, run.id)
       });
       return;
     }
@@ -1248,7 +1251,7 @@ export class ResearchOrchestrator {
       }
 
       if (outcome.acceptedRecord) {
-        const normalized = await this.normalizeRecord(outcome.acceptedRecord);
+        const normalized = await this.normalizeRecord(outcome.acceptedRecord, run.id);
         candidateRecords.push(normalized);
         if (outcome.task.candidate.provenance !== "seed") {
           acceptedFromDiscovery += 1;
@@ -2217,9 +2220,36 @@ export class ResearchOrchestrator {
     };
   }
 
-  private async normalizeRecord(record: PriceRecord): Promise<PriceRecord> {
+  private async normalizeRecord(record: PriceRecord, runId: string): Promise<PriceRecord> {
     const currencyNormalized = await normalizeRecordCurrencies(record, this.fxRates);
-    return applyConfidenceModel(currencyNormalized, record.overall_confidence);
+    const normalized = applyConfidenceModel(currencyNormalized, record.overall_confidence);
+    if (normalized.original_currency_canonical || normalized.normalization_confidence_score != null) {
+      this.storage.saveNormalizationEvent({
+        run_id: runId,
+        record_ref: normalized.source_url,
+        source_name: normalized.source_name,
+        source_url: normalized.source_url,
+        work_title: normalized.work_title,
+        payload_json: {
+          original_currency_raw: normalized.original_currency_raw ?? null,
+          original_currency_canonical: normalized.original_currency_canonical ?? null,
+          original_event_date: normalized.original_event_date ?? null,
+          date_confidence: normalized.date_confidence ?? "unknown",
+          historical_price_try: normalized.historical_price_try ?? null,
+          historical_price_usd: normalized.historical_price_usd ?? null,
+          historical_price_eur: normalized.historical_price_eur ?? null,
+          current_price_try: normalized.current_price_try ?? null,
+          current_price_usd: normalized.current_price_usd ?? null,
+          current_price_eur: normalized.current_price_eur ?? null,
+          current_price_as_of_date: normalized.current_price_as_of_date ?? null,
+          normalization_confidence_score: normalized.normalization_confidence_score ?? null,
+          normalization_confidence_reasons: normalized.normalization_confidence_reasons ?? [],
+          normalization_warnings: normalized.normalization_warnings ?? [],
+          normalization_requires_manual_review: normalized.normalization_requires_manual_review ?? false
+        }
+      });
+    }
+    return normalized;
   }
 
   private valuationLaneFromPriceType(priceType: string): "realized" | "estimate" | "asking" | "none" {

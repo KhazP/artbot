@@ -1,5 +1,5 @@
 import { extractWithGeminiSchema, fetchCheapestFirst, parseGenericLotFields, type GenericParsedFields } from "@artbot/extraction";
-import type { SourceAccessStatus, SourceAttempt } from "@artbot/shared-types";
+import { resolveOpenAiCompatibleModel, type SourceAccessStatus, type SourceAttempt } from "@artbot/shared-types";
 import type { AdapterExtractionContext, AdapterExtractionResult, SourceAdapter, SourceCandidate } from "../types.js";
 import { deriveDefaultSourceCapabilities } from "../types.js";
 import {
@@ -843,7 +843,10 @@ export class DeterministicVenueAdapter implements SourceAdapter {
     }
 
     const fetchedAt = new Date().toISOString();
-    const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext);
+    const extracted = await fetchCheapestFirst(candidate.url, context.sessionContext, {
+      sourceFamily: this.capabilities.source_family,
+      sourceAccessStatus: context.accessContext.sourceAccessStatus
+    });
     const rawSnapshotPath = ensureRawPath(context.evidenceDir, `${this.id}-${Date.now()}-deterministic.html`);
     writeRawSnapshot(rawSnapshotPath, extracted.html || extracted.markdown, context.accessContext);
 
@@ -876,7 +879,7 @@ export class DeterministicVenueAdapter implements SourceAdapter {
         parsed.saleDate = structured.saleDate;
         parsed.priceHidden = structured.priceHidden;
         parsed.buyersPremiumIncluded = structured.buyersPremiumIncluded;
-        modelUsed = process.env.MODEL_CHEAP_DEFAULT ?? "gemini-3.1-flash-lite";
+        modelUsed = resolveOpenAiCompatibleModel(process.env, "gemini-3.1-flash-lite");
       }
     }
 

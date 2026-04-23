@@ -95,6 +95,8 @@ function normalizeNumber(input: string): number | null {
 }
 
 function inferCurrency(text: string): string | null {
+  if (/\bYTL\b|yeni\s+türk\s+lirası/i.test(text)) return "YTL";
+  if (/\bTRL\b|türk\s+lirası/i.test(text)) return "TRL";
   if (/\bTRY\b|\bTL\b|₺/i.test(text)) return "TRY";
   if (/\bUSD\b|\$/i.test(text)) return "USD";
   if (/\bEUR\b|€/i.test(text)) return "EUR";
@@ -111,6 +113,8 @@ function containsInquiryOnlyIndicators(text: string): boolean {
 function normalizeCurrencyToken(token: string | null): string | null {
   if (!token) return null;
   const normalized = token.trim().toUpperCase();
+  if (normalized === "YTL") return "YTL";
+  if (normalized === "TRL") return "TRL";
   if (normalized === "TL" || normalized === "TRY") return "TRY";
   if (normalized === "US$" || normalized === "$" || normalized === "USD") return "USD";
   if (normalized === "€" || normalized === "EUR") return "EUR";
@@ -121,9 +125,9 @@ function normalizeCurrencyToken(token: string | null): string | null {
 function extractCurrencyAmounts(text: string): CurrencyAmountMatch[] {
   const matches: CurrencyAmountMatch[] = [];
   const patternBefore =
-    /(TRY|TL|USD|EUR|GBP|₺|\$|€|£)\s*([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)/gi;
+    /(YTL|TRL|TRY|TL|USD|EUR|GBP|₺|\$|€|£)\s*([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)/gi;
   const patternAfter =
-    /([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)\s*(TRY|TL|USD|EUR|GBP|₺|\$|€|£)/gi;
+    /([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)\s*(YTL|TRL|TRY|TL|USD|EUR|GBP|₺|\$|€|£)/gi;
 
   for (const pattern of [patternBefore, patternAfter]) {
     let match: RegExpExecArray | null;
