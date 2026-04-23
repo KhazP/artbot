@@ -1,6 +1,7 @@
 import { pathExists } from "./lib/file-system.js";
 import { runInteractiveTui, type InteractiveStartupState } from "./interactive-app.js";
 import { normalizeReportSurface } from "./report/browser-report.js";
+import type { TuiSessionSnapshot } from "./sessions.js";
 import { assessLocalSetup, runSetupWizard } from "./setup/index.js";
 import { loadTuiPreferences } from "./tui/index.js";
 
@@ -52,6 +53,8 @@ export interface StartInteractiveOptions {
   initialAssessment?: Awaited<ReturnType<typeof assessLocalSetup>>;
   skipSetupWizard?: boolean;
   startup?: InteractiveStartupState;
+  sessionId?: string;
+  sessionRestore?: TuiSessionSnapshot;
 }
 
 type PipelineAttempt = NonNullable<PipelineDetails["attempts"]>[number];
@@ -215,6 +218,8 @@ export async function startInteractive(options: StartInteractiveOptions = {}): P
     },
     initialAssessment,
     initialPreferences,
-    startup
+    startup,
+    sessionId: options.sessionId,
+    sessionRestore: options.sessionRestore
   });
 }

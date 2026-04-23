@@ -12,7 +12,10 @@ const cliPackageVersion = JSON.parse(fs.readFileSync(new URL("../package.json", 
 };
 const cleanupPaths: string[] = [];
 const envSnapshot = {
-  ARTBOT_NO_TUI: process.env.ARTBOT_NO_TUI
+  ARTBOT_NO_TUI: process.env.ARTBOT_NO_TUI,
+  ARTBOT_HOME: process.env.ARTBOT_HOME,
+  ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED: process.env.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED,
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY
 };
 
 afterEach(() => {
@@ -20,6 +23,9 @@ afterEach(() => {
     fs.rmSync(target, { recursive: true, force: true });
   }
   process.env.ARTBOT_NO_TUI = envSnapshot.ARTBOT_NO_TUI;
+  process.env.ARTBOT_HOME = envSnapshot.ARTBOT_HOME;
+  process.env.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED = envSnapshot.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED;
+  process.env.GEMINI_API_KEY = envSnapshot.GEMINI_API_KEY;
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -198,6 +204,40 @@ function mkTempDir(prefix: string): string {
   return root;
 }
 
+function allowWorkspaceTrust(): string {
+  const artbotHome = mkTempDir("artbot-cli-home-");
+  process.env.ARTBOT_HOME = artbotHome;
+  let workspacePath = path.resolve(process.cwd());
+  while (!fs.existsSync(path.join(workspacePath, "pnpm-workspace.yaml"))) {
+    const parent = path.dirname(workspacePath);
+    if (parent === workspacePath) {
+      break;
+    }
+    workspacePath = parent;
+  }
+  const trustPath = path.join(artbotHome, "state", "trust.json");
+  fs.mkdirSync(path.dirname(trustPath), { recursive: true });
+  fs.writeFileSync(
+    trustPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        workspaces: [
+          {
+            workspacePath,
+            status: "trusted",
+            updatedAt: "2026-04-23T10:00:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf-8"
+  );
+  return artbotHome;
+}
+
 describe("artbot cli v2", () => {
   it("boots and renders help without commander option conflicts", async () => {
     const io = createMockIo();
@@ -262,6 +302,7 @@ describe("artbot cli v2", () => {
   });
 
   it("launches the explicit tui command", async () => {
+    allowWorkspaceTrust();
     const io = createMockIo();
     const startInteractive = vi.fn(async () => 7);
 
@@ -275,6 +316,24 @@ describe("artbot cli v2", () => {
 
     expect(code).toBe(7);
     expect(startInteractive).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires trust before launching the explicit tui command", async () => {
+    const io = createMockIo();
+    const startInteractive = vi.fn(async () => 7);
+
+    const code = await runCli(["node", "artbot", "tui"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub(),
+      startInteractive
+    });
+
+    const { stderr } = io.read();
+    expect(code).toBe(3);
+    expect(startInteractive).not.toHaveBeenCalled();
+    expect(stderr).toContain("artbot trust allow");
   });
 
   it("blocks the tui command when --no-tui is passed", async () => {
@@ -331,6 +390,7 @@ describe("artbot cli v2", () => {
   });
 
   it("hands off to the TUI after interactive setup completes", async () => {
+    allowWorkspaceTrust();
     const io = createMockIo();
     const startInteractive = vi.fn(async () => 17);
     const setupWizard = vi.fn(async () => ({
@@ -453,6 +513,36 @@ describe("artbot cli v2", () => {
     expect(stderr).toBe("");
   });
 
+  it("emits newline-delimited events for stream-json runs watch", async () => {
+    const io = createMockIo();
+    const running = buildRunDetails("running");
+    const completed = buildRunDetails("completed");
+    let checks = 0;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
+      const value = String(url);
+      if (value.endsWith("/runs/run-123")) {
+        checks += 1;
+        return jsonResponse(checks === 1 ? running : completed);
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const code = await runCli(["node", "artbot", "--output-format", "stream-json", "runs", "watch", "--run-id", "run-123"], {
+      fetchImpl,
+      sleep: async () => undefined,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const { stdout, stderr } = io.read();
+    const lines = stdout.trim().split("\n").map((line) => JSON.parse(line) as { type: string; phase: string; runId?: string });
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(lines.some((line) => line.type === "progress" && line.phase === "run-status" && line.runId === "run-123")).toBe(true);
+    expect(lines.some((line) => line.type === "result" && line.phase === "runs-watch-complete" && line.runId === "run-123")).toBe(true);
+  });
+
   it("supports --wait and returns terminal JSON payload", async () => {
     const io = createMockIo();
     const pending = buildRunDetails("pending");
@@ -502,6 +592,38 @@ describe("artbot cli v2", () => {
     expect(sleep).toHaveBeenCalledWith(5000);
   });
 
+  it("keeps runs show read-only even when experimental deep research is enabled", async () => {
+    const io = createMockIo();
+    process.env.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED = "true";
+    process.env.GEMINI_API_KEY = "test-key";
+
+    const runDir = mkTempDir("artbot-runs-show-");
+    const details = buildRunDetails("completed");
+    details.run.resultsPath = path.join(runDir, "results.json");
+    fs.writeFileSync(details.run.resultsPath, JSON.stringify({ ok: true }), "utf-8");
+
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
+      const value = String(url);
+      if (value.endsWith("/runs/run-123")) {
+        return jsonResponse(details);
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const code = await runCli(["node", "artbot", "--json", "runs", "show", "--run-id", "run-123"], {
+      fetchImpl,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const payload = JSON.parse(io.read().stdout) as RunDetailsResponse;
+    expect(code).toBe(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(payload.run.status).toBe("completed");
+    expect(fs.existsSync(path.join(runDir, "deep-research.json"))).toBe(false);
+  });
+
   it("returns exit code 4 for failed watch terminal states", async () => {
     const io = createMockIo();
     const running = buildRunDetails("running");
@@ -529,6 +651,73 @@ describe("artbot cli v2", () => {
     expect(code).toBe(4);
     const payload = JSON.parse(stdout) as RunDetailsResponse;
     expect(payload.run.status).toBe("failed");
+  });
+
+  it("allows and reports trusted workspace status", async () => {
+    const artbotHome = mkTempDir("artbot-trust-home-");
+    process.env.ARTBOT_HOME = artbotHome;
+    const io = createMockIo();
+
+    const allowCode = await runCli(["node", "artbot", "--json", "trust", "allow"], {
+      fetchImpl: vi.fn(),
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const allowPayload = JSON.parse(io.read().stdout) as { status: string };
+    expect(allowCode).toBe(0);
+    expect(allowPayload.status).toBe("trusted");
+
+    const io2 = createMockIo();
+    const statusCode = await runCli(["node", "artbot", "--json", "trust", "status"], {
+      fetchImpl: vi.fn(),
+      stdout: io2.appendStdout,
+      stderr: io2.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const statusPayload = JSON.parse(io2.read().stdout) as { status: string };
+    expect(statusCode).toBe(0);
+    expect(statusPayload.status).toBe("trusted");
+  });
+
+  it("lists persisted watch sessions for the current workspace", async () => {
+    const artbotHome = mkTempDir("artbot-sessions-home-");
+    process.env.ARTBOT_HOME = artbotHome;
+    const running = buildRunDetails("running");
+    const completed = buildRunDetails("completed");
+    let checks = 0;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
+      const value = String(url);
+      if (value.endsWith("/runs/run-123")) {
+        checks += 1;
+        return jsonResponse(checks === 1 ? running : completed);
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const io = createMockIo();
+    const watchCode = await runCli(["node", "artbot", "--json", "runs", "watch", "--run-id", "run-123"], {
+      fetchImpl,
+      sleep: async () => undefined,
+      stdout: io.appendStdout,
+      stderr: io.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+    expect(watchCode).toBe(0);
+
+    const io2 = createMockIo();
+    const listCode = await runCli(["node", "artbot", "--json", "sessions", "list"], {
+      fetchImpl: vi.fn(),
+      stdout: io2.appendStdout,
+      stderr: io2.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const payload = JSON.parse(io2.read().stdout) as { sessions: Array<{ kind: string; runsWatch?: { runId: string } }> };
+    expect(listCode).toBe(0);
+    expect(payload.sessions.some((session) => session.kind === "runs-watch" && session.runsWatch?.runId === "run-123")).toBe(true);
   });
 
   it("renders human table output for runs list", async () => {

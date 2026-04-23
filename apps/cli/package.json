@@ -38,7 +38,7 @@
     "email": "contact@alpyalay.org"
   },
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/bootstrap.ts",
     "build": "node ./scripts/build.mjs",
     "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",

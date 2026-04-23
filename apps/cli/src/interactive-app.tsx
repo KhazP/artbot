@@ -1,8 +1,10 @@
 import React, { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
-import type { RunEntity } from "@artbot/shared-types";
+import type { RunDetailsResponsePayload, RunEntity } from "@artbot/shared-types";
+import { ensureDeepResearchForRun } from "./experimental/deep-research.js";
 import { type AppLocale } from "./i18n.js";
+import { saveTuiSession, type TuiSessionSnapshot } from "./sessions.js";
 import { assessLocalSetup } from "./setup/workflow.js";
 import type { SetupAssessment } from "./setup/index.js";
 import {
@@ -60,6 +62,8 @@ interface InteractiveAppProps {
   initialAssessment: SetupAssessment | null;
   initialPreferences: TuiPreferences;
   startup?: InteractiveStartupState;
+  sessionId?: string;
+  sessionRestore?: TuiSessionSnapshot;
   onExit: (code: number) => void;
 }
 
@@ -72,6 +76,32 @@ type KeyboardInput = {
   escape?: boolean;
   tab?: boolean;
 };
+
+const SETTINGS_OPTION_COUNT = 14;
+
+function resolveInitialHistory(restore?: TuiSessionSnapshot): string[] {
+  return restore?.history ? [...restore.history] : [];
+}
+
+function resolveInitialSidePane(initialAssessment: SetupAssessment | null, startup?: InteractiveStartupState, restore?: TuiSessionSnapshot): SidePane {
+  if (startup?.sidePane) {
+    return startup.sidePane;
+  }
+  if (restore?.sidePane) {
+    return restore.sidePane;
+  }
+  return initialAssessment?.issues.length ? "setup" : "none";
+}
+
+function resolveInitialFocusTarget(startup?: InteractiveStartupState, restore?: TuiSessionSnapshot): TuiSurfaceState["focusTarget"] {
+  if (startup?.focusTarget) {
+    return startup.focusTarget;
+  }
+  if (restore?.focusTarget) {
+    return restore.focusTarget;
+  }
+  return startup?.sidePane ? "side" : "composer";
+}
 
 function summarizeCompletedRun(details: PipelineDetails | null): { accepted: number; coverage: number } | null {
   const summary = details?.summary;
@@ -124,6 +154,7 @@ function useTerminalDimensions() {
 }
 
 function getSettingsIndex(preferences: TuiPreferences): number {
+  if (preferences.experimental.enabled) return 8;
   if (preferences.language === "tr") return 1;
   if (preferences.theme === "system") return 3;
   if (preferences.theme === "matrix") return 4;
@@ -156,6 +187,48 @@ function applySettingsSelection(preferences: TuiPreferences, index: number): Tui
       return { ...preferences, density: "compact" };
     case 7:
       return { ...preferences, showSecondaryPane: !preferences.showSecondaryPane };
+    case 8:
+      return {
+        ...preferences,
+        experimental: {
+          ...preferences.experimental,
+          enabled: !preferences.experimental.enabled
+        }
+      };
+    case 9:
+      return preferences;
+    case 10:
+      return preferences;
+    case 11:
+      return {
+        ...preferences,
+        experimental: {
+          ...preferences.experimental,
+          warnOnRun: !preferences.experimental.warnOnRun
+        }
+      };
+    case 12: {
+      const nextValue = preferences.experimental.spendCapReminderUsd === 20
+        ? 50
+        : preferences.experimental.spendCapReminderUsd === 50
+          ? 100
+          : 20;
+      return {
+        ...preferences,
+        experimental: {
+          ...preferences.experimental,
+          spendCapReminderUsd: nextValue
+        }
+      };
+    }
+    case 13:
+      return {
+        ...preferences,
+        experimental: {
+          ...preferences.experimental,
+          openFullReportAfterRun: !preferences.experimental.openFullReportAfterRun
+        }
+      };
     default:
       return preferences;
   }
@@ -178,16 +251,17 @@ export function runInteractiveTui(props: RunInteractiveTuiProps): Promise<number
   });
 }
 
-function InteractiveApp({ context, initialAssessment, initialPreferences, startup, onExit }: InteractiveAppProps) {
+function InteractiveApp({ context, initialAssessment, initialPreferences, startup, sessionId, sessionRestore, onExit }: InteractiveAppProps) {
   const { exit } = useApp();
   const dimensions = useTerminalDimensions();
+  const sessionIdRef = useRef<string | undefined>(sessionId);
 
   const [assessment, setAssessment] = useState<SetupAssessment | null>(initialAssessment);
   const [sessionRunDetails, setSessionRunDetails] = useState<PipelineDetails | null>(null);
   const [browsedRunDetails, setBrowsedRunDetails] = useState<PipelineDetails | null>(null);
   const [recentRuns, setRecentRuns] = useState<RunEntity[]>([]);
   const [input, setInput] = useState("");
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => resolveInitialHistory(sessionRestore));
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [busy, setBusy] = useState(false);
   const [activeArtist, setActiveArtist] = useState("");
@@ -198,14 +272,14 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
   const [composerSubmitNonce, setComposerSubmitNonce] = useState(0);
   const [preferences, setPreferences] = useState<TuiPreferences>(initialPreferences);
   const [uiState, setUiState] = useState<TuiSurfaceState>(() => ({
-    sidePane: startup?.sidePane ?? (initialAssessment?.issues.length ? ("setup" as const) : ("none" as const)),
+    sidePane: resolveInitialSidePane(initialAssessment, startup, sessionRestore),
     sidePaneDismissed: false,
     overlay: "none" as Overlay,
-    focusTarget: startup?.focusTarget ?? (startup?.sidePane ? "side" : "composer"),
+    focusTarget: resolveInitialFocusTarget(startup, sessionRestore),
     recentRunsQuery: "",
     selectedRecentRunIndex: 0,
     selectedSettingsIndex: getSettingsIndex(initialPreferences),
-    selectedReportSurfaceIndex: 0
+    selectedReportSurfaceIndex: sessionRestore?.reportSurfaceIndex ?? 0
   }));
   const cancelPollingRef = useRef(false);
 
@@ -274,9 +348,29 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
         throw new Error(`Failed to load run ${runId} (${detailResponse.status})`);
       }
 
-      return (await detailResponse.json()) as PipelineDetails;
+      return (await detailResponse.json()) as unknown as PipelineDetails;
     },
     [context.apiBaseUrl, context.apiKey]
+  );
+
+  const maybeRunDeepResearch = useCallback(
+    async (details: PipelineDetails | null) => {
+      if (!details?.run?.id || details.run.status !== "completed") {
+        return details;
+      }
+
+      const typedDetails = details as RunDetailsResponsePayload;
+      if (typedDetails.deepResearch?.status === "completed") {
+        return details;
+      }
+
+      return ensureDeepResearchForRun({
+        details: typedDetails,
+        settings: preferences.experimental,
+        onStatus: (messageText) => setMessage(messageText)
+      });
+    },
+    [preferences.experimental]
   );
 
   const fetchFxCacheStats = useCallback(async () => {
@@ -320,7 +414,8 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
           coverage: snapshot.coverage,
           surface: "web",
           browserPath: result.htmlPath,
-          error: result.opened ? undefined : result.error
+          error: result.opened ? undefined : result.error,
+          deepResearchSummary: nextDetails?.deepResearch?.summary ?? null
         })
       );
       return result.opened;
@@ -359,7 +454,8 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
           accepted: snapshot.accepted,
           coverage: snapshot.coverage,
           surface: "cli",
-          browserPath: browserReportPath ?? undefined
+          browserPath: browserReportPath ?? undefined,
+          deepResearchSummary: nextDetails?.deepResearch?.summary ?? null
         })
       );
     },
@@ -496,9 +592,16 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
   }, [context.apiBaseUrl, context.apiKey, displayedRun?.run?.id, openRunSidePane, refreshDisplayedRun]);
 
   const commitSettingsSelection = useCallback(() => {
+    const previousPreferences = preferences;
     const nextPreferences = applySettingsSelection(preferences, uiState.selectedSettingsIndex);
     persistPreferences(nextPreferences);
     setUiState((current: TuiSurfaceState) => closeOverlay(current));
+    if (!previousPreferences.experimental.enabled && nextPreferences.experimental.enabled) {
+      setMessage(
+        `Settings saved. Experimental AI research enabled. Set a Google AI Studio spend cap around $${nextPreferences.experimental.spendCapReminderUsd}+ before heavy use.`
+      );
+      return;
+    }
     setMessage("Settings saved.");
   }, [persistPreferences, preferences, uiState.selectedSettingsIndex]);
 
@@ -528,6 +631,43 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
       }
     })();
   }, [fetchRecentRuns, refreshAssessment]);
+
+  useEffect(() => {
+    const restoredRunId = sessionRestore?.lastRunId;
+    if (!restoredRunId) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const details = await fetchRunDetails(restoredRunId);
+        setBrowsedRunDetails(details);
+        setMessage(startup?.message ?? `Resumed session for run ${restoredRunId}.`);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [fetchRunDetails, sessionRestore?.lastRunId, startup?.message]);
+
+  useEffect(() => {
+    const summaryTarget = (displayedRun?.run?.query?.artist ?? activeArtist) || "ArtBot TUI";
+    try {
+      const persisted = saveTuiSession({
+        sessionId: sessionIdRef.current,
+        summary: displayedRun?.run?.id ? `TUI - ${summaryTarget} (${displayedRun.run.id})` : `TUI - ${summaryTarget}`,
+        snapshot: {
+          sidePane: displayedSidePane,
+          focusTarget: uiState.focusTarget,
+          history,
+          lastRunId: displayedRun?.run?.id,
+          reportSurfaceIndex: uiState.selectedReportSurfaceIndex
+        }
+      });
+      sessionIdRef.current = persisted.record.id;
+    } catch {
+      // Ignore session persistence failures so the TUI remains usable.
+    }
+  }, [activeArtist, displayedRun?.run?.id, displayedRun?.run?.query?.artist, displayedSidePane, history, uiState.focusTarget, uiState.selectedReportSurfaceIndex]);
 
   useEffect(() => {
     if (uiState.selectedRecentRunIndex >= visibleRecentRuns.length) {
@@ -639,21 +779,25 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
 
         while (!cancelPollingRef.current) {
           const nextDetails = await fetchRunDetails(created.runId);
-          setSessionRunDetails(nextDetails);
+          setSessionRunDetails(nextDetails as PipelineDetails);
 
           const status = nextDetails.run?.status;
           if (status === "completed" || status === "failed") {
             if (status === "completed") {
-              const snapshot = summarizeCompletedRun(nextDetails);
+              const enhancedDetails = await maybeRunDeepResearch(nextDetails);
+              setSessionRunDetails(enhancedDetails as PipelineDetails);
+              const snapshot = summarizeCompletedRun(enhancedDetails as PipelineDetails);
               if (snapshot) {
                 const reportSurface = context.defaults.reportSurface;
 
-                if (shouldAutoOpenBrowserReport(reportSurface)) {
-                  await presentCompletedRun("web", nextDetails);
+                if (preferences.experimental.enabled && preferences.experimental.openFullReportAfterRun) {
+                  await presentCompletedRun("web", enhancedDetails as PipelineDetails);
+                } else if (shouldAutoOpenBrowserReport(reportSurface)) {
+                  await presentCompletedRun("web", enhancedDetails as PipelineDetails);
                 } else if (shouldPromptForReportSurface(reportSurface)) {
                   openReportSurfaceOverlay();
                 } else {
-                  await presentCompletedRun("cli", nextDetails);
+                  await presentCompletedRun("cli", enhancedDetails as PipelineDetails);
                 }
               }
             } else {
@@ -670,7 +814,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
         setBusy(false);
       }
     },
-    [context.apiBaseUrl, context.apiKey, context.defaults, fetchRecentRuns, fetchRunDetails, openReportSurfaceOverlay, presentCompletedRun, refreshAssessment]
+    [context.apiBaseUrl, context.apiKey, context.defaults, fetchRecentRuns, fetchRunDetails, maybeRunDeepResearch, openReportSurfaceOverlay, preferences.experimental.enabled, preferences.experimental.openFullReportAfterRun, presentCompletedRun, refreshAssessment]
   );
 
   const handleComposerChange = useCallback(
@@ -999,7 +1143,7 @@ function InteractiveApp({ context, initialAssessment, initialPreferences, startu
       if (key.upArrow || key.downArrow) {
         setUiState((current: TuiSurfaceState) => ({
           ...current,
-          selectedSettingsIndex: stepSelection(current.selectedSettingsIndex, key.upArrow ? -1 : 1, 8)
+          selectedSettingsIndex: stepSelection(current.selectedSettingsIndex, key.upArrow ? -1 : 1, SETTINGS_OPTION_COUNT)
         }));
         return;
       }

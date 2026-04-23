@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { renderResearchRunHtml } from "@artbot/browser-report";
+import { readDeepResearchArtifact } from "../experimental/deep-research.js";
 import { pathExists, readTextFile } from "../lib/file-system.js";
 
 export type ReportSurfacePreference = "ask" | "cli" | "web";
@@ -58,21 +59,23 @@ export function buildCompletedReportMessage(params: {
   surface: ReportSurfacePreference;
   browserPath?: string;
   error?: string;
+  deepResearchSummary?: string | null;
 }): string {
   const prefix = `✓ Run completed — ${params.accepted} accepted, ${params.coverage}% coverage`;
+  const deepResearchSuffix = params.deepResearchSummary ? ` Experimental AI research: ${params.deepResearchSummary}` : "";
   if (params.error) {
-    return `${prefix}. Browser report saved at ${params.browserPath ?? "unknown path"} but could not be opened: ${params.error}`;
+    return `${prefix}.${deepResearchSuffix} Browser report saved at ${params.browserPath ?? "unknown path"} but could not be opened: ${params.error}`;
   }
   if (params.browserPath && params.surface === "web") {
-    return `${prefix}. Opened browser report: ${params.browserPath}`;
+    return `${prefix}.${deepResearchSuffix} Opened browser report: ${params.browserPath}`;
   }
   if (params.surface === "ask") {
-    return `${prefix}. View report: /report cli or /report web`;
+    return `${prefix}.${deepResearchSuffix} View report: /report cli or /report web`;
   }
   if (params.surface === "web") {
-    return `${prefix}. Opening browser report...`;
+    return `${prefix}.${deepResearchSuffix} Opening browser report...`;
   }
-  return `${prefix}. Use /report web to open the browser report.`;
+  return `${prefix}.${deepResearchSuffix} Use /report web to open the browser report.`;
 }
 
 export function buildBrowserOpenCommand(targetPath: string, platform = process.platform): { command: string; args: string[] } {
@@ -102,7 +105,11 @@ export async function generateBrowserReportFromResultsFile(resultsPath: string):
     throw new Error(`Results file is not valid JSON: ${resultsPath}`);
   }
 
-  return generateBrowserReportFromPayload(payload, { resultsPath });
+  const deepResearch = readDeepResearchArtifact(resultsPath);
+  return generateBrowserReportFromPayload(
+    deepResearch ? { ...(payload as Record<string, unknown>), deepResearch } : payload,
+    { resultsPath }
+  );
 }
 
 export async function generateBrowserReportFromPayload(

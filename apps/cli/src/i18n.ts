@@ -60,10 +60,20 @@ type MessageKey =
   | "tui.commandHint.runs"
   | "tui.overlay.settings.title"
   | "tui.overlay.settings.subtitle"
+  | "tui.settings.section.general"
+  | "tui.settings.section.experimental"
   | "tui.settings.language"
   | "tui.settings.theme"
   | "tui.settings.density"
   | "tui.settings.secondaryPane"
+  | "tui.settings.experimental.enabled"
+  | "tui.settings.experimental.plannerModel"
+  | "tui.settings.experimental.researchMode"
+  | "tui.settings.experimental.warnOnRun"
+  | "tui.settings.experimental.spendCapReminder"
+  | "tui.settings.experimental.openFullReportAfterRun"
+  | "tui.settings.experimental.summary"
+  | "tui.settings.experimental.detail"
   | "tui.settings.value.enabled"
   | "tui.settings.value.disabled"
   | "tui.language.english"
@@ -182,10 +192,20 @@ const EN_MESSAGES: MessageCatalog = {
   "tui.commandHint.runs": "Inspect recent or active runs",
   "tui.overlay.settings.title": "Settings",
   "tui.overlay.settings.subtitle": "Theme, language, density, and layout preferences",
+  "tui.settings.section.general": "General",
+  "tui.settings.section.experimental": "Experimental",
   "tui.settings.language": "Language",
   "tui.settings.theme": "Theme",
   "tui.settings.density": "Density",
   "tui.settings.secondaryPane": "Secondary pane",
+  "tui.settings.experimental.enabled": "AI-assisted deep research",
+  "tui.settings.experimental.plannerModel": "Planner model",
+  "tui.settings.experimental.researchMode": "Research mode",
+  "tui.settings.experimental.warnOnRun": "Warn before expensive runs",
+  "tui.settings.experimental.spendCapReminder": "AI Studio spend-cap reminder",
+  "tui.settings.experimental.openFullReportAfterRun": "Open full report after run",
+  "tui.settings.experimental.summary": "Runs Gemini planning and Deep Research Max after normal ArtBot research.",
+  "tui.settings.experimental.detail": "Cloud-based and expensive. Enable only if you intend to pay and have a Gemini API key.",
   "tui.settings.value.enabled": "Enabled",
   "tui.settings.value.disabled": "Disabled",
   "tui.language.english": "English",
@@ -306,10 +326,20 @@ const TR_MESSAGES: MessageCatalog = {
   "tui.commandHint.runs": "Son veya aktif kosulari incele",
   "tui.overlay.settings.title": "Ayarlar",
   "tui.overlay.settings.subtitle": "Tema, dil, yogunluk ve yerlesim tercihleri",
+  "tui.settings.section.general": "Genel",
+  "tui.settings.section.experimental": "Deneysel",
   "tui.settings.language": "Dil",
   "tui.settings.theme": "Tema",
   "tui.settings.density": "Yogunluk",
   "tui.settings.secondaryPane": "Ikinci panel",
+  "tui.settings.experimental.enabled": "YZ destekli derin arastirma",
+  "tui.settings.experimental.plannerModel": "Planlayici model",
+  "tui.settings.experimental.researchMode": "Arastirma modu",
+  "tui.settings.experimental.warnOnRun": "Pahali kosulardan once uyar",
+  "tui.settings.experimental.spendCapReminder": "AI Studio harcama limiti hatirlatmasi",
+  "tui.settings.experimental.openFullReportAfterRun": "Kosudan sonra tam raporu ac",
+  "tui.settings.experimental.summary": "Normal ArtBot arastirmasindan sonra Gemini planlama ve Deep Research Max calistirir.",
+  "tui.settings.experimental.detail": "Bulut tabanli ve pahalidir. Yalnizca odemeyi planliyorsaniz ve Gemini API anahtariniz varsa acin.",
   "tui.settings.value.enabled": "Acik",
   "tui.settings.value.disabled": "Kapali",
   "tui.language.english": "Ingilizce",

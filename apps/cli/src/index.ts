@@ -1,3 +1,4 @@
+import "./warnings.js";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -13,6 +14,7 @@ import { ZodError } from "zod";
 import type {
   AcceptanceReason,
   CanaryResult,
+  DeepResearchResult,
   DiscoveryProviderDiagnostics,
   PriceRecord,
   RunEntity,
@@ -49,9 +51,14 @@ import {
   type LocalBackendStatus,
   type SetupAssessment
 } from "./setup/index.js";
+import { ensureDeepResearchForRun, resolveEffectiveDeepResearchSettings } from "./experimental/deep-research.js";
 import { normalizeAppLocale, translate, type AppLocale } from "./i18n.js";
 import type { StartInteractiveOptions } from "./interactive.js";
+import { detectRepoGuidance } from "./repo-guidance.js";
+import { generateAndOpenBrowserReportFromPayload } from "./report/browser-report.js";
+import { getCliSession, listCliSessions, pruneCliSessions, saveRunsWatchSession, type CliSessionRecord } from "./sessions.js";
 import { runSetupWizard } from "./setup/workflow.js";
+import { assertTrustedWorkspace, inspectWorkspaceTrust, setWorkspaceTrust } from "./trust.js";
 import { loadTuiPreferences } from "./tui/preferences.js";
 
 declare const __ARTBOT_VERSION__: string;
@@ -72,8 +79,6 @@ function resolveCliVersion(): string {
 
 const CLI_VERSION = resolveCliVersion();
 
-const SQLITE_WARNING_FILTER_FLAG = "__ARTBOT_SQLITE_WARNING_FILTER_INSTALLED__";
-
 function resolveOutputLocale(env: NodeJS.ProcessEnv = process.env): AppLocale {
   if (env.ARTBOT_LANG?.trim()) {
     return normalizeAppLocale(env.ARTBOT_LANG);
@@ -81,38 +86,6 @@ function resolveOutputLocale(env: NodeJS.ProcessEnv = process.env): AppLocale {
   return normalizeAppLocale(loadTuiPreferences(env).language);
 }
 
-function shouldSuppressSqliteExperimentalWarning(warning: unknown, args: unknown[]): boolean {
-  const warningName =
-    typeof warning === "object" && warning && "name" in warning && typeof (warning as { name?: unknown }).name === "string"
-      ? (warning as { name: string }).name
-      : typeof args[0] === "string"
-        ? args[0]
-        : "";
-  const warningMessage =
-    typeof warning === "string"
-      ? warning
-      : typeof warning === "object" && warning && "message" in warning && typeof (warning as { message?: unknown }).message === "string"
-        ? (warning as { message: string }).message
-        : "";
-
-  return warningName === "ExperimentalWarning" && /node:sqlite|SQLite is an experimental feature/i.test(warningMessage);
-}
-
-function installSqliteWarningFilter(): void {
-  const markerProcess = process as NodeJS.Process & Record<string, unknown>;
-  if (markerProcess[SQLITE_WARNING_FILTER_FLAG]) return;
-
-  const originalEmitWarning = process.emitWarning.bind(process);
-  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
-    if (shouldSuppressSqliteExperimentalWarning(warning, args)) {
-      return;
-    }
-    (originalEmitWarning as (...innerArgs: unknown[]) => void)(warning, ...args);
-  }) as typeof process.emitWarning;
-  markerProcess[SQLITE_WARNING_FILTER_FLAG] = true;
-}
-
-installSqliteWarningFilter();
 
 const EXIT_CODES = {
   OK: 0,
@@ -161,6 +134,18 @@ interface RunsShowOptions {
 
 interface RunsWatchOptions extends RunsShowOptions {
   interval?: string;
+}
+
+interface SessionsResumeOptions {
+  sessionId?: string;
+}
+
+interface SessionsPruneOptions {
+  keep?: string;
+}
+
+interface RunsDeepResearchOptions extends RunsShowOptions {
+  web?: boolean;
 }
 
 interface AuthCaptureOptions {
@@ -212,6 +197,7 @@ interface CanaryHistoryOptions {
 }
 
 interface GlobalOptions {
+  outputFormat: "text" | "json" | "stream-json";
   json: boolean;
   apiBaseUrl: string;
   apiKey?: string;
@@ -377,7 +363,7 @@ interface CliContext {
   deps: Required<CliDeps>;
   exitCode: number;
   noTui: boolean;
-  jsonRequested: boolean;
+  machineOutputRequested: boolean;
 }
 
 interface JsonErrorPayload {
@@ -390,6 +376,18 @@ interface JsonErrorPayload {
 
 const STORAGE_USAGE_HINT_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024;
 const STORAGE_USAGE_HINT_THRESHOLD_EXPIRABLE_RUNS = 20;
+const STREAM_EVENT_TYPES = ["start", "progress", "result", "error", "warning", "info"] as const;
+
+type StreamEventType = (typeof STREAM_EVENT_TYPES)[number];
+
+interface StreamEventEnvelope {
+  type: StreamEventType;
+  timestamp: string;
+  phase: string;
+  message: string;
+  runId?: string;
+  data?: unknown;
+}
 
 function toNumber(value?: string): number | undefined {
   if (!value) return undefined;
@@ -472,6 +470,26 @@ function isNoTuiEnabled(userArgs: string[], env: NodeJS.ProcessEnv = process.env
   return userArgs.includes("--no-tui") || isTruthyEnvFlag(env.ARTBOT_NO_TUI);
 }
 
+function resolveRequestedMachineOutput(userArgs: string[]): boolean {
+  if (userArgs.includes("--json")) {
+    return true;
+  }
+
+  for (let index = 0; index < userArgs.length; index += 1) {
+    const arg = userArgs[index];
+    if (arg === "--output-format") {
+      const value = userArgs[index + 1];
+      return value === "json" || value === "stream-json";
+    }
+    if (arg?.startsWith("--output-format=")) {
+      const value = arg.slice("--output-format=".length);
+      return value === "json" || value === "stream-json";
+    }
+  }
+
+  return false;
+}
+
 function getNestedValue(payload: unknown, pathSegments: string[]): unknown {
   let current = payload;
   for (const segment of pathSegments) {
@@ -527,6 +545,7 @@ function formatBytesWithRaw(value: number | undefined): string {
 
 function resolveGlobals(command: Command): GlobalOptions {
   const raw = command.optsWithGlobals() as {
+    outputFormat?: "text" | "json" | "stream-json";
     json?: boolean;
     apiBaseUrl?: string;
     apiKey?: string;
@@ -535,7 +554,16 @@ function resolveGlobals(command: Command): GlobalOptions {
     noTui?: boolean;
   };
 
+  const outputFormat = raw.outputFormat ?? (raw.json ? "json" : "text");
+  if (!["text", "json", "stream-json"].includes(outputFormat)) {
+    throw new InputValidationError(`Unsupported --output-format "${outputFormat}". Use text, json, or stream-json.`);
+  }
+  if (raw.json && raw.outputFormat && raw.outputFormat !== "json") {
+    throw new InputValidationError("Choose either --json or --output-format json, not both with a conflicting value.");
+  }
+
   const globals: GlobalOptions = {
+    outputFormat,
     json: Boolean(raw.json),
     apiBaseUrl: raw.apiBaseUrl ?? process.env.API_BASE_URL ?? "http://localhost:4000",
     apiKey: raw.apiKey ?? process.env.ARTBOT_API_KEY,
@@ -551,18 +579,70 @@ function resolveGlobals(command: Command): GlobalOptions {
   return globals;
 }
 
+function isStreamJson(globals: GlobalOptions): boolean {
+  return globals.outputFormat === "stream-json";
+}
+
+function isMachineOutput(globals: GlobalOptions): boolean {
+  return globals.outputFormat === "json" || globals.outputFormat === "stream-json";
+}
+
+function emitStreamEvent(
+  ctx: CliContext,
+  globals: GlobalOptions,
+  input: {
+    type: StreamEventType;
+    phase: string;
+    message: string;
+    runId?: string;
+    data?: unknown;
+  }
+): void {
+  if (!isStreamJson(globals)) {
+    return;
+  }
+
+  const envelope: StreamEventEnvelope = {
+    type: input.type,
+    timestamp: new Date().toISOString(),
+    phase: input.phase,
+    message: input.message,
+    ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.data !== undefined ? { data: input.data } : {})
+  };
+  writeLine(ctx.deps.stdout, JSON.stringify(envelope));
+}
+
 function logInfo(globals: GlobalOptions, ctx: CliContext, text: string): void {
-  if (globals.json || globals.quiet) return;
+  if (isMachineOutput(globals) || globals.quiet) return;
   writeLine(ctx.deps.stdout, text);
 }
 
 function logVerbose(globals: GlobalOptions, ctx: CliContext, text: string): void {
-  if (globals.json || globals.quiet || !globals.verbose) return;
+  if (isMachineOutput(globals) || globals.quiet || !globals.verbose) return;
   writeLine(ctx.deps.stderr, picocolors.dim(text));
 }
 
 function logError(globals: GlobalOptions, ctx: CliContext, payload: string | JsonErrorPayload): void {
-  if (globals.json) {
+  if (isStreamJson(globals)) {
+    const envelope =
+      typeof payload === "string"
+        ? {
+            ok: false,
+            code: "unknown_error",
+            message: payload,
+            exitCode: EXIT_CODES.API
+          }
+        : payload;
+    emitStreamEvent(ctx, globals, {
+      type: "error",
+      phase: "error",
+      message: envelope.message,
+      data: envelope
+    });
+    return;
+  }
+  if (globals.outputFormat === "json") {
     const envelope =
       typeof payload === "string"
         ? {
@@ -696,8 +776,35 @@ function buildJsonErrorPayload(error: unknown, exitCode: number): JsonErrorPaylo
 }
 
 function printJson(globals: GlobalOptions, ctx: CliContext, payload: unknown): void {
-  if (!globals.json) return;
+  if (globals.outputFormat !== "json") return;
   writeLine(ctx.deps.stdout, JSON.stringify(payload, null, 2));
+}
+
+function printStructuredResult(
+  globals: GlobalOptions,
+  ctx: CliContext,
+  payload: unknown,
+  options: {
+    phase: string;
+    message: string;
+    runId?: string;
+  }
+): boolean {
+  if (globals.outputFormat === "json") {
+    writeLine(ctx.deps.stdout, JSON.stringify(payload, null, 2));
+    return true;
+  }
+  if (isStreamJson(globals)) {
+    emitStreamEvent(ctx, globals, {
+      type: "result",
+      phase: options.phase,
+      message: options.message,
+      runId: options.runId,
+      data: payload
+    });
+    return true;
+  }
+  return false;
 }
 
 function buildQuery(options: CommonOptions, requireTitle: boolean) {
@@ -781,6 +888,41 @@ async function requestJson<T>(
   }
 
   return body as T;
+}
+
+async function maybeEnsureDeepResearch(
+  details: RunDetailsResponse,
+  ctx: CliContext
+): Promise<RunDetailsResponse> {
+  const preferences = loadTuiPreferences();
+  const settings = resolveEffectiveDeepResearchSettings(preferences);
+  return ensureDeepResearchForRun({
+    details,
+    settings,
+    fetchImpl: ctx.deps.fetchImpl
+  });
+}
+
+function renderDeepResearchHuman(result: DeepResearchResult): string[] {
+  const lines = [
+    `Experimental AI research: ${result.status}`
+  ];
+  if (result.summary) {
+    lines.push(`Summary: ${result.summary}`);
+  }
+  if (result.providerMetadata?.plannerModel) {
+    lines.push(`Planner model: ${result.providerMetadata.plannerModel}`);
+  }
+  if (result.providerMetadata?.agentId) {
+    lines.push(`Agent: ${result.providerMetadata.agentId}`);
+  }
+  if (result.warnings.length > 0) {
+    lines.push(...result.warnings.map((warning) => `Warning: ${warning}`));
+  }
+  if (result.citations.length > 0) {
+    lines.push(`Linked sources: ${result.citations.length}`);
+  }
+  return lines;
 }
 
 export function renderRunsTable(runs: RunEntity[]): string {
@@ -1416,6 +1558,12 @@ function printRunDetailsHuman(globals: GlobalOptions, ctx: CliContext, details: 
       );
     }
   }
+  if (details.deepResearch) {
+    logInfo(globals, ctx, "");
+    for (const line of renderDeepResearchHuman(details.deepResearch)) {
+      logInfo(globals, ctx, line);
+    }
+  }
 }
 
 function resolveRunsRootLocal(): string {
@@ -1563,8 +1711,11 @@ async function handleReplayAttempt(ctx: CliContext, options: ReplayAttemptOption
       acceptance
     }
   };
-  printJson(globals, ctx, payload);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "replay-complete",
+    message: `Replayed artifact for ${selected.source_name}.`,
+    runId: options.runId
+  })) {
     return;
   }
 
@@ -1593,14 +1744,17 @@ async function handleArtifactGc(ctx: CliContext, options: ArtifactGcOptions, com
     dryRun: Boolean(options.dryRun),
     keepLast
   });
-  printJson(globals, ctx, {
+  const payload = {
     runsRoot,
     keep_last: keepLast,
     max_size_gb: maxSizeGb ?? null,
     policy,
     ...result
-  });
-  if (globals.json) {
+  };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: result.dry_run ? "cleanup-dry-run" : "cleanup-complete",
+    message: result.dry_run ? "Computed cleanup plan." : "Applied cleanup policy."
+  })) {
     return;
   }
   logInfo(globals, ctx, `Runs root: ${runsRoot}`);
@@ -1628,8 +1782,10 @@ async function handleArtifactGc(ctx: CliContext, options: ArtifactGcOptions, com
 async function handleStorageUsage(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const summary = await requestJson<StorageUsageResponse>(ctx, globals, "GET", "/storage/usage");
-  printJson(globals, ctx, summary);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, summary, {
+    phase: "storage-summary",
+    message: "Loaded storage usage summary."
+  })) {
     return;
   }
 
@@ -1678,8 +1834,11 @@ async function handleReviewQueue(ctx: CliContext, options: ReviewQueueOptions, c
     items: rows
   };
 
-  printJson(globals, ctx, payload);
-  if (globals.json) return;
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "review-queue",
+    message: `Loaded review queue for run ${options.runId}.`,
+    runId: options.runId
+  })) return;
 
   if (rows.length === 0) {
     logInfo(globals, ctx, "No review queue items matched the selected filters.");
@@ -1700,8 +1859,11 @@ async function handleReviewDecide(ctx: CliContext, options: ReviewDecideOptions,
     `/runs/${options.runId}/review-queue/${options.itemId}/adjudicate`,
     { decision }
   );
-  printJson(globals, ctx, payload);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "review-decision",
+    message: `Resolved review item ${options.itemId} as ${decision}.`,
+    runId: options.runId
+  })) {
     return;
   }
   logInfo(globals, ctx, `Review item ${options.itemId} resolved as ${decision}.`);
@@ -1736,8 +1898,11 @@ async function handleGraphExplain(ctx: CliContext, options: GraphExplainOptions,
     membership_count: memberships.length,
     memberships: rows
   };
-  printJson(globals, ctx, payload);
-  if (globals.json) return;
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "graph-explain",
+    message: `Explained cluster ${options.clusterId}.`,
+    runId: options.runId
+  })) return;
 
   logInfo(
     globals,
@@ -1826,7 +1991,7 @@ async function handleCanariesRun(ctx: CliContext, options: CanaryRunOptions, com
     fail: results.filter((item) => item.status === "fail").length
   };
 
-  printJson(globals, ctx, {
+  const payload = {
     fixturesRoot,
     storage: {
       dbPath: resolved.dbPath,
@@ -1836,8 +2001,11 @@ async function handleCanariesRun(ctx: CliContext, options: CanaryRunOptions, com
     },
     summary,
     results
-  });
-  if (globals.json) {
+  };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "canaries-run",
+    message: `Canary run finished with ${summary.pass} pass and ${summary.fail} fail.`
+  })) {
     return;
   }
   logInfo(globals, ctx, `Runtime storage: db=${resolved.dbPath} · runs=${resolved.runsRoot}`);
@@ -1854,7 +2022,7 @@ async function handleCanariesHistory(ctx: CliContext, options: CanaryHistoryOpti
   const limit = toPositiveInt(options.limit, 20);
   const canaries = storage.listCanaryResults(limit, options.family);
 
-  printJson(globals, ctx, {
+  const payload = {
     storage: {
       dbPath: resolved.dbPath,
       runsRoot: resolved.runsRoot,
@@ -1862,8 +2030,11 @@ async function handleCanariesHistory(ctx: CliContext, options: CanaryHistoryOpti
       manifestPath: resolved.manifestPath
     },
     canaries
-  });
-  if (globals.json) {
+  };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "canaries-history",
+    message: `Loaded ${canaries.length} canary history rows.`
+  })) {
     return;
   }
 
@@ -1886,7 +2057,7 @@ async function waitForRunTerminal(
   runId: string,
   intervalSeconds: number
 ): Promise<RunDetailsResponse> {
-  const spinner = globals.json || globals.quiet ? null : ctx.deps.spinnerFactory(`Waiting for run ${runId}...`).start();
+  const spinner = isMachineOutput(globals) || globals.quiet ? null : ctx.deps.spinnerFactory(`Waiting for run ${runId}...`).start();
   let previousStatus: RunStatus | null = null;
 
   while (true) {
@@ -1898,6 +2069,16 @@ async function waitForRunTerminal(
 
     if (previousStatus !== status) {
       logVerbose(globals, ctx, `Run ${runId}: ${previousStatus ?? "unknown"} -> ${status}`);
+      emitStreamEvent(ctx, globals, {
+        type: "progress",
+        phase: "run-status",
+        message: `Run ${runId} status: ${status}`,
+        runId,
+        data: {
+          status,
+          previousStatus
+        }
+      });
       previousStatus = status;
     }
 
@@ -1923,6 +2104,9 @@ async function handleResearch(
   runType: "artist" | "work" | "artist_market_inventory"
 ): Promise<void> {
   const globals = resolveGlobals(command);
+  if (options.manualLogin || options.authProfile || options.cookieFile || options.allowLicensed) {
+    assertTrustedWorkspace(`${runType} research`, process.cwd());
+  }
   const query = buildQuery(options, runType === "work");
   const path =
     runType === "artist" ? "/research/artist" : runType === "work" ? "/research/work" : "/crawl/artist-market";
@@ -1933,9 +2117,9 @@ async function handleResearch(
         ? "/research/work/plan"
         : "/crawl/artist-market/plan";
 
-  const shouldPreviewPlan = !globals.json || Boolean(options.previewOnly);
+  const shouldPreviewPlan = globals.outputFormat !== "json" || Boolean(options.previewOnly);
   const planSpinner =
-    shouldPreviewPlan && !globals.json && !globals.quiet
+    shouldPreviewPlan && !isMachineOutput(globals) && !globals.quiet
       ? ctx.deps.spinnerFactory(`Preparing source plan for ${query.artist}...`).start()
       : null;
   let preview: SourcePlanPreviewResponse | null = null;
@@ -1954,12 +2138,14 @@ async function handleResearch(
   }
 
   if (preview) {
-    if (globals.json && options.previewOnly) {
-      printJson(globals, ctx, preview);
+    if (options.previewOnly && printStructuredResult(globals, ctx, preview, {
+      phase: "preview-plan",
+      message: `Prepared source plan for ${query.artist}.`
+    })) {
       return;
     }
 
-    if (!globals.json) {
+    if (!isMachineOutput(globals)) {
       logInfo(globals, ctx, "Execution plan");
       logInfo(globals, ctx, renderSourcePlanTable(preview));
       logInfo(
@@ -1988,10 +2174,23 @@ async function handleResearch(
   }
 
   const created = await requestJson<{ runId: string; status: RunStatus }>(ctx, globals, "POST", path, { query });
+  emitStreamEvent(ctx, globals, {
+    type: "start",
+    phase: "run-created",
+    message: `Created ${runType} run ${created.runId}.`,
+    runId: created.runId,
+    data: created
+  });
 
   if (!options.wait) {
-    printJson(globals, ctx, created);
-    if (!globals.json) {
+    if (printStructuredResult(globals, ctx, created, {
+      phase: "run-created",
+      message: `Created ${runType} run ${created.runId}.`,
+      runId: created.runId
+    })) {
+      return;
+    }
+    if (!isMachineOutput(globals)) {
       logInfo(globals, ctx, `Run created: ${created.runId} (${created.status})`);
       logInfo(globals, ctx, `Use "artbot runs show --run-id ${created.runId}" to inspect details.`);
     }
@@ -1999,10 +2198,31 @@ async function handleResearch(
   }
 
   const waitIntervalSeconds = toPositiveInt(options.waitInterval, 2);
-  const details = await waitForRunTerminal(ctx, globals, created.runId, waitIntervalSeconds);
-  printJson(globals, ctx, details);
-  if (!globals.json) {
+  try {
+    saveRunsWatchSession({
+      summary: `Watch run ${created.runId}`,
+      snapshot: {
+        runId: created.runId,
+        intervalSeconds: waitIntervalSeconds
+      }
+    });
+  } catch (error) {
+    logVerbose(globals, ctx, `Session persistence unavailable: ${formatError(error)}`);
+  }
+  const details = await maybeEnsureDeepResearch(await waitForRunTerminal(ctx, globals, created.runId, waitIntervalSeconds), ctx);
+  if (!printStructuredResult(globals, ctx, details, {
+    phase: "run-complete",
+    message: `Run ${created.runId} reached terminal state ${details.run.status}.`,
+    runId: created.runId
+  })) {
     printRunDetailsHuman(globals, ctx, details);
+    if (details.deepResearch?.status === "completed" && loadTuiPreferences().experimental.openFullReportAfterRun) {
+      const report = await generateAndOpenBrowserReportFromPayload(details, {
+        runId: details.run.id,
+        resultsPath: details.run.resultsPath
+      });
+      logInfo(globals, ctx, `Browser report: ${report.htmlPath}${report.opened ? "" : ` (${report.error ?? "open failed"})`}`);
+    }
   }
 
   if (isFailedOrBlocked(details)) {
@@ -2011,7 +2231,7 @@ async function handleResearch(
 }
 
 async function maybeLogStorageCleanupTip(ctx: CliContext, globals: GlobalOptions): Promise<void> {
-  if (globals.json || globals.quiet) return;
+  if (isMachineOutput(globals) || globals.quiet) return;
 
   try {
     const summary = await requestJson<StorageUsageResponse>(ctx, globals, "GET", "/storage/usage");
@@ -2033,8 +2253,10 @@ async function handleRunsList(ctx: CliContext, options: RunsListOptions, command
   query.set("limit", String(limit));
 
   const payload = await requestJson<RunsListResponse>(ctx, globals, "GET", `/runs?${query.toString()}`);
-  printJson(globals, ctx, payload);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "runs-list",
+    message: `Loaded ${payload.runs.length} runs.`
+  })) {
     return;
   }
 
@@ -2051,8 +2273,11 @@ async function handleRunsList(ctx: CliContext, options: RunsListOptions, command
 async function handleRunsShow(ctx: CliContext, options: RunsShowOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const details = await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`);
-  printJson(globals, ctx, details);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, details, {
+    phase: "runs-show",
+    message: `Loaded run ${options.runId}.`,
+    runId: options.runId
+  })) {
     return;
   }
   printRunDetailsHuman(globals, ctx, details);
@@ -2061,14 +2286,67 @@ async function handleRunsShow(ctx: CliContext, options: RunsShowOptions, command
 async function handleRunsWatch(ctx: CliContext, options: RunsWatchOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const intervalSeconds = toPositiveInt(options.interval, 2);
-  const details = await waitForRunTerminal(ctx, globals, options.runId, intervalSeconds);
-  printJson(globals, ctx, details);
-  if (!globals.json) {
+  try {
+    saveRunsWatchSession({
+      summary: `Watch run ${options.runId}`,
+      snapshot: {
+        runId: options.runId,
+        intervalSeconds
+      }
+    });
+  } catch (error) {
+    logVerbose(globals, ctx, `Session persistence unavailable: ${formatError(error)}`);
+  }
+  const details = await maybeEnsureDeepResearch(
+    await waitForRunTerminal(ctx, globals, options.runId, intervalSeconds),
+    ctx
+  );
+  if (!printStructuredResult(globals, ctx, details, {
+    phase: "runs-watch-complete",
+    message: `Run ${options.runId} reached terminal state ${details.run.status}.`,
+    runId: options.runId
+  })) {
     printRunDetailsHuman(globals, ctx, details);
   }
 
   if (isFailedOrBlocked(details)) {
     throw new TerminalStateError(details);
+  }
+}
+
+async function handleRunsDeepResearch(ctx: CliContext, options: RunsDeepResearchOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const details = await maybeEnsureDeepResearch(
+    await requestJson<RunDetailsResponse>(ctx, globals, "GET", `/runs/${options.runId}`),
+    ctx
+  );
+  const payload = {
+    run_id: options.runId,
+    deep_research: details.deepResearch ?? null
+  };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "deep-research",
+    message: `Loaded deep research for run ${options.runId}.`,
+    runId: options.runId
+  })) {
+    return;
+  }
+
+  if (!details.deepResearch) {
+    logInfo(globals, ctx, "Experimental AI research is unavailable for this run.");
+    return;
+  }
+
+  for (const line of renderDeepResearchHuman(details.deepResearch)) {
+    logInfo(globals, ctx, line);
+  }
+
+  if (options.web) {
+    const report = await generateAndOpenBrowserReportFromPayload(details, {
+      runId: details.run.id,
+      resultsPath: details.run.resultsPath
+    });
+    logInfo(globals, ctx, `Browser report: ${report.htmlPath}${report.opened ? "" : ` (${report.error ?? "open failed"})`}`);
   }
 }
 
@@ -2080,8 +2358,11 @@ async function handleRunsPinMutation(
 ): Promise<void> {
   const globals = resolveGlobals(command);
   const run = await requestJson<RunEntity>(ctx, globals, "POST", `/runs/${options.runId}/${pinned ? "pin" : "unpin"}`, {});
-  printJson(globals, ctx, run);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, run, {
+    phase: pinned ? "run-pin" : "run-unpin",
+    message: `${pinned ? "Pinned" : "Unpinned"} run ${run.id}.`,
+    runId: run.id
+  })) {
     return;
   }
 
@@ -2093,22 +2374,27 @@ async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   if (ctx.noTui || globals.noTui) {
     const message = translate(resolveOutputLocale(), "cli.setup.disabled");
-    if (globals.json) {
-      printJson(globals, ctx, {
+    if (printStructuredResult(globals, ctx, {
         ok: false,
         code: "setup_interactive_disabled",
         message,
         recommended_commands: ["artbot backend start", "artbot doctor"]
-      });
+      }, {
+        phase: "setup-disabled",
+        message
+      })) {
       return;
     }
     logInfo(globals, ctx, message);
     return;
   }
 
+  assertTrustedWorkspace("setup", process.cwd());
   const result = await ctx.deps.setupWizard();
-  printJson(globals, ctx, result);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, result, {
+    phase: "setup-complete",
+    message: "Completed interactive setup."
+  })) {
     return;
   }
 
@@ -2124,6 +2410,12 @@ async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
       sidePane: "setup",
       focusTarget: "side",
       message: `${setupMessage} Review readiness on the setup pane, then start research.`
+    },
+    sessionRestore: {
+      sidePane: "setup",
+      focusTarget: "side",
+      history: [],
+      reportSurfaceIndex: 0
     }
   });
 }
@@ -2131,13 +2423,27 @@ async function handleSetup(ctx: CliContext, command: Command): Promise<void> {
 async function handleDoctor(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const assessment = await assessLocalSetup();
-  printJson(globals, ctx, assessment);
-  if (globals.json) {
+  const repoGuidance = detectRepoGuidance(process.cwd());
+  const trust = inspectWorkspaceTrust(process.cwd());
+  const payload = {
+    ...assessment,
+    repo_guidance: repoGuidance,
+    trust
+  };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "doctor",
+    message: "Completed local health check."
+  })) {
     return;
   }
   logInfo(globals, ctx, renderSetupAssessment(assessment));
   logInfo(globals, ctx, "");
   logInfo(globals, ctx, renderSetupIssues(assessment));
+  logInfo(globals, ctx, "");
+  logInfo(globals, ctx, `Workspace trust: ${trust.status}${trust.updatedAt ? ` · updated ${new Date(trust.updatedAt).toLocaleString("en-US")}` : ""}`);
+  if (repoGuidance.entries.length > 0) {
+    logInfo(globals, ctx, `Repo guidance: ${repoGuidance.entries.map((entry) => `${entry.kind}:${entry.name}`).join(", ")}`);
+  }
   await maybeLogStorageCleanupTip(ctx, globals);
 }
 
@@ -2148,14 +2454,18 @@ async function handleTui(ctx: CliContext, command: Command): Promise<void> {
     );
   }
 
+  assertTrustedWorkspace("interactive TUI", process.cwd());
   ctx.exitCode = await ctx.deps.startInteractive();
 }
 
 async function handleBackendStart(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
+  assertTrustedWorkspace("local backend start", process.cwd());
   const started = await startLocalBackendServices(process.cwd(), globals.apiBaseUrl);
-  printJson(globals, ctx, started);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, started, {
+    phase: started.reusedExisting ? "backend-reused" : "backend-started",
+    message: started.reusedExisting ? "Local backend is already running." : "Started local backend."
+  })) {
     return;
   }
 
@@ -2170,9 +2480,12 @@ async function handleBackendStart(ctx: CliContext, command: Command): Promise<vo
 
 async function handleBackendStop(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
+  assertTrustedWorkspace("local backend stop", process.cwd());
   const status = await stopLocalBackendServices();
-  printJson(globals, ctx, status);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, status, {
+    phase: "backend-stopped",
+    message: "Stopped local backend services."
+  })) {
     return;
   }
 
@@ -2182,8 +2495,10 @@ async function handleBackendStop(ctx: CliContext, command: Command): Promise<voi
 async function handleBackendStatus(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const status = await inspectLocalBackendStatus(process.cwd(), globals.apiBaseUrl);
-  printJson(globals, ctx, status);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, status, {
+    phase: "backend-status",
+    message: "Loaded local backend status."
+  })) {
     return;
   }
 
@@ -2205,13 +2520,16 @@ async function handleLocalStatus(ctx: CliContext, command: Command): Promise<voi
 async function handleAuthList(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const assessment = await assessLocalSetup();
-  printJson(globals, ctx, {
+  const payload = {
     profiles: assessment.profiles,
     relevant_profiles: assessment.relevantProfiles,
     session_states: assessment.sessionStates,
     auth_profiles_error: assessment.authProfilesError
-  });
-  if (globals.json) {
+  };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "auth-list",
+    message: `Loaded ${assessment.profiles.length} auth profiles.`
+  })) {
     return;
   }
   if (assessment.authProfilesError) {
@@ -2224,8 +2542,10 @@ async function handleAuthList(ctx: CliContext, command: Command): Promise<void> 
 async function handleAuthStatus(ctx: CliContext, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   const assessment = await assessLocalSetup();
-  printJson(globals, ctx, assessment.sessionStates);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, assessment.sessionStates, {
+    phase: "auth-status",
+    message: `Loaded ${assessment.sessionStates.length} session states.`
+  })) {
     return;
   }
   logInfo(globals, ctx, renderSetupAssessment(assessment));
@@ -2235,6 +2555,7 @@ async function handleAuthStatus(ctx: CliContext, command: Command): Promise<void
 
 async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
+  assertTrustedWorkspace("auth capture", process.cwd());
   const parsed = resolveAuthProfilesFromEnv();
   if (parsed.error) {
     throw new InputValidationError(parsed.error.message);
@@ -2246,8 +2567,10 @@ async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, c
   }
 
   const capture = buildAuthCaptureCommand(profile, defaultSourceUrlForProfile(profile.id));
-  printJson(globals, ctx, capture);
-  if (globals.json) {
+  if (printStructuredResult(globals, ctx, capture, {
+    phase: "auth-capture-plan",
+    message: `Prepared auth capture command for ${profile.id}.`
+  })) {
     return;
   }
 
@@ -2272,6 +2595,129 @@ async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, c
   if (capture.storageStatePath !== capture.finalStorageStatePath && fs.existsSync(capture.storageStatePath)) {
     fs.rmSync(capture.storageStatePath, { force: true });
   }
+}
+
+function renderCliSessionsTable(sessions: CliSessionRecord[]): string {
+  const table = new Table({
+    head: ["Session ID", "Kind", "Updated", "Summary"]
+  });
+
+  for (const session of sessions) {
+    table.push([
+      session.id,
+      session.kind,
+      new Date(session.updatedAt).toLocaleString("en-US"),
+      session.summary
+    ]);
+  }
+
+  return table.toString();
+}
+
+async function handleSessionsList(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const payload = listCliSessions(process.cwd());
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "sessions-list",
+    message: `Loaded ${payload.sessions.length} saved sessions.`
+  })) {
+    return;
+  }
+
+  if (payload.sessions.length === 0) {
+    logInfo(globals, ctx, "No saved sessions found for this workspace.");
+    return;
+  }
+  logInfo(globals, ctx, renderCliSessionsTable(payload.sessions));
+}
+
+async function handleSessionsResume(ctx: CliContext, options: SessionsResumeOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const { session, storePath } = getCliSession(options.sessionId, process.cwd());
+  if (!session) {
+    throw new InputValidationError("No saved session found for this workspace.");
+  }
+
+  if (globals.outputFormat !== "text") {
+    printStructuredResult(globals, ctx, { session, storePath }, {
+      phase: "sessions-resolve",
+      message: `Resolved session ${session.id}.`
+    });
+    return;
+  }
+
+  if (session.kind === "tui" && session.tui) {
+    assertTrustedWorkspace("interactive TUI resume", process.cwd());
+    ctx.exitCode = await ctx.deps.startInteractive({
+      sessionId: session.id,
+      sessionRestore: session.tui,
+      startup: {
+        message: `Resumed session ${session.id}.`,
+        sidePane: session.tui.sidePane,
+        focusTarget: session.tui.focusTarget
+      }
+    });
+    return;
+  }
+
+  if (session.kind === "runs-watch" && session.runsWatch) {
+    await handleRunsWatch(
+      ctx,
+      {
+        runId: session.runsWatch.runId,
+        interval: String(session.runsWatch.intervalSeconds)
+      },
+      command
+    );
+    return;
+  }
+
+  throw new InputValidationError(`Session ${session.id} is missing resumable state.`);
+}
+
+async function handleSessionsPrune(ctx: CliContext, options: SessionsPruneOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const keep = toPositiveInt(options.keep, 10);
+  const payload = pruneCliSessions(keep, process.cwd());
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "sessions-prune",
+    message: `Pruned ${payload.removed.length} saved sessions.`
+  })) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Removed ${payload.removed.length} saved sessions. Keeping ${payload.kept.length}.`);
+}
+
+async function handleTrustStatus(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const payload = inspectWorkspaceTrust(process.cwd());
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "trust-status",
+    message: `Workspace trust is ${payload.status}.`
+  })) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Workspace: ${payload.workspacePath}`);
+  logInfo(globals, ctx, `Trust: ${payload.status}`);
+}
+
+async function handleTrustMutation(
+  ctx: CliContext,
+  command: Command,
+  status: "trusted" | "denied"
+): Promise<void> {
+  const globals = resolveGlobals(command);
+  const payload = setWorkspaceTrust(status, process.cwd());
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: status === "trusted" ? "trust-allow" : "trust-deny",
+    message: `Workspace marked ${status}.`
+  })) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Workspace ${payload.workspacePath} marked ${status}.`);
 }
 
 function addCommonResearchFlags(command: Command, withOptionalTitle: boolean): Command {
@@ -2379,6 +2825,15 @@ function registerRunsCommands(program: Command, ctx: CliContext): void {
     .option("--interval <seconds>", "Polling interval in seconds", "2")
     .action(async (options: RunsWatchOptions, command: Command) => {
       await handleRunsWatch(ctx, options, command);
+    });
+
+  runsGroup
+    .command("deep-research")
+    .description("Inspect or open the experimental Gemini deep-research output for a run")
+    .requiredOption("--run-id <id>", "Run identifier")
+    .option("--web", "Open the browser report with the experimental AI section")
+    .action(async (options: RunsDeepResearchOptions, command: Command) => {
+      await handleRunsDeepResearch(ctx, options, command);
     });
 
   runsGroup
@@ -2497,6 +2952,52 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .argument("<profileId>", "Profile identifier")
     .action(async (profileId: string, _options: Record<string, never>, command: Command) => {
       await handleAuthCapture(ctx, { profileId }, command);
+    });
+
+  const sessionsGroup = program.command("sessions").description("Resume or prune saved local CLI sessions");
+  sessionsGroup
+    .command("list")
+    .description("List saved sessions for this workspace")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleSessionsList(ctx, command);
+    });
+
+  sessionsGroup
+    .command("resume")
+    .description("Resume the latest saved session or a specific session id")
+    .option("--session-id <id>", "Saved session identifier")
+    .action(async (options: SessionsResumeOptions, command: Command) => {
+      await handleSessionsResume(ctx, options, command);
+    });
+
+  sessionsGroup
+    .command("prune")
+    .description("Remove older saved sessions for this workspace")
+    .option("--keep <number>", "How many recent sessions to keep", "10")
+    .action(async (options: SessionsPruneOptions, command: Command) => {
+      await handleSessionsPrune(ctx, options, command);
+    });
+
+  const trustGroup = program.command("trust").description("Manage trusted-workspace policy for ArtBot");
+  trustGroup
+    .command("status")
+    .description("Show the current workspace trust status")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleTrustStatus(ctx, command);
+    });
+
+  trustGroup
+    .command("allow")
+    .description("Trust the current workspace for interactive and local-service actions")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleTrustMutation(ctx, command, "trusted");
+    });
+
+  trustGroup
+    .command("deny")
+    .description("Deny interactive and local-service actions for the current workspace")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleTrustMutation(ctx, command, "denied");
     });
 
   const replayGroup = program.command("replay").description("Offline replay and parser-debug commands");
@@ -2622,7 +3123,7 @@ function defaultDeps(partial: CliDeps = {}): Required<CliDeps> {
 }
 
 function shouldAutoLaunchInteractive(normalizedUserArgs: string[], ctx: CliContext): boolean {
-  if (ctx.noTui || ctx.jsonRequested) {
+  if (ctx.noTui || ctx.machineOutputRequested) {
     return false;
   }
 
@@ -2700,7 +3201,7 @@ export function createProgram(ctx: CliContext): Command {
   const program = new Command();
   program.name("artbot").description("ArtBot market research CLI").version(CLI_VERSION);
 
-  if (ctx.jsonRequested) {
+  if (ctx.machineOutputRequested) {
     program.showHelpAfterError(false);
   } else {
     program.showHelpAfterError();
@@ -2709,12 +3210,13 @@ export function createProgram(ctx: CliContext): Command {
   program.exitOverride().configureOutput({
     writeOut: (text) => ctx.deps.stdout(text),
     writeErr: (text) => {
-      if (ctx.jsonRequested) return;
+      if (ctx.machineOutputRequested) return;
       ctx.deps.stderr(text);
     }
   });
 
   program
+    .option("--output-format <format>", "text | json | stream-json")
     .option("--json", "Machine-readable JSON output")
     .option("--api-base-url <url>", "API base URL")
     .option("--api-key <key>", "API key override")
@@ -2740,7 +3242,7 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
     deps: defaultDeps(deps),
     exitCode: EXIT_CODES.OK,
     noTui: isNoTuiEnabled(normalizedUserArgs),
-    jsonRequested: normalizedUserArgs.includes("--json")
+    machineOutputRequested: resolveRequestedMachineOutput(normalizedUserArgs)
   };
 
   const program = createProgram(ctx);
@@ -2775,6 +3277,7 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
           return resolveGlobals(program);
         } catch {
           return {
+            outputFormat: "text",
             json: false,
             apiBaseUrl: process.env.API_BASE_URL ?? "http://localhost:4000",
             apiKey: process.env.ARTBOT_API_KEY,
@@ -2784,7 +3287,7 @@ export async function runCli(argv = process.argv, deps: CliDeps = {}): Promise<n
           } satisfies GlobalOptions;
         }
       })();
-      if (globals.json) {
+      if (isMachineOutput(globals)) {
         logError(globals, ctx, buildJsonErrorPayload(error, exitCode));
       } else {
         logError(globals, ctx, formatError(error));
