@@ -60,7 +60,7 @@
     "cli-table3": "^0.6.5",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
-    "fastify": "^5.2.1",
+    "fastify": "^5.8.5",
     "figlet": "^1.8.0",
     "gradient-string": "^3.0.0",
     "ink": "^7.0.0",

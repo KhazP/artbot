@@ -18,7 +18,7 @@
     "@artbot/storage": "workspace:*",
     "@fastify/cors": "^11.0.1",
     "dotenv": "^16.4.7",
-    "fastify": "^5.2.1",
+    "fastify": "^5.8.5",
     "zod": "^3.24.2"
   }
 }
