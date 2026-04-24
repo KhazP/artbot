@@ -903,12 +903,13 @@ export async function planSourcesWithDiagnostics(
 
   for (const adapter of sorted) {
     const sourcePolicyDecision = evaluateSourcePolicy(adapter, query);
+    const customAuthProfileId = (adapter as SourceAdapter & { customAuthProfileId?: string }).customAuthProfileId;
     const accessContext = authManager.resolveAccess({
       sourceName: adapter.sourceName,
       sourceUrl: adapter.id,
       sourceRequiresAuth: adapter.requiresAuth,
       sourceRequiresLicense: adapter.requiresLicense,
-      requestedProfileId: query.authProfileId,
+      requestedProfileId: query.authProfileId ?? customAuthProfileId,
       allowLicensed: query.allowLicensed,
       manualLoginCheckpoint: query.manualLoginCheckpoint,
       cookieFile: query.cookieFile,

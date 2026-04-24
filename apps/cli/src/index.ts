@@ -31,6 +31,16 @@ import { AuthManager } from "@artbot/auth-manager";
 import { parseGenericLotFields } from "@artbot/extraction";
 import { evaluateAcceptance, evaluateFixtureContract } from "@artbot/source-adapters";
 import {
+  loadCustomSources,
+  readCustomSourcesFile,
+  resolveCustomSourcesPath,
+  sourceIdFromName,
+  validateCustomSourcesPayload,
+  writeCustomSourcesFile,
+  type CustomSourceAccess,
+  type CustomSourceDefinition
+} from "@artbot/source-registry";
+import {
   ArtbotStorage,
   buildDefaultGcPolicyFromEnv,
   ensureWorkspaceRuntimeStoragePaths,
@@ -150,6 +160,26 @@ interface RunsDeepResearchOptions extends RunsShowOptions {
 
 interface AuthCaptureOptions {
   profileId: string;
+  url?: string;
+}
+
+interface SourcesAddOptions {
+  id?: string;
+  name: string;
+  url: string;
+  searchTemplate?: string;
+  access: CustomSourceAccess;
+  legalPosture?: CustomSourceDefinition["legalPosture"];
+  sourceClass?: CustomSourceDefinition["sourceClass"];
+  country?: string;
+  city?: string;
+  sourcePageType?: CustomSourceDefinition["sourcePageType"];
+  crawlHints?: string;
+  authProfile?: string;
+}
+
+interface SourcesRemoveOptions {
+  id: string;
 }
 
 interface ReplayAttemptOptions {
@@ -2553,6 +2583,151 @@ async function handleAuthStatus(ctx: CliContext, command: Command): Promise<void
   logInfo(globals, ctx, renderAuthProfilesTable(assessment));
 }
 
+function parseSourceAccess(value: string): CustomSourceAccess {
+  if (value === "public" || value === "auth" || value === "licensed") {
+    return value;
+  }
+  throw new InputValidationError(`Invalid source access "${value}". Use public, auth, or licensed.`);
+}
+
+function parseCsvList(value: string | undefined): string[] {
+  return value
+    ? value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function renderCustomSourcesTable(sources: CustomSourceDefinition[], configPath: string): string {
+  const table = new Table({
+    head: ["ID", "Name", "Access", "Class", "Search", "Auth Profile", "Enabled"],
+    wordWrap: true
+  });
+
+  for (const source of sources) {
+    table.push([
+      source.id,
+      source.name,
+      source.access,
+      source.sourceClass ?? "other",
+      source.searchTemplate ? "yes" : "no",
+      source.authProfileId ?? "-",
+      source.enabled === false ? "no" : "yes"
+    ]);
+  }
+
+  return [`Config: ${configPath}`, table.toString()].join("\n");
+}
+
+async function handleSourcesList(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const payload = loadCustomSources(resolveCustomSourcesPath());
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "sources-list",
+    message: `Loaded ${payload.sources.length} configured sources.`
+  })) {
+    return;
+  }
+
+  if (!payload.ok) {
+    throw new InputValidationError(`Invalid custom sources file: ${payload.errors.join("; ")}`);
+  }
+
+  if (payload.sources.length === 0) {
+    logInfo(globals, ctx, `No custom sources configured. Config path: ${payload.path}`);
+    return;
+  }
+
+  logInfo(globals, ctx, renderCustomSourcesTable(payload.sources, payload.path));
+}
+
+async function handleSourcesValidate(ctx: CliContext, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const payload = loadCustomSources(resolveCustomSourcesPath());
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "sources-validate",
+    message: payload.ok ? "Custom source config is valid." : "Custom source config is invalid."
+  })) {
+    return;
+  }
+
+  if (!payload.ok) {
+    throw new InputValidationError(`Invalid custom sources file: ${payload.errors.join("; ")}`);
+  }
+
+  logInfo(globals, ctx, `Custom source config is valid: ${payload.path}`);
+  logInfo(globals, ctx, `${payload.sources.length} configured source(s).`);
+}
+
+async function handleSourcesAdd(ctx: CliContext, options: SourcesAddOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const configPath = resolveCustomSourcesPath();
+  const current = readCustomSourcesFile(configPath);
+  const id = sourceIdFromName(options.id ?? options.name);
+  if (current.sources.some((source) => source.id === id)) {
+    throw new InputValidationError(`Custom source "${id}" already exists.`);
+  }
+
+  const source: CustomSourceDefinition = {
+    id,
+    name: options.name,
+    url: options.url,
+    ...(options.searchTemplate ? { searchTemplate: options.searchTemplate } : {}),
+    access: parseSourceAccess(options.access),
+    ...(options.legalPosture ? { legalPosture: options.legalPosture } : {}),
+    sourceClass: options.sourceClass ?? "other",
+    ...(options.country ? { country: options.country } : {}),
+    ...(options.city ? { city: options.city } : {}),
+    sourcePageType: options.sourcePageType ?? "listing",
+    crawlHints: parseCsvList(options.crawlHints),
+    ...(options.authProfile ? { authProfileId: options.authProfile } : {}),
+    enabled: true
+  };
+
+  const next = {
+    version: 1 as const,
+    sources: [...current.sources, source]
+  };
+  const validation = validateCustomSourcesPayload(next, configPath);
+  if (!validation.ok) {
+    throw new InputValidationError(`Invalid custom source: ${validation.errors.join("; ")}`);
+  }
+
+  writeCustomSourcesFile(next, configPath);
+  const payload = { path: configPath, source: validation.sources.find((entry) => entry.id === id) ?? source };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "sources-add",
+    message: `Added custom source ${id}.`
+  })) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Added custom source ${id} to ${configPath}.`);
+}
+
+async function handleSourcesRemove(ctx: CliContext, options: SourcesRemoveOptions, command: Command): Promise<void> {
+  const globals = resolveGlobals(command);
+  const configPath = resolveCustomSourcesPath();
+  const current = readCustomSourcesFile(configPath);
+  const requested = options.id.startsWith("custom-source-") ? options.id.slice("custom-source-".length) : options.id;
+  const remaining = current.sources.filter((source) => source.id !== requested);
+  if (remaining.length === current.sources.length) {
+    throw new InputValidationError(`Custom source "${options.id}" was not found.`);
+  }
+
+  writeCustomSourcesFile({ version: 1, sources: remaining }, configPath);
+  const payload = { path: configPath, removed: requested, sources: remaining };
+  if (printStructuredResult(globals, ctx, payload, {
+    phase: "sources-remove",
+    message: `Removed custom source ${requested}.`
+  })) {
+    return;
+  }
+
+  logInfo(globals, ctx, `Removed custom source ${requested} from ${configPath}.`);
+}
+
 async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, command: Command): Promise<void> {
   const globals = resolveGlobals(command);
   assertTrustedWorkspace("auth capture", process.cwd());
@@ -2566,7 +2741,7 @@ async function handleAuthCapture(ctx: CliContext, options: AuthCaptureOptions, c
     throw new InputValidationError(`Unknown auth profile "${options.profileId}".`);
   }
 
-  const capture = buildAuthCaptureCommand(profile, defaultSourceUrlForProfile(profile.id));
+  const capture = buildAuthCaptureCommand(profile, options.url ?? defaultSourceUrlForProfile(profile.id));
   if (printStructuredResult(globals, ctx, capture, {
     phase: "auth-capture-plan",
     message: `Prepared auth capture command for ${profile.id}.`
@@ -2950,8 +3125,52 @@ function registerSetupCommands(program: Command, ctx: CliContext): void {
     .command("capture")
     .description("Capture browser auth state for a profile via Playwright")
     .argument("<profileId>", "Profile identifier")
-    .action(async (profileId: string, _options: Record<string, never>, command: Command) => {
-      await handleAuthCapture(ctx, { profileId }, command);
+    .option("--url <url>", "Source URL to open for login capture")
+    .action(async (profileId: string, options: { url?: string }, command: Command) => {
+      await handleAuthCapture(ctx, { profileId, url: options.url }, command);
+    });
+
+  const sourcesGroup = program.command("sources").description("Manage local custom source websites");
+
+  sourcesGroup
+    .command("list")
+    .description("List configured custom source websites")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleSourcesList(ctx, command);
+    });
+
+  sourcesGroup
+    .command("validate")
+    .description("Validate the local custom source config")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      await handleSourcesValidate(ctx, command);
+    });
+
+  sourcesGroup
+    .command("add")
+    .description("Add a custom source website to artbot.sources.json")
+    .requiredOption("--name <name>", "Source display name")
+    .requiredOption("--url <url>", "Base website URL")
+    .option("--id <id>", "Stable source id")
+    .option("--search-template <url>", "Search URL template containing {query}")
+    .option("--access <mode>", "public | auth | licensed", "public")
+    .option("--legal-posture <value>", "public_permitted | public_contract_sensitive | auth_required | licensed_only | operator_assisted_only")
+    .option("--source-class <value>", "auction_house | gallery | dealer | marketplace | database | other", "other")
+    .option("--country <country>", "Country hint")
+    .option("--city <city>", "City hint")
+    .option("--source-page-type <value>", "lot | artist_page | price_db | listing | article | other", "listing")
+    .option("--crawl-hints <list>", "Comma-separated crawl/search hints")
+    .option("--auth-profile <id>", "Default auth profile id for this source")
+    .action(async (options: SourcesAddOptions, command: Command) => {
+      await handleSourcesAdd(ctx, options, command);
+    });
+
+  sourcesGroup
+    .command("remove")
+    .description("Remove a custom source website")
+    .requiredOption("--id <id>", "Custom source id")
+    .action(async (options: SourcesRemoveOptions, command: Command) => {
+      await handleSourcesRemove(ctx, options, command);
     });
 
   const sessionsGroup = program.command("sessions").description("Resume or prune saved local CLI sessions");

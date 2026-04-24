@@ -171,6 +171,9 @@ importers:
       '@artbot/source-adapters':
         specifier: workspace:*
         version: link:../../packages/source-adapters
+      '@artbot/source-registry':
+        specifier: workspace:*
+        version: link:../../packages/source-registry
       '@artbot/storage':
         specifier: workspace:*
         version: link:../../packages/storage

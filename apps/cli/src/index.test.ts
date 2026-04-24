@@ -14,18 +14,30 @@ const cleanupPaths: string[] = [];
 const envSnapshot = {
   ARTBOT_NO_TUI: process.env.ARTBOT_NO_TUI,
   ARTBOT_HOME: process.env.ARTBOT_HOME,
+  ARTBOT_SOURCES_PATH: process.env.ARTBOT_SOURCES_PATH,
+  AUTH_PROFILES_JSON: process.env.AUTH_PROFILES_JSON,
   ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED: process.env.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY
 };
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
 
 afterEach(() => {
   for (const target of cleanupPaths.splice(0)) {
     fs.rmSync(target, { recursive: true, force: true });
   }
-  process.env.ARTBOT_NO_TUI = envSnapshot.ARTBOT_NO_TUI;
-  process.env.ARTBOT_HOME = envSnapshot.ARTBOT_HOME;
-  process.env.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED = envSnapshot.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED;
-  process.env.GEMINI_API_KEY = envSnapshot.GEMINI_API_KEY;
+  restoreEnv("ARTBOT_NO_TUI", envSnapshot.ARTBOT_NO_TUI);
+  restoreEnv("ARTBOT_HOME", envSnapshot.ARTBOT_HOME);
+  restoreEnv("ARTBOT_SOURCES_PATH", envSnapshot.ARTBOT_SOURCES_PATH);
+  restoreEnv("AUTH_PROFILES_JSON", envSnapshot.AUTH_PROFILES_JSON);
+  restoreEnv("ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED", envSnapshot.ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED);
+  restoreEnv("GEMINI_API_KEY", envSnapshot.GEMINI_API_KEY);
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -319,6 +331,7 @@ describe("artbot cli v2", () => {
   });
 
   it("requires trust before launching the explicit tui command", async () => {
+    process.env.ARTBOT_HOME = mkTempDir("artbot-cli-untrusted-home-");
     const io = createMockIo();
     const startInteractive = vi.fn(async () => 7);
 
@@ -806,6 +819,116 @@ describe("artbot cli v2", () => {
     expect(() => JSON.parse(stdout)).not.toThrow();
     expect(stderr).toBe("");
     expect(stdout).not.toContain("Run ID");
+  });
+
+  it("adds, lists, validates, and removes custom sources in json mode", async () => {
+    const io = createMockIo();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "artbot-sources-cli-"));
+    cleanupPaths.push(tempRoot);
+    process.env.ARTBOT_SOURCES_PATH = path.join(tempRoot, "artbot.sources.json");
+
+    const addCode = await runCli(
+      [
+        "node",
+        "artbot",
+        "--json",
+        "sources",
+        "add",
+        "--name",
+        "Example Archive",
+        "--url",
+        "https://example.com",
+        "--search-template",
+        "https://example.com/search?q={query}",
+        "--access",
+        "auth",
+        "--auth-profile",
+        "example-auth"
+      ],
+      {
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    let { stdout, stderr } = io.read();
+    expect(addCode, stderr).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toMatchObject({
+      source: {
+        id: "example-archive",
+        access: "auth",
+        authProfileId: "example-auth"
+      }
+    });
+
+    const listIo = createMockIo();
+    const listCode = await runCli(["node", "artbot", "--json", "sources", "list"], {
+      stdout: listIo.appendStdout,
+      stderr: listIo.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+    expect(listCode).toBe(0);
+    ({ stdout, stderr } = listIo.read());
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout).sources[0]).toMatchObject({ id: "example-archive", name: "Example Archive" });
+
+    const validateIo = createMockIo();
+    const validateCode = await runCli(["node", "artbot", "--json", "sources", "validate"], {
+      stdout: validateIo.appendStdout,
+      stderr: validateIo.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+    expect(validateCode).toBe(0);
+    expect(JSON.parse(validateIo.read().stdout).ok).toBe(true);
+
+    const removeIo = createMockIo();
+    const removeCode = await runCli(["node", "artbot", "--json", "sources", "remove", "--id", "example-archive"], {
+      stdout: removeIo.appendStdout,
+      stderr: removeIo.appendStderr,
+      spinnerFactory: createSpinnerStub()
+    });
+    expect(removeCode).toBe(0);
+    expect(JSON.parse(removeIo.read().stdout)).toMatchObject({ removed: "example-archive", sources: [] });
+  });
+
+  it("builds auth capture plan with an explicit source url", async () => {
+    const io = createMockIo();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "artbot-auth-capture-"));
+    cleanupPaths.push(tempRoot);
+    process.env.ARTBOT_HOME = tempRoot;
+    process.env.AUTH_PROFILES_JSON = JSON.stringify([
+      {
+        id: "example-auth",
+        mode: "authorized",
+        sourcePatterns: ["example"],
+        storageStatePath: path.join(tempRoot, "example-auth.json")
+      }
+    ]);
+
+    await runCli(["node", "artbot", "--json", "trust", "allow"], {
+      stdout: () => {},
+      stderr: () => {},
+      spinnerFactory: createSpinnerStub()
+    });
+
+    const code = await runCli(
+      ["node", "artbot", "--json", "auth", "capture", "example-auth", "--url", "https://example.com/login"],
+      {
+        stdout: io.appendStdout,
+        stderr: io.appendStderr,
+        spinnerFactory: createSpinnerStub()
+      }
+    );
+
+    const { stdout, stderr } = io.read();
+    expect(stderr).toBe("");
+    expect(code, stderr).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      profileId: "example-auth",
+      sourceUrl: "https://example.com/login"
+    });
   });
 
   it("accepts a leading argument separator before global options", async () => {

@@ -1,10 +1,21 @@
 import { buildSeedAdapters, type SourceAdapter } from "@artbot/source-adapters";
+import { buildCustomSourceAdapters, loadCustomSources } from "./custom-sources.js";
 
 export class SourceRegistry {
   private adapters: SourceAdapter[];
 
-  constructor(adapters: SourceAdapter[] = buildSeedAdapters()) {
-    this.adapters = adapters;
+  constructor(adapters?: SourceAdapter[]) {
+    if (adapters) {
+      this.adapters = adapters;
+      return;
+    }
+
+    const customSources = loadCustomSources();
+    if (!customSources.ok) {
+      throw new Error(`Invalid custom sources file ${customSources.path}: ${customSources.errors.join("; ")}`);
+    }
+
+    this.adapters = [...buildSeedAdapters(), ...buildCustomSourceAdapters(customSources.sources)];
   }
 
   public list(): SourceAdapter[] {

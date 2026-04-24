@@ -52,8 +52,9 @@ function legalPostureForPolicyClass(policyClass: SourcePolicyClass): SourceLegal
 }
 
 export function evaluateSourcePolicy(adapter: SourceAdapter, query: ResearchQuery): SourcePolicyDecision {
+  const customLegalPosture = (adapter as SourceAdapter & { customLegalPosture?: SourceLegalPosture }).customLegalPosture;
   const policyClass = inferPolicyClass(adapter);
-  const legalPosture = legalPostureForPolicyClass(policyClass);
+  const legalPosture = customLegalPosture ?? legalPostureForPolicyClass(policyClass);
 
   if (policyClass === "probe" && process.env.ENABLE_OPTIONAL_PROBE_ADAPTERS !== "true") {
     return {
