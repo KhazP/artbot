@@ -34,401 +34,406 @@
 
 ```mermaid
 graph LR
-  A[Search] --> B[Select Source]
-  B --> C[Extract]
-  C --> D[Verify]
-  D --> E[Normalize]
-  E --> F[Score]
-  F --> G[Report]
+  A["Built-in adapters + custom sources + web discovery"] --> B["Source planning"]
+  B --> C["Cheap extraction"]
+  C --> D["Crawlee / browser recovery when needed"]
+  D --> E["Normalize prices and FX"]
+  E --> F["Score comparable evidence"]
+  F --> G["Markdown, JSON, and browser reports"]
 ```
+
+The normal path is deterministic and local: seed source adapters, expand query variants, add web-discovered candidates when enabled, extract with the cheapest lawful transport first, then escalate to Crawlee or Playwright only for JS-heavy pages, login/session flows, or low-confidence recovery.
 
 ---
 
-## 📁 Monorepo Layout
+## Install
 
-<details>
-<summary><strong>View source structure</strong></summary>
-
-```
-turkish-art-price-agent/
-├── apps/
-│   ├── api/             # HTTP API (POST /research/artist, POST /research/work, GET /runs, GET /runs/:id)
-│   ├── worker/          # Background run processor
-│   └── cli/             # Command-line client
-├── packages/            # Typed domain modules
-│   ├── auth/            #   Authentication & session management
-│   ├── adapters/        #   Source adapters
-│   ├── extraction/      #   Data extraction
-│   ├── normalization/   #   Price & FX normalization
-│   ├── valuation/       #   Valuation logic
-│   ├── reporting/       #   Report generation
-│   ├── storage/         #   Persistence layer
-│   └── orchestration/   #   Pipeline orchestration
-├── docs/                # Architecture, ops, source matrix, eval protocol, roadmap
-├── data/
-│   ├── fixtures/        # Eval inputs
-│   └── golden-results/  # Sample outputs
-├── var/                 # Local runtime artifacts (DB, runs, logs)
-└── ...
-```
-</details>
-
----
-
-## 🚀 Quick Start
+### npm
 
 ```bash
-# 1. Install dependencies
-pnpm install
-
-# 2. Copy environment config
-cp .env.example .env
-
-# 3. Build all workspaces
-pnpm build
-
-# 4. Start everything (API + worker + CLI)
-pnpm run start:artbot
-
-# 5. Check a run's status
-pnpm --filter artbot dev -- runs show --run-id <id>
-
-# 6. Watch a run in real time
-pnpm --filter artbot dev -- runs watch --run-id <id> --interval 2
-
-# 7. Open the interactive UI
-pnpm --filter artbot dev --
-```
-
----
-
-## 📦 Install From npm
-
-```bash
-# recommended: global CLI install
 npm install -g artbot
-
-# optional: one-off run without global install
-npx artbot@latest --help
-
-artbot
-artbot tui
 artbot backend start
 artbot backend status
+artbot research artist --artist "Burhan Dogancay" --preview-only
 artbot research artist --artist "Burhan Dogancay" --wait
-# optional guided onboarding
-artbot setup
 ```
 
-> [!TIP]
-> npmjs.com may show `npm i artbot` in the sidebar. That installs `artbot` as a local project dependency.
-> For a globally available `artbot` command in your shell, use `npm install -g artbot`.
+The npm package includes the CLI plus bundled local API and worker runtime. No hosted ArtBot service is required. Runtime state lives under `~/.artbot` by default: `.env`, SQLite DB, run artifacts, logs, and Playwright auth state.
 
-> [!NOTE]
-> The npm package includes a local ArtBot API and worker runtime — **no hosting required**.
-> Config, auth state, logs, and local data live under `~/.artbot`.
->
-> `artbot setup` and the TUI support local LM Studio, NVIDIA, and other OpenAI-compatible endpoints.
->
-> `artbot backend start` bootstraps local runtime files automatically. `artbot setup` is optional and mainly for guided interactive onboarding.
+`npx artbot@latest --help` is fine for a one-off check, but a global install is the intended shell workflow.
 
-Bare `artbot` opens the interactive UI in an interactive terminal. Use explicit subcommands or `--json` for command-first and automation flows.
-
-<details>
-<summary><strong>Alternative manual startup</strong></summary>
+### From This Repo
 
 ```bash
-pnpm --filter @artbot/api start
-pnpm --filter @artbot/worker start
-pnpm --filter artbot dev
+pnpm install
+cp .env.example .env
+pnpm build
+pnpm run start:artbot
+pnpm --filter artbot dev -- --json doctor
 ```
 
-</details>
+Repo-local commands should use:
+
+```bash
+pnpm --filter artbot dev -- <command>
+```
+
+Global npm commands use:
+
+```bash
+artbot <command>
+```
 
 ---
 
-## 🔐 Session-Aware CLI Flags
+## CLI Commands
 
-| Flag                                                            | Description                      |
-| --------------------------------------------------------------- | -------------------------------- |
-| `--auth-profile <id>`                                           | Use a named auth profile         |
-| `--cookie-file <path>`                                          | Path to cookie JSON file         |
-| `--manual-login`                                                | Pause for manual browser login   |
-| `--allow-licensed`                                              | Enable licensed source access    |
-| `--licensed-integrations "askART,..."`                          | Comma-separated licensed sources |
-| `--analysis-mode comprehensive\|balanced\|fast`                 | Analysis depth                   |
-| `--price-normalization legacy\|usd_dual\|usd_nominal\|usd_2026` | Price output format              |
-
----
-
-## 💻 CLI v2 Commands
+Bare `artbot` opens the interactive TUI only in an interactive terminal. Automation should use explicit subcommands and `--json` or `--output-format stream-json`.
 
 ```bash
+# Health and local backend
+artbot doctor
+artbot backend start
+artbot backend status
+artbot backend stop
+
 # Research
-artbot research artist --artist "Fikret Muallâ" --wait
-artbot research work --artist "Bedri Rahmi Eyüboğlu" --title "Mosaic" --wait
+artbot research artist --artist "Fikret Mualla" --preview-only
+artbot research artist --artist "Fikret Mualla" --wait
+artbot research work --artist "Bedri Rahmi Eyuboglu" --title "Mosaic" --wait
 
-# Run management
-artbot runs list [--status pending|running|completed|failed --limit 20]
+# Run inspection
+artbot runs list --limit 20
 artbot runs show --run-id <id>
-artbot runs watch --run-id <id> [--interval 2]
+artbot runs watch --run-id <id> --interval 2
+artbot runs deep-research --run-id <id>
+artbot runs deep-research --run-id <id> --web
+
+# Retention and cleanup
 artbot runs pin --run-id <id>
 artbot runs unpin --run-id <id>
-
-# Storage visibility and cleanup
 artbot storage
 artbot cleanup --dry-run
 artbot cleanup --max-size-gb 4 --keep-last 50
-artbot runs pin --run-id <id>  # preserve a run before cleanup
+
+# Debug/review
+artbot replay attempt --run-id <id>
+artbot review queue --run-id <id>
+artbot review decide --run-id <id> --item-id <item-id> --decision merge
+artbot graph explain --run-id <id> --cluster-id <cluster-id>
+artbot canaries run
+artbot canaries history
 ```
 
-> [!NOTE]
-> **Legacy aliases** (`research-artist`, `research-work`, `run-status`) remain available.
+Global options:
 
-**Global options:**
+| Option                 | Purpose                               |
+| ---------------------- | ------------------------------------- |
+| `--json`               | Strict JSON response on stdout        |
+| `--output-format json` | Same JSON mode as `--json`            |
+| `--output-format stream-json` | Newline-delimited lifecycle events |
+| `--api-base-url <url>` | Override API endpoint                 |
+| `--api-key <key>`      | API key override                      |
+| `--verbose`            | Extra diagnostics                     |
+| `--quiet`              | Suppress non-essential text output    |
+| `--no-tui`             | Disable interactive UI launch         |
 
-| Option                 | Description                   |
-| ---------------------- | ----------------------------- |
-| `--json`               | Strict JSON on stdout         |
-| `--output-format <f>`  | `text`, `json`, `stream-json` |
-| `--api-base-url <url>` | API endpoint override         |
-| `--api-key <key>`      | Authentication key            |
-| `--verbose`            | Verbose logging               |
-| `--quiet`              | Suppress non-essential output |
-| `--no-tui`             | Block interactive UI launch   |
-
-**Environment fallback:** `API_BASE_URL` (defaults to `http://localhost:4000`)
-
-**Automation guardrail:** `ARTBOT_NO_TUI=1` disables interactive UI launch.
-
-When no-TUI mode is active, `artbot setup` exits without opening prompts and prints non-interactive guidance.
-
-## 🤖 Command-First Agent Usage
-
-For agent and automation work, prefer the repo-local CLI entrypoint plus `--json`:
-
-```bash
-pnpm --filter artbot dev -- --json doctor
-pnpm --filter artbot dev -- --json backend status
-pnpm --filter artbot dev -- --json auth list
-pnpm --filter artbot dev -- --json auth status
-pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --preview-only
-pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --wait
-pnpm --filter artbot dev -- --json runs list --limit 20
-pnpm --filter artbot dev -- --json runs show --run-id <id>
-pnpm --filter artbot dev -- --json replay attempt --run-id <id>
-pnpm --filter artbot dev -- --json runs pin --run-id <id>
-pnpm --filter artbot dev -- --json runs unpin --run-id <id>
-pnpm --filter artbot dev -- --json storage
-pnpm --filter artbot dev -- --json cleanup --dry-run
-pnpm --filter artbot dev -- --output-format stream-json runs watch --run-id <id>
-```
-
-Plan generation can take roughly 45-60 seconds on a cold start. Keep the command running until the spinner completes.
-
-Repo-specific automation guidance lives in `AGENTS.md`.
-
-The reusable Codex skill lives at `skills/artbot-cli`.
-
-Install it explicitly into Codex from a clone by copying or symlinking `skills/artbot-cli` into `~/.codex/skills/artbot-cli`, or use your normal GitHub-path skill installer flow. The npm package does not auto-write into `$CODEX_HOME`.
-
-Interactive setup, TUI launch, auth capture, and local backend start/stop now respect workspace trust:
-
-```bash
-pnpm --filter artbot dev -- trust status
-pnpm --filter artbot dev -- trust allow
-```
-
-Saved local session checkpoints are available for the Ink shell and `runs watch`:
-
-```bash
-pnpm --filter artbot dev -- sessions list
-pnpm --filter artbot dev -- sessions resume
-```
-
-The upstream inspiration matrix for this selective OSS CLI uplift lives in [docs/cli-oss-intake.md](docs/cli-oss-intake.md).
+Set `ARTBOT_NO_TUI=1` when wrapping the CLI in automation that must never open an interactive prompt.
 
 ---
 
-## 🔑 Auth Profile Configuration
+## Custom Source Websites
 
-Set `AUTH_PROFILES_JSON` in your environment:
+ArtBot includes built-in source adapters and can also discover open-web candidates during comprehensive runs. For operator-controlled coverage, add local custom sources to `artbot.sources.json`.
+
+Resolution order:
+
+1. `ARTBOT_SOURCES_PATH`
+2. `ARTBOT_HOME/artbot.sources.json`
+3. `INIT_CWD/artbot.sources.json`
+4. `./artbot.sources.json`
+
+CLI management:
+
+```bash
+artbot sources list --json
+artbot sources validate
+artbot sources add \
+  --name "Example Auction Archive" \
+  --url "https://example.com" \
+  --search-template "https://example.com/search?q={query}" \
+  --access public \
+  --source-class auction_house
+artbot sources remove --id example-auction-archive
+```
+
+Supported access modes:
+
+| Mode       | Behavior |
+| ---------- | -------- |
+| `public`   | Uses anonymous public access first, with browser recovery only when needed |
+| `auth`     | Keeps the source visible as `auth_required` until a matching auth profile/session exists |
+| `licensed` | Requires `--allow-licensed` and a matching `--licensed-integrations` entry |
+
+Example file:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "example-auction-archive",
+      "name": "Example Auction Archive",
+      "url": "https://example.com",
+      "searchTemplate": "https://example.com/search?q={query}",
+      "access": "public",
+      "sourceClass": "auction_house",
+      "sourcePageType": "listing",
+      "country": "Turkey",
+      "crawlHints": ["auction result", "artist"]
+    },
+    {
+      "id": "member-price-db",
+      "name": "Member Price DB",
+      "url": "https://member.example",
+      "searchTemplate": "https://member.example/search?q={query}",
+      "access": "auth",
+      "sourceClass": "database",
+      "authProfileId": "member-db"
+    }
+  ]
+}
+```
+
+Custom sources use the generic extraction path first. Promote important sources to dedicated adapters when they need source-specific parsing, fixtures, or canaries.
+
+---
+
+## Auth and Licensed Access
+
+Credentials do not belong in `artbot.sources.json`. Use `AUTH_PROFILES_JSON` and Playwright storage-state capture.
 
 ```json
 [
   {
-    "id": "artsy-profile",
+    "id": "member-db",
     "mode": "authorized",
-    "sourcePatterns": ["artsy"],
-    "cookieFile": "/secure/path/artsy-cookies.json"
+    "sourcePatterns": ["member.example"],
+    "storageStatePath": "/secure/path/member-db-state.json",
+    "sessionTtlMinutes": 360
   },
   {
     "id": "sanatfiyat-license",
     "mode": "licensed",
     "sourcePatterns": ["sanatfiyat"],
-    "storageStatePath": "/secure/path/sanatfiyat-state.json"
+    "storageStatePath": "/secure/path/sanatfiyat-state.json",
+    "sensitivity": "licensed"
   }
 ]
 ```
 
+Capture or refresh a login session:
+
+```bash
+artbot trust allow
+artbot auth list
+artbot auth status
+artbot auth capture member-db --url https://member.example/login
+```
+
+Research flags:
+
+| Flag | Purpose |
+| ---- | ------- |
+| `--auth-profile <id>` | Force a named auth profile for the run |
+| `--cookie-file <path>` | Inject a cookie JSON file |
+| `--manual-login` | Capture pre/post manual-login checkpoints |
+| `--allow-licensed` | Allow licensed integrations for this run |
+| `--licensed-integrations "Sanatfiyat,askART"` | Explicit licensed source allowlist |
+| `--analysis-mode comprehensive\|balanced\|fast` | Run depth and candidate caps |
+| `--price-normalization legacy\|usd_dual\|usd_nominal\|usd_2026` | Price output format |
+
+Interactive setup, TUI launch, auth capture, and backend start/stop require workspace trust:
+
+```bash
+artbot trust status
+artbot trust allow
+artbot trust deny
+```
+
 ---
 
-## 📂 Output Artifacts
+## Discovery and Source Coverage
 
-Each run produces a structured evidence directory:
+Built-in baseline sources include Turkey-first auction/platform adapters, global auction houses, global marketplaces, and optional probe/licensed sources. The current source matrix is tracked in [docs/source-matrix.md](docs/source-matrix.md).
 
-<details>
-<summary><strong>View evidence structure</strong></summary>
+Discovery layers:
 
-```
+- Built-in source adapters and source-specific candidate generation.
+- Local query variants and listing-to-lot expansion.
+- Optional web discovery through SearXNG, Brave, Tavily, and DuckDuckGo HTML fallback.
+- Dynamic host-fingerprint adapters for discovered hosts.
+- Local custom sources from `artbot.sources.json`.
+
+Useful environment variables:
+
+| Variable | Purpose |
+| -------- | ------- |
+| `WEB_DISCOVERY_ENABLED` | Enable web discovery where the selected analysis mode allows it |
+| `WEB_DISCOVERY_PROVIDER` | `none`, `searxng`, `brave`, or `tavily` |
+| `WEB_DISCOVERY_SECONDARY_PROVIDER` | Optional failover provider |
+| `SEARXNG_BASE_URL` | Local SearXNG endpoint, default `http://127.0.0.1:8080` |
+| `BRAVE_SEARCH_API_KEY` / `TAVILY_API_KEY` | Optional paid provider keys |
+| `FIRECRAWL_ENABLED` | Optional public-page cheap-fetch path, disabled by default |
+| `FIRECRAWL_BASE_URL` | Self-hosted Firecrawl endpoint |
+| `FIRECRAWL_SOURCE_FAMILIES` | Firecrawl allowlist by source family |
+
+Firecrawl is not used for authenticated/sessioned browsing. Login/session flows belong to Playwright browser capture.
+
+---
+
+## Output Artifacts
+
+Each run writes local artifacts under the configured runs root:
+
+```text
 var/runs/<run_id>/
 ├── results.json
-├── deep-research.json   # Optional experimental Gemini sidecar
 ├── report.md
+├── deep-research.json       # only when experimental deep research is enabled
+├── artifact-manifest.json
 └── evidence/
-    ├── screenshots/       # Page captures
-    ├── raw/               # Raw snapshots
-    ├── traces/            # (selective mode) Playwright traces
-    └── har/               # (selective mode) HAR archives
+    ├── screenshots/
+    ├── raw/
+    ├── traces/
+    └── har/
 ```
 
-> [!NOTE]
-> Attempt-level auth evidence fields (`pre_auth_screenshot_path`, `post_auth_screenshot_path`) are included when auth flows are used.
-</details>
+Attempts include source URL, canonical URL, access mode/status, extraction fields, parser/model metadata, confidence, acceptance/rejection reasons, and retained evidence paths. Auth/browser flows may include pre-auth and post-auth screenshot paths.
 
 ---
 
-## 🤖 Model Policy
+## Models and Deep Research
 
-| Variable                  | Purpose                                            |
-| ------------------------- | -------------------------------------------------- |
-| `MODEL_CHEAP_DEFAULT`     | Default model ID                                   |
-| `MODEL_CHEAP_FALLBACK`    | Fallback model ID                                  |
-| `STRUCTURED_LLM_PROVIDER` | `auto` \| `gemini` \| `openai_compatible`          |
-| `LLM_MODEL`               | Canonical OpenAI-compatible model ID               |
-| `LLM_BASE_URL`            | OpenAI-compatible endpoint (e.g., LM Studio, NVIDIA) |
-| `LLM_API_KEY`             | OpenAI-compatible auth token (`lm-studio` locally) |
-| `STAGEHAND_MODE`          | `DISABLED` \| `LOCAL` \| `BROWSERBASE`             |
-| `GEMINI_API_KEY`          | Gemini API key                                     |
-| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_ENABLED` | Enable post-run Gemini deep research |
-| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_PLANNER_MODEL` | Planner model (default `gemini-pro-latest`) |
-| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_WARN_ON_RUN` | Warn before expensive Gemini runs |
-| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_SPEND_CAP_REMINDER_USD` | Suggested AI Studio cap reminder |
-| `ARTBOT_EXPERIMENTAL_DEEP_RESEARCH_OPEN_FULL_REPORT` | Auto-open browser report after enriched runs |
+Core extraction can run with local or OpenAI-compatible model endpoints.
 
-### Experimental Gemini Deep Research
+| Variable | Purpose |
+| -------- | ------- |
+| `STRUCTURED_LLM_PROVIDER` | `auto`, `gemini`, or `openai_compatible` |
+| `LLM_BASE_URL` | OpenAI-compatible endpoint, for example LM Studio or NVIDIA |
+| `LLM_API_KEY` | API key; local LM Studio can use a placeholder |
+| `LLM_MODEL` | Canonical model id for OpenAI-compatible flows |
+| `STAGEHAND_MODE` | `DISABLED`, `LOCAL`, or `BROWSERBASE` |
+| `GEMINI_API_KEY` | Gemini API key for Gemini-backed extraction/deep research |
 
-- Opt in from `Settings > Experimental` in the TUI.
-- ArtBot always finishes normal browser research first.
-- If enabled, ArtBot runs `gemini-pro-latest` to build a deep-research brief, then sends the run summary plus that brief into Deep Research Max.
-- Output stays additive: it is written to `deep-research.json`, shown in CLI run summaries, and rendered in the browser report as `Experimental AI Research`.
-- This feature is cloud-based and expensive. Set a spend cap in Google AI Studio before heavy use.
+Experimental Gemini Deep Research is opt-in from the TUI settings. ArtBot completes the normal run first, writes `deep-research.json` beside `results.json`, and exposes the result through `runs show`, `runs watch`, `runs deep-research`, and the browser report.
 
-Inspect the result later with:
+This feature is cloud-based and can be expensive. Set a Google AI Studio spend cap before heavy use.
 
-```bash
-artbot runs deep-research --run-id <id>
-artbot runs deep-research --run-id <id> --web
+---
+
+## Repository Layout
+
+```text
+apps/
+  api/      Fastify API: health, research creation, plan preview, runs, storage, review, graph
+  worker/   Background run processor
+  cli/      Published npm CLI package
+packages/
+  auth-manager/       Auth profiles, cookies, encrypted storage-state handling
+  browser-core/       Playwright and Stagehand browser capture/discovery
+  browser-report/     Browser-rendered report UI
+  extraction/         Cheap fetch, Firecrawl transport, parsing helpers
+  normalization/      Currency, confidence, FX, normalization traces
+  orchestrator/       Run pipeline and artist-market inventory
+  report-generation/  Markdown report rendering
+  source-adapters/    Built-in deterministic and generic adapters
+  source-registry/    Discovery, source planning, source families, custom sources
+  storage/            SQLite persistence and artifact lifecycle
+  valuation/          Comparable ranking and valuation range generation
+docs/                 Architecture, ops, source matrix, roadmap, release docs
+skills/artbot-cli/    Repo-shipped Codex/OpenAI skill
 ```
 
-> [!WARNING]
-> No hard-model escalation path is enabled in v1.
-
 ---
 
-## 💰 Cost & Reliability Policy
+## Automation and Agent Use
 
-1. **Deterministic parser path first** — always prefer structured parsing over LLM extraction.
-2. **Firecrawl only when configured and useful** — not a default dependency.
-3. **Browser verification only when needed** — auth/session requirements or low-confidence results.
-4. **No brute force, credential stuffing, or unauthorized bypass behavior.**
-
----
-
-## 🧪 Testing
+Repo-local automation:
 
 ```bash
+pnpm --filter artbot dev -- --json doctor
+pnpm --filter artbot dev -- --json backend status
+pnpm --filter artbot dev -- --json sources list
+pnpm --filter artbot dev -- --json auth list
+pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --preview-only
+pnpm --filter artbot dev -- --json research artist --artist "Burhan Dogancay" --wait
+pnpm --filter artbot dev -- --json runs show --run-id <id>
+pnpm --filter artbot dev -- --json replay attempt --run-id <id>
+pnpm --filter artbot dev -- --json cleanup --dry-run
+pnpm --filter artbot dev -- --output-format stream-json runs watch --run-id <id>
+```
+
+Repo-specific automation guidance lives in [AGENTS.md](AGENTS.md). The reusable skill lives at [skills/artbot-cli](skills/artbot-cli). Install it explicitly by copying or symlinking it into the target agent skill directory; npm install does not write into agent home directories.
+
+---
+
+## Development
+
+Requirements:
+
+| Tool | Version |
+| ---- | ------- |
+| Node.js | 22+ |
+| pnpm | 10.x |
+| Playwright Chromium | Required for browser/auth capture flows |
+| Docker | Optional; useful for local SearXNG |
+
+Common commands:
+
+```bash
+pnpm install
+pnpm build
 pnpm test
+pnpm --filter @artbot/source-registry test
+pnpm --filter artbot test -- src/index.test.ts
+pnpm --filter artbot build
 ```
 
-Coverage includes:
-
-- Access status transitions
-- Auth/session helper behavior
-- Redaction
-- Normalization + deduplication
-- Adapter access-mode behavior
-
----
-
-## 🐳 Docker
+Manual local services:
 
 ```bash
-# Build the image
-docker build -t turkish-art-price-agent .
-
-# Or use Docker Compose
-docker compose up --build
+pnpm --filter @artbot/api start
+pnpm --filter @artbot/worker start
+pnpm --filter artbot dev -- tui
 ```
 
 ---
 
-## 🛠 Development
+## Documentation
 
-| Requirement | Version                        |
-| ----------- | ------------------------------ |
-| Node.js     | 22+                            |
-| pnpm        | 10.x                           |
-| Docker      | Recent (optional, recommended) |
-
-```bash
-pnpm install          # Install dependencies
-pnpm build            # Compile all workspaces
-pnpm dev              # Start dev servers (where supported)
-pnpm test             # Run monorepo test suite
-```
-
----
-
-## 📚 Documentation
-
-- [Docs Index](docs/README.md)
+- [Docs index](docs/README.md)
+- [Operations runbook](docs/ops.md)
+- [Source matrix](docs/source-matrix.md)
+- [Adapter authoring](docs/adapter-authoring.md)
+- [Roadmap](docs/roadmap.md)
 - [Changelog](CHANGELOG.md)
 
 ---
 
-## 🤝 Community
+## Security and Responsible Use
 
-- Contribution guide: [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md)
-- Support channels: [.github/SUPPORT.md](.github/SUPPORT.md)
-- Security reporting: [.github/SECURITY.md](.github/SECURITY.md)
+ArtBot automates browsing and data collection. Operators are responsible for:
 
----
+- respecting source terms, robots guidance, and rate limits;
+- using only accounts, cookies, subscriptions, and licenses they are authorized to use;
+- avoiding credential stuffing, bypass behavior, CAPTCHA evasion, or access-control circumvention;
+- keeping sensitive auth profiles and storage-state files out of git.
 
-## 🤝 Contributing
-
-Issues and pull requests are welcome! When opening a PR, please:
-
-- **Keep changes focused** and reasonably small.
-- **Add or update tests** when behavior changes.
-- **Update documentation** (this README or `docs/*`) when you change user-visible behavior.
+Found a security issue? Use the private reporting path in [.github/SECURITY.md](.github/SECURITY.md).
 
 ---
 
-## 🛡 Security & Responsible Use
+## License
 
-This project automates browsing and data collection. When using it, **you are responsible for**:
-
-- Respecting each site's **terms of service** and **robots.txt** guidance.
-- Using only accounts and licenses **you are authorized to use**.
-- Avoiding abusive traffic patterns or attempts to bypass access controls.
-
-> [!IMPORTANT]
-> 🔒 **Found a security issue?** Please open a private issue or contact the maintainer directly — do not disclose publicly first.
-
----
-
-## 📄 License
-
-Licensed under the **Apache License, Version 2.0**.
-See the [LICENSE](LICENSE) file for the full text.
+Licensed under the [Apache License 2.0](LICENSE).

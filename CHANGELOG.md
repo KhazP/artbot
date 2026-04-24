@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-04-24
+
+### Added
+- Local custom source configuration via `artbot.sources.json`, including public, auth-required, and licensed source modes.
+- `artbot sources list|add|validate|remove` for managing custom scrape/source websites from the CLI.
+- Custom sources now merge into source planning and preview output through the existing source registry.
+- `artbot auth capture <profile-id> --url <source-url>` for capturing login sessions against custom websites.
+
+### Changed
+- Auth-required custom sources remain visible as `auth_required` until a matching profile/session exists.
+- Root README and npm package README now document the current local backend, custom source, auth, discovery, and automation flows.
+
 ## [0.3.1] - 2026-04-16
 
 ### Fixed

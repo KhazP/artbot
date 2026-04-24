@@ -1,182 +1,163 @@
 # artbot
 
-CLI for running ArtBot market research locally.
+Local-first CLI for ArtBot art-market research, source discovery, evidence capture, and valuation support.
 
 ## Install
 
 ```bash
-# recommended: global CLI install
 npm install -g artbot
+artbot --help
+```
 
-# optional: one-off run without global install
+For a one-off check:
+
+```bash
 npx artbot@latest --help
 ```
 
-> npmjs.com may show `npm i artbot` in the sidebar. That installs `artbot` as a local project dependency.
-> For a globally available `artbot` command in your shell, use `npm install -g artbot`.
+The npm package includes the CLI plus bundled local API and worker runtime. No hosted ArtBot service is required. Local state is stored under `~/.artbot` by default.
 
 ## Requirements
 
 - Node.js 22+
-- An OpenAI-compatible model endpoint
+- An OpenAI-compatible model endpoint for model-backed extraction/setup paths
+- Playwright Chromium for auth capture and browser verification flows
 
-## Fastest setup
-
-ArtBot is designed to run with a local backend on your machine. No hosted ArtBot service is required.
-
-1. Choose an OpenAI-compatible provider:
-   - LM Studio on `http://127.0.0.1:1234/v1`
-   - NVIDIA at `https://integrate.api.nvidia.com/v1`
-   - any other OpenAI-compatible endpoint
-2. Start local services directly:
+## Fast Start
 
 ```bash
 artbot backend start
-```
-
-3. Check health:
-
-```bash
 artbot backend status
+artbot research artist --artist "Burhan Dogancay" --preview-only
+artbot research artist --artist "Burhan Dogancay" --wait
 ```
 
-4. Optional guided onboarding (interactive):
+Optional guided onboarding:
 
 ```bash
 artbot setup
 ```
 
-By default, `artbot setup` configures and can start a local API and worker on `http://localhost:4000`.
-The default local preset is LM Studio at `http://127.0.0.1:1234/v1`, and `artbot setup` will normalize `http://127.0.0.1:1234` automatically.
-The onboarding flow can also target NVIDIA or a custom OpenAI-compatible endpoint, and it persists `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `STAGEHAND_MODE`.
-Plan generation for research commands can take roughly 45-60 seconds on a cold start. Keep the command running until progress completes.
+`artbot setup` can configure local LM Studio, NVIDIA, or another OpenAI-compatible endpoint. Plan generation can take 45-60 seconds on a cold start.
 
-Experimental Gemini deep research is available under `Settings > Experimental` in the TUI. When enabled, ArtBot completes its normal browser run first, then generates a Gemini planner brief and a Deep Research Max sidecar report. This is cloud-based and expensive; set a Google AI Studio spend cap before heavy use.
+## Commands
 
-ArtBot stores its local state here:
-
-```text
-~/.artbot
-```
-
-That directory contains:
-
-- `.env`
-- `data/artbot.db`
-- `runs/`
-- `logs/`
-- `playwright/.auth/`
-
-## Backend commands
+Bare `artbot` opens the interactive TUI in an interactive terminal. Use explicit subcommands for automation.
 
 ```bash
+# Backend and health
+artbot doctor
 artbot backend start
 artbot backend status
 artbot backend stop
-```
 
-`artbot local start|status|stop` is also available as an alias.
+# Research
+artbot research artist --artist "Fikret Mualla" --preview-only
+artbot research artist --artist "Fikret Mualla" --wait
+artbot research work --artist "Bedri Rahmi Eyuboglu" --title "Mosaic" --wait
 
-## Usage
-
-```bash
-artbot
-artbot tui
-artbot runs list
-artbot --json runs list --limit 20
-artbot --output-format stream-json runs watch --run-id <id>
-artbot research artist --artist "Burhan Dogancay" --wait
+# Runs and reports
+artbot runs list --limit 20
 artbot runs show --run-id <id>
-artbot --json runs show --run-id <id>
 artbot runs watch --run-id <id> --interval 2
 artbot runs deep-research --run-id <id>
 artbot runs deep-research --run-id <id> --web
+
+# Storage
 artbot runs pin --run-id <id>
 artbot runs unpin --run-id <id>
 artbot storage
 artbot cleanup --dry-run
-artbot sessions list
-artbot trust status
+
+# Debug/review
+artbot replay attempt --run-id <id>
+artbot review queue --run-id <id>
+artbot graph explain --run-id <id> --cluster-id <cluster-id>
+artbot canaries run
 ```
 
-Bare `artbot` opens the interactive UI in an interactive terminal. Use `artbot tui` as an explicit alias.
-
-## Interactive UI (Local-First)
-
-The TUI status strip is tuned for local-first usage:
-
-- persistent `CLOUD OFFLINE (LOCAL-ONLY)` status,
-- `PRIVACY LOCKED` badge,
-- sandbox indicator (`ISOLATED: ...`),
-- active model metadata with detected quantization (when available),
-- stable activity status during active inference,
-- static run-stage progress markers while research is active.
-
-This release does not include local hardware telemetry in the UI.
-
-Optional environment flags for the sandbox badge:
+Global machine-output options:
 
 ```bash
-export ARTBOT_AIR_GAPPED=1          # shows ISOLATED: NO-NETWORK
-export ARTBOT_SANDBOX_MODE=landlock # shows ISOLATED: LANDLOCK
-```
-
-## Run retention and storage visibility
-
-Use run pinning to preserve a completed run and retained artifacts through automatic cleanup and manual GC:
-
-```bash
-artbot runs pin --run-id <id>
-artbot runs unpin --run-id <id>
-```
-
-Use storage visibility to inspect disk state before cleanup:
-
-```bash
-artbot storage
-artbot --json storage
-artbot cleanup --dry-run
-```
-
-`artbot storage` reports:
-
-- total `var/` usage,
-- pinned run count,
-- expirable run count,
-- last cleanup reclaimed bytes and timestamp.
-
-## Automation / Agents
-
-Prefer explicit commands plus `--json`:
-
-```bash
-artbot --json doctor
-artbot --json backend status
-artbot --json auth list
-artbot --json auth status
-artbot --json research artist --artist "Burhan Dogancay" --preview-only
-artbot --json research artist --artist "Burhan Dogancay" --wait
-artbot --json runs list --limit 20
-artbot --json runs show --run-id <id>
-artbot --json replay attempt --run-id <id>
-artbot --json runs pin --run-id <id>
-artbot --json runs unpin --run-id <id>
-artbot --json storage
-artbot --json cleanup --dry-run
+artbot --json runs list
 artbot --output-format stream-json runs watch --run-id <id>
 ```
 
-If an automation wrapper must hard-disable the interactive UI, pass `--no-tui` or set:
+Set `ARTBOT_NO_TUI=1` or pass `--no-tui` when an automation wrapper must not open interactive prompts.
+
+## Custom Source Websites
+
+Add operator-controlled websites to `artbot.sources.json`:
 
 ```bash
-export ARTBOT_NO_TUI=1
+artbot sources list --json
+artbot sources validate
+artbot sources add \
+  --name "Example Auction Archive" \
+  --url "https://example.com" \
+  --search-template "https://example.com/search?q={query}" \
+  --access public \
+  --source-class auction_house
+artbot sources remove --id example-auction-archive
 ```
 
-When `--no-tui` (or `ARTBOT_NO_TUI=1`) is active, `artbot setup` will not open interactive prompts and instead prints non-interactive guidance.
+Config path resolution:
 
-Use `--output-format stream-json` when another tool wants newline-delimited lifecycle events instead of one final JSON payload.
+1. `ARTBOT_SOURCES_PATH`
+2. `ARTBOT_HOME/artbot.sources.json`
+3. `INIT_CWD/artbot.sources.json`
+4. `./artbot.sources.json`
 
-Interactive setup, auth capture, TUI launch, and local backend start/stop require an explicitly trusted workspace:
+Supported access modes:
+
+- `public`: anonymous public access first.
+- `auth`: source remains visible as `auth_required` until a matching session exists.
+- `licensed`: requires `--allow-licensed` and matching `--licensed-integrations`.
+
+Example:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "member-price-db",
+      "name": "Member Price DB",
+      "url": "https://member.example",
+      "searchTemplate": "https://member.example/search?q={query}",
+      "access": "auth",
+      "sourceClass": "database",
+      "authProfileId": "member-db"
+    }
+  ]
+}
+```
+
+Do not store passwords or API secrets in `artbot.sources.json`.
+
+## Auth Capture
+
+Configure auth profiles with `AUTH_PROFILES_JSON`, then capture browser storage state:
+
+```bash
+artbot trust allow
+artbot auth list
+artbot auth status
+artbot auth capture member-db --url https://member.example/login
+```
+
+Research flags:
+
+```bash
+artbot research artist \
+  --artist "Burhan Dogancay" \
+  --auth-profile member-db \
+  --allow-licensed \
+  --licensed-integrations "Sanatfiyat" \
+  --wait
+```
+
+Interactive setup, TUI launch, auth capture, and backend start/stop require workspace trust:
 
 ```bash
 artbot trust status
@@ -184,50 +165,48 @@ artbot trust allow
 artbot trust deny
 ```
 
-Saved local sessions let operators resume the Ink shell or a `runs watch` flow:
+## Local State
 
-```bash
-artbot sessions list
-artbot sessions resume
-artbot sessions prune --keep 10
+By default, ArtBot stores runtime state under:
+
+```text
+~/.artbot
 ```
 
-## Repo Skill Install
+Expected contents include:
 
-The repo ships a reusable ArtBot skill at `skills/artbot-cli`.
+- `.env`
+- `data/artbot.db`
+- `runs/`
+- `logs/`
+- `playwright/.auth/`
+- `artbot.sources.json` when custom sources are configured under `ARTBOT_HOME`
 
-- Project-local install: point your agent tooling at this repo path directly.
-- Copy install: copy `skills/artbot-cli` into the target skill directory.
-- Symlink install: symlink `skills/artbot-cli` into the target skill directory when you want updates from this clone to stay live.
+## Models
 
-Codex example:
+Core setup supports local LM Studio, NVIDIA, and custom OpenAI-compatible endpoints through:
 
-```bash
-ln -s /path/to/CCGAgent/skills/artbot-cli ~/.codex/skills/artbot-cli
-```
+- `LLM_BASE_URL`
+- `LLM_API_KEY`
+- `LLM_MODEL`
+- `STRUCTURED_LLM_PROVIDER`
+- `STAGEHAND_MODE`
 
-Supported agent metadata in this repo currently targets Codex/OpenAI through `skills/artbot-cli/agents/openai.yaml`. Clone users should install the skill explicitly; the npm package does not write into agent home directories.
-
-## Remote API override
-
-If you already run an ArtBot API somewhere else, point the CLI at it with `API_BASE_URL`:
-
-```bash
-export API_BASE_URL=https://your-artbot-api.example.com
-artbot runs list
-```
-
-## Auth capture
-
-Some sources need saved browser sessions. Capture them with:
+Experimental Gemini Deep Research is opt-in from the TUI. It runs after normal research, writes `deep-research.json`, and can be inspected with:
 
 ```bash
-artbot auth list
-artbot auth capture <profile-id>
+artbot runs deep-research --run-id <id>
+artbot runs deep-research --run-id <id> --web
 ```
 
-If Playwright has not installed a browser yet on your machine, run:
+This feature is cloud-based and can be expensive. Set a Google AI Studio spend cap before heavy use.
 
-```bash
-playwright install chromium
-```
+## Responsible Use
+
+Use only public, credentialed, or licensed access that you are authorized to use. Do not use ArtBot for credential stuffing, CAPTCHA evasion, paywall bypass, or other access-control circumvention.
+
+## Links
+
+- Repository: https://github.com/KhazP/artbot
+- npm: https://www.npmjs.com/package/artbot
+- License: Apache-2.0

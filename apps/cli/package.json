@@ -1,6 +1,6 @@
 {
   "name": "artbot",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": false,
   "description": "CLI for running ArtBot market research locally.",
   "author": "Alp Yalay <contact@alpyalay.org>",
