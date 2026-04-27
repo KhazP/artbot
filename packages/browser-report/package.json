@@ -23,7 +23,7 @@
     "lucide-react": "latest",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "zod": "^3.25.76"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/react": "^19.2.2",
