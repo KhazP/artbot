@@ -14,9 +14,9 @@
     "@artbot/auth-manager": "workspace:*",
     "@artbot/observability": "workspace:*",
     "@artbot/shared-types": "workspace:*",
-    "playwright": "^1.52.0"
+    "playwright": "^1.65.0"
   },
   "optionalDependencies": {
-    "@browserbasehq/stagehand": "^2.5.8"
+    "@browserbasehq/stagehand": "^4.4.0"
   }
 }

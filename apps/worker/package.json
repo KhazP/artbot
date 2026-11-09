@@ -13,6 +13,6 @@
   "dependencies": {
     "@artbot/orchestrator": "workspace:*",
     "@artbot/storage": "workspace:*",
-    "dotenv": "^16.4.7"
+    "dotenv": "^18.0.9"
   }
 }
