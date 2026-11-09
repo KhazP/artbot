@@ -19,14 +19,14 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^22.14.1",
-    "eslint": "^10.2.0",
-    "globals": "^17.4.0",
-    "prettier": "^3.5.3",
-    "tsx": "^4.19.3",
-    "turbo": "^2.5.0",
-    "typescript": "^5.8.3",
-    "typescript-eslint": "^8.58.1",
-    "vitest": "^3.1.1"
+    "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "turbo": "^2.11.10",
+    "typescript": "^7.0.2",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.1.0"
   }
 }
